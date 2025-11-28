@@ -28,6 +28,37 @@ use std::path::Path;
 
 const SAMPLE_RATE: usize = 16000;
 
+/// Find the last sentence boundary (., !, ?) before the overlap start time.
+/// Returns the index of the last token that ends a sentence, or None if no boundary found.
+fn find_last_sentence_boundary(tokens: &[TimedToken], overlap_start_time: f32) -> Option<usize> {
+    let mut last_boundary_idx: Option<usize> = None;
+
+    for (i, token) in tokens.iter().enumerate() {
+        // Only consider tokens that end before the overlap zone
+        if token.end >= overlap_start_time {
+            break;
+        }
+
+        // Check if this token ends a sentence
+        let text = token.text.trim();
+        if text.ends_with('.') || text.ends_with('!') || text.ends_with('?') {
+            last_boundary_idx = Some(i);
+        }
+    }
+
+    // If no sentence boundary found but we have tokens before overlap,
+    // fall back to the last token before overlap (better than nothing)
+    if last_boundary_idx.is_none() {
+        for (i, token) in tokens.iter().enumerate().rev() {
+            if token.end < overlap_start_time {
+                return Some(i);
+            }
+        }
+    }
+
+    last_boundary_idx
+}
+
 /// Configuration for quasi-realtime TDT processing
 #[derive(Debug, Clone)]
 pub struct RealtimeTDTConfig {
@@ -112,11 +143,13 @@ pub struct RealtimeTDT {
 
     // State tracking
     total_samples_processed: usize,
-    last_processed_end: f32,
+    /// Time up to which we've confirmed and emitted final text
+    confirmed_until: f32,
+    /// Tokens from the overlap zone, waiting to be re-transcribed
+    pending_tokens: Vec<TimedToken>,
 
     // Accumulated results
     finalized_segments: Vec<Segment>,
-    pending_text: String,
 }
 
 impl RealtimeTDT {
@@ -134,23 +167,22 @@ impl RealtimeTDT {
             config,
             audio_buffer: Vec::new(),
             total_samples_processed: 0,
-            last_processed_end: 0.0,
+            confirmed_until: 0.0,
+            pending_tokens: Vec::new(),
             finalized_segments: Vec::new(),
-            pending_text: String::new(),
         })
     }
 
     /// Push audio samples and get transcription results
     ///
-    /// Returns results when enough audio has accumulated for processing.
-    /// Call this repeatedly with audio chunks (any size).
+    /// Uses a sliding window approach: processes accumulated audio and emits
+    /// confirmed segments while keeping a buffer for context.
     pub fn push_audio(&mut self, samples: &[f32]) -> Result<ChunkResult> {
         self.audio_buffer.extend_from_slice(samples);
 
         let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
-        let chunk_samples = (self.config.chunk_size_secs * SAMPLE_RATE as f32) as usize;
-        let overlap_samples = (self.config.overlap_secs * SAMPLE_RATE as f32) as usize;
         let min_samples = (self.config.min_buffer_secs * SAMPLE_RATE as f32) as usize;
+        let overlap_samples = (self.config.overlap_secs * SAMPLE_RATE as f32) as usize;
 
         // Check if we have enough audio to process
         if self.audio_buffer.len() < min_samples {
@@ -162,81 +194,102 @@ impl RealtimeTDT {
             });
         }
 
-        // Process chunks while we have enough audio
+        // Process the entire buffer to get full context
+        let result = self.model.transcribe_samples(
+            self.audio_buffer.clone(),
+            SAMPLE_RATE as u32,
+            1, // mono
+            Some(TimestampMode::Words),
+        )?;
+
+        // Adjust timestamps to global time (from stream start)
+        let global_offset = self.total_samples_processed as f32 / SAMPLE_RATE as f32;
+        let adjusted_tokens: Vec<TimedToken> = result.tokens
+            .into_iter()
+            .map(|mut t| {
+                t.start += global_offset;
+                t.end += global_offset;
+                t
+            })
+            .collect();
+
+        // Determine safe zone: everything except the last overlap_secs
+        let buffer_end_time = global_offset + buffer_secs;
+        let safe_until = buffer_end_time - self.config.overlap_secs;
+
+        // Split tokens: safe zone goes to segments, overlap stays pending
+        let mut safe_tokens: Vec<TimedToken> = Vec::new();
+        let mut new_pending: Vec<TimedToken> = Vec::new();
+
+        for token in adjusted_tokens {
+            if token.end <= self.confirmed_until {
+                // Already emitted, skip
+                continue;
+            } else if token.end < safe_until {
+                safe_tokens.push(token);
+            } else {
+                new_pending.push(token);
+            }
+        }
+
         let mut new_segments = Vec::new();
 
-        while self.audio_buffer.len() >= chunk_samples {
-            // Extract chunk for processing
-            let chunk: Vec<f32> = self.audio_buffer[..chunk_samples].to_vec();
+        // Find sentence boundary for clean output
+        let sentence_end_idx = find_last_sentence_boundary(&safe_tokens, safe_until);
 
-            // Calculate global time offset for this chunk
-            let chunk_start_time = self.total_samples_processed as f32 / SAMPLE_RATE as f32;
+        let (final_tokens, extra_pending) = if let Some(idx) = sentence_end_idx {
+            let (final_part, extra) = safe_tokens.split_at(idx + 1);
+            (final_part.to_vec(), extra.to_vec())
+        } else if !safe_tokens.is_empty() {
+            // No sentence boundary - emit all safe tokens to avoid infinite buffering
+            (safe_tokens, Vec::new())
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
-            // Process through TDT model
-            let result = self.model.transcribe_samples(
-                chunk,
-                SAMPLE_RATE as u32,
-                1, // mono
-                Some(TimestampMode::Words),
-            )?;
-
-            // Adjust timestamps to global time
-            let adjusted_tokens: Vec<TimedToken> = result.tokens
-                .into_iter()
-                .map(|mut t| {
-                    t.start += chunk_start_time;
-                    t.end += chunk_start_time;
-                    t
-                })
-                .collect();
-
-            // Determine which tokens are in the "final" zone vs overlap zone
-            let overlap_start_time = chunk_start_time + self.config.chunk_size_secs - self.config.overlap_secs;
-
-            // Split tokens into final and pending
-            let (final_tokens, pending_tokens): (Vec<_>, Vec<_>) = adjusted_tokens
-                .into_iter()
-                .partition(|t| t.end < overlap_start_time);
-
-            // Create segment from final tokens
-            if !final_tokens.is_empty() {
-                let segment_text: String = final_tokens
-                    .iter()
-                    .map(|t| t.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                let segment = Segment {
-                    text: segment_text,
-                    start_time: final_tokens.first().map(|t| t.start).unwrap_or(chunk_start_time),
-                    end_time: final_tokens.last().map(|t| t.end).unwrap_or(overlap_start_time),
-                    tokens: final_tokens,
-                    is_final: true,
-                };
-
-                self.finalized_segments.push(segment.clone());
-                new_segments.push(segment);
-            }
-
-            // Store pending tokens for overlap handling
-            self.pending_text = pending_tokens
+        // Create segment from final tokens
+        if !final_tokens.is_empty() {
+            let segment_text: String = final_tokens
                 .iter()
                 .map(|t| t.text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
 
-            // Advance buffer, keeping overlap for next chunk
-            let advance_samples = chunk_samples - overlap_samples;
-            self.audio_buffer.drain(..advance_samples);
-            self.total_samples_processed += advance_samples;
-            self.last_processed_end = chunk_start_time + self.config.chunk_size_secs - self.config.overlap_secs;
+            let segment = Segment {
+                text: segment_text,
+                start_time: final_tokens.first().map(|t| t.start).unwrap_or(global_offset),
+                end_time: final_tokens.last().map(|t| t.end).unwrap_or(safe_until),
+                tokens: final_tokens.clone(),
+                is_final: true,
+            };
+
+            // Update confirmed_until
+            if let Some(last) = final_tokens.last() {
+                self.confirmed_until = last.end;
+            }
+
+            self.finalized_segments.push(segment.clone());
+            new_segments.push(segment);
+        }
+
+        // Update pending tokens
+        self.pending_tokens = extra_pending;
+        self.pending_tokens.extend(new_pending);
+
+        // Trim buffer to keep only overlap region (to limit memory/reprocessing)
+        // Keep enough audio so next iteration has full context
+        let max_buffer = (self.config.chunk_size_secs * SAMPLE_RATE as f32) as usize;
+        if self.audio_buffer.len() > max_buffer {
+            let drain_amount = self.audio_buffer.len() - overlap_samples;
+            self.audio_buffer.drain(..drain_amount);
+            self.total_samples_processed += drain_amount;
         }
 
         Ok(ChunkResult {
             segments: new_segments,
             full_text: self.get_full_text(),
             buffer_time: self.audio_buffer.len() as f32 / SAMPLE_RATE as f32,
-            needs_more_audio: self.audio_buffer.len() < chunk_samples,
+            needs_more_audio: true,
         })
     }
 
@@ -274,8 +327,14 @@ impl RealtimeTDT {
 
         let mut new_segments = Vec::new();
 
-        if !adjusted_tokens.is_empty() {
-            let segment_text: String = adjusted_tokens
+        // Filter out tokens we've already confirmed
+        let final_tokens: Vec<TimedToken> = adjusted_tokens
+            .into_iter()
+            .filter(|t| t.end > self.confirmed_until)
+            .collect();
+
+        if !final_tokens.is_empty() {
+            let segment_text: String = final_tokens
                 .iter()
                 .map(|t| t.text.as_str())
                 .collect::<Vec<_>>()
@@ -283,9 +342,9 @@ impl RealtimeTDT {
 
             let segment = Segment {
                 text: segment_text,
-                start_time: adjusted_tokens.first().map(|t| t.start).unwrap_or(chunk_start_time),
-                end_time: adjusted_tokens.last().map(|t| t.end).unwrap_or(chunk_start_time),
-                tokens: adjusted_tokens,
+                start_time: final_tokens.first().map(|t| t.start).unwrap_or(chunk_start_time),
+                end_time: final_tokens.last().map(|t| t.end).unwrap_or(chunk_start_time),
+                tokens: final_tokens,
                 is_final: true,
             };
 
@@ -293,7 +352,7 @@ impl RealtimeTDT {
             new_segments.push(segment);
         }
 
-        self.pending_text.clear();
+        self.pending_tokens.clear();
 
         Ok(ChunkResult {
             segments: new_segments,
@@ -316,11 +375,18 @@ impl RealtimeTDT {
             .collect::<Vec<_>>()
             .join(" ");
 
-        if !self.pending_text.is_empty() {
-            if !text.is_empty() {
+        // Append pending tokens
+        if !self.pending_tokens.is_empty() {
+            let pending_text: String = self.pending_tokens
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if !text.is_empty() && !pending_text.is_empty() {
                 text.push(' ');
             }
-            text.push_str(&self.pending_text);
+            text.push_str(&pending_text);
         }
 
         text
@@ -335,9 +401,9 @@ impl RealtimeTDT {
     pub fn reset(&mut self) {
         self.audio_buffer.clear();
         self.total_samples_processed = 0;
-        self.last_processed_end = 0.0;
+        self.confirmed_until = 0.0;
+        self.pending_tokens.clear();
         self.finalized_segments.clear();
-        self.pending_text.clear();
     }
 }
 
