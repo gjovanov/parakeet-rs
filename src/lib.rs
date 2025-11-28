@@ -54,9 +54,15 @@ mod model_eou;
 mod model_tdt;
 mod parakeet;
 mod parakeet_eou;
+pub mod parakeet_eou_fast;
 mod parakeet_tdt;
 #[cfg(feature = "sortformer")]
 pub mod sortformer;
+#[cfg(feature = "sortformer")]
+pub mod sortformer_stream;
+#[cfg(feature = "sortformer")]
+pub mod realtime;
+pub mod realtime_tdt;
 mod timestamps;
 mod transcriber;
 mod vocab;
@@ -74,3 +80,21 @@ pub use decoder::{ParakeetDecoder, TimedToken, TranscriptionResult};
 pub use model::ParakeetModel;
 pub use model_eou::ParakeetEOUModel;
 pub use parakeet_eou::ParakeetEOU;
+pub use parakeet_eou_fast::{
+    ParakeetEOUFast, StreamingConfig, StreamingResult, RECOMMENDED_CHUNK_MS,
+    RECOMMENDED_CHUNK_SAMPLES,
+};
+
+#[cfg(feature = "sortformer")]
+pub use sortformer_stream::{SortformerStream, SortformerStreamBuilder, SpeakerPrediction, SpeakerState};
+
+#[cfg(feature = "sortformer")]
+pub use realtime::{
+    RealtimeCallback, RealtimeConfig, RealtimeResult, RealtimeTranscriber,
+    SimplifiedRealtimeTranscriber, Speaker, SpeakerUpdate,
+};
+
+pub use realtime_tdt::{ChunkResult, RealtimeTDT, RealtimeTDTConfig, Segment};
+
+#[cfg(feature = "sortformer")]
+pub use realtime_tdt::{DiarizedChunkResult, DiarizedSegment, RealtimeTDTDiarized};
