@@ -1,0 +1,83 @@
+# Multi-stage Dockerfile for parakeet-rs WebRTC transcriber
+# Build: docker build -f docker/Dockerfile.transcriber -t parakeet-transcriber .
+
+# ==============================================================================
+# Stage 1: Build environment
+# ==============================================================================
+FROM rust:latest AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    cmake \
+    clang \
+    pkg-config \
+    libssl-dev \
+    libopus-dev \
+    libasound2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Cargo files first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy source for dependency compilation
+RUN mkdir -p src examples && \
+    echo "fn main() {}" > src/lib.rs && \
+    echo "fn main() {}" > examples/webrtc_transcriber.rs
+
+# Build dependencies only (cache layer)
+RUN cargo build --release --example webrtc_transcriber --features sortformer 2>/dev/null || true
+
+# Remove dummy source
+RUN rm -rf src examples
+
+# Copy actual source code
+COPY src/ ./src/
+COPY examples/ ./examples/
+
+# Build release binary with sortformer feature
+RUN cargo build --release --example webrtc_transcriber --features sortformer
+
+# ==============================================================================
+# Stage 2: Runtime environment
+# ==============================================================================
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    libopus0 \
+    ca-certificates \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/examples/webrtc_transcriber /app/
+
+# Copy frontend files
+COPY frontend/ /app/frontend/
+
+# Create directories for model volumes
+RUN mkdir -p /app/models/tdt /app/models/diarization
+
+# Expose HTTP/WebSocket port
+EXPOSE 8080
+
+# Environment variables
+ENV RUST_LOG=info
+ENV TDT_MODEL_PATH=/app/models/tdt
+ENV DIAR_MODEL_PATH=/app/models/diarization
+ENV TURN_SERVER=turn:coturn:3478
+ENV TURN_USERNAME=parakeet
+ENV TURN_PASSWORD=parakeet123
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Default command (can be overridden)
+ENTRYPOINT ["/app/webrtc_transcriber"]
+CMD ["--tdt-model", "/app/models/tdt", "--diar-model", "/app/models/diarization/model.onnx", "--low-latency", "--frontend", "/app/frontend"]

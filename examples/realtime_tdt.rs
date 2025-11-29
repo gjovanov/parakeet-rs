@@ -45,13 +45,17 @@ struct Args {
     #[arg(long, default_value = "diar_streaming_sortformer_4spk-v2.onnx")]
     diar_model: String,
 
-    /// Chunk size in seconds
-    #[arg(long, default_value = "10")]
-    chunk: f32,
+    /// Ring buffer size in seconds
+    #[arg(long, default_value = "15")]
+    buffer: f32,
 
-    /// Overlap between chunks in seconds
+    /// Process interval (how often to transcribe) in seconds
     #[arg(long, default_value = "2")]
-    overlap: f32,
+    interval: f32,
+
+    /// Confirm threshold (safe zone) in seconds
+    #[arg(long, default_value = "3")]
+    confirm: f32,
 
     /// Use low-latency preset (5s chunks)
     #[arg(long)]
@@ -83,22 +87,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine config based on presets
     let config = if args.low_latency {
-        println!("Using low-latency mode (5s chunks, 1s overlap)");
+        println!("Using low-latency mode (10s buffer, 1.5s interval, 2s confirm)");
         parakeet_rs::RealtimeTDTConfig::low_latency()
     } else if args.high_quality {
-        println!("Using high-quality mode (15s chunks, 3s overlap)");
+        println!("Using high-quality mode (20s buffer, 3s interval, 4s confirm)");
         parakeet_rs::RealtimeTDTConfig::high_quality()
     } else {
         parakeet_rs::RealtimeTDTConfig {
-            chunk_size_secs: args.chunk,
-            overlap_secs: args.overlap,
-            min_buffer_secs: args.chunk,
-            emit_partials: true,
+            buffer_size_secs: args.buffer,
+            process_interval_secs: args.interval,
+            confirm_threshold_secs: args.confirm,
         }
     };
 
-    println!("Config: {:.1}s chunks, {:.1}s overlap", config.chunk_size_secs, config.overlap_secs);
-    println!("Expected latency: ~{:.1}s", config.chunk_size_secs + 1.0);
+    println!("Config: {:.1}s buffer, {:.1}s interval, {:.1}s confirm threshold",
+        config.buffer_size_secs, config.process_interval_secs, config.confirm_threshold_secs);
+    println!("Expected latency: ~{:.1}s", config.confirm_threshold_secs + config.process_interval_secs);
     println!();
 
     // Load audio
