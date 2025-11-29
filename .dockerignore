@@ -1,0 +1,65 @@
+# Docker build exclusions for parakeet-rs
+# This reduces build context size and speeds up builds
+
+# Build artifacts
+target/
+*.pdb
+
+# Rust cache
+.cargo/
+
+# Models (mounted as volumes instead)
+tdt/
+*.onnx
+
+# Audio/video files
+*.wav
+*.mp3
+*.mp4
+*.webm
+*.ogg
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+tests/
+test_*.py
+*_test.rs
+
+# Logs and temp files
+*.log
+tmp/
+temp/
+
+# Docker files (not needed in context for Dockerfiles)
+# Note: docker-compose.yml is excluded but Dockerfiles are needed
+docker-compose*.yml
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.circleci/
+
+# Misc
+*.bak
+*.orig
+PLAN_*.md

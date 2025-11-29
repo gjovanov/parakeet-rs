@@ -1,0 +1,93 @@
+# Docker Compose for parakeet-rs WebRTC Transcription
+# Usage:
+#   docker-compose up -d          # Start all services
+#   docker-compose logs -f        # View logs
+#   docker-compose down           # Stop all services
+#
+# To stream audio:
+#   ffmpeg -i audio.wav -f s16le -ar 16000 -ac 1 - | \
+#     docker exec -i parakeet-transcriber /app/webrtc_transcriber \
+#       --tdt-model /app/models/tdt --low-latency
+
+# version: '3.8'  # Obsolete, removed
+
+services:
+  # TURN/STUN server for WebRTC NAT traversal
+  coturn:
+    image: coturn/coturn:4.6
+    container_name: parakeet-turn
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: -c /etc/coturn/turnserver.conf
+    healthcheck:
+      test: ["CMD", "turnadmin", "-l"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # WebRTC transcription server
+  transcriber:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.transcriber
+    container_name: parakeet-transcriber
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount model directories (read-only)
+      - ./tdt:/app/models/tdt:ro
+      - ./diar_sortformer_4spk-v1.onnx:/app/models/diarization/model.onnx:ro
+    environment:
+      - RUST_LOG=info
+      - TURN_SERVER=turn:127.0.0.1:3478
+      - TURN_USERNAME=parakeet
+      - TURN_PASSWORD=parakeet123
+    depends_on:
+      coturn:
+        condition: service_started
+    # Override entrypoint to keep container running for manual audio streaming
+    entrypoint: ["sleep", "infinity"]
+    # stdin_open: true allows piping audio to the container
+    stdin_open: true
+    tty: true
+
+  # Frontend nginx server
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: parakeet-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - transcriber
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  default:
+    name: parakeet-webrtc
+    driver: bridge
+
+# Volume definitions for models (alternative to bind mounts)
+# Uncomment and adjust paths if using named volumes
+# volumes:
+#   tdt-model:
+#     driver: local
+#     driver_opts:
+#       type: none
+#       o: bind
+#       device: /path/to/tdt
+#   diarization-model:
+#     driver: local
+#     driver_opts:
+#       type: none
+#       o: bind
+#       device: /path/to/diar_sortformer_4spk-v1.onnx
