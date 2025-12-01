@@ -10,3 +10,5 @@ DS_Store
 *.wav
 *.txt
 *.onnx.data.env
+.env
+*.data
