@@ -1,32 +1,24 @@
 # Docker Compose for parakeet-rs WebRTC Transcription
-# Usage:
-#   docker-compose up -d          # Start all services
-#   docker-compose logs -f        # View logs
-#   docker-compose down           # Stop all services
 #
-# To stream audio:
-#   ffmpeg -i audio.wav -f s16le -ar 16000 -ac 1 - | \
-#     docker exec -i parakeet-transcriber /app/webrtc_transcriber \
-#       --tdt-model /app/models/tdt --low-latency
-
-# version: '3.8'  # Obsolete, removed
+# Configuration is done entirely via environment variables.
+# See docs/webrtc-transcription-architecture.md for full documentation.
+#
+# Usage:
+#   # Start the container
+#   docker compose up -d
+#
+#   # Run the transcriber with audio
+#   docker exec parakeet-transcriber sh -c \
+#     'ffmpeg -re -i /tmp/broadcast_2.wav -f s16le -ar 16000 -ac 1 - 2>/dev/null | \
+#      /app/webrtc_transcriber --speedy'
+#
+#   # View logs
+#   docker compose logs -f transcriber
+#
+#   # Stop all services
+#   docker compose down
 
 services:
-  # TURN/STUN server for WebRTC NAT traversal
-  coturn:
-    image: coturn/coturn:4.6
-    container_name: parakeet-turn
-    restart: unless-stopped
-    network_mode: host
-    volumes:
-      - ./docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
-    command: -c /etc/coturn/turnserver.conf
-    healthcheck:
-      test: ["CMD", "turnadmin", "-l"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
   # WebRTC transcription server
   transcriber:
     build:
@@ -34,60 +26,55 @@ services:
       dockerfile: docker/Dockerfile.transcriber
     container_name: parakeet-transcriber
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+
+    # Use host networking for WebRTC UDP media traffic
+    network_mode: host
+
     volumes:
       # Mount model directories (read-only)
       - ./tdt:/app/models/tdt:ro
-      - ./diar_sortformer_4spk-v1.onnx:/app/models/diarization/model.onnx:ro
+      - ./diar_streaming_sortformer_4spk-v2.onnx:/app/models/diarization/model.onnx:ro
+      # Mount audio files for testing (optional)
+      - ./broadcast_2.wav:/tmp/broadcast_2.wav:ro
+
     environment:
-      - RUST_LOG=info
-      - TURN_SERVER=turn:127.0.0.1:3478
-      - TURN_USERNAME=parakeet
-      - TURN_PASSWORD=parakeet123
-    depends_on:
-      coturn:
-        condition: service_started
-    # Override entrypoint to keep container running for manual audio streaming
-    entrypoint: ["sleep", "infinity"]
+      # Server configuration
+      - PORT=${PORT}
+      - PUBLIC_IP=${PUBLIC_IP}
+      - FRONTEND_PATH=/app/frontend
+
+      # Model paths (match volume mounts)
+      - TDT_MODEL_PATH=/app/models/tdt
+      - DIAR_MODEL_PATH=/app/models/diarization/model.onnx
+
+      # Transcription mode: set to "1" for speedy mode (recommended)
+      - SPEEDY_MODE=${SPEEDY_MODE}
+
+      # TURN server for NAT traversal (optional but recommended for public access)
+      - TURN_SERVER=${TURN_SERVER}
+      - TURN_USERNAME=${TURN_USERNAME}
+      - TURN_PASSWORD=${TURN_PASSWORD}
+
+      # Logging
+      - RUST_LOG=${RUST_LOG}
+
+    # Override entrypoint to keep container running
+    # The transcriber will be started manually via docker exec
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+
     # stdin_open: true allows piping audio to the container
     stdin_open: true
     tty: true
 
-  # Frontend nginx server
-  frontend:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.frontend
-    container_name: parakeet-frontend
-    restart: unless-stopped
-    ports:
-      - "3000:80"
-    depends_on:
-      - transcriber
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # Health check - disabled since we start transcriber manually
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
 
 networks:
   default:
     name: parakeet-webrtc
     driver: bridge
-
-# Volume definitions for models (alternative to bind mounts)
-# Uncomment and adjust paths if using named volumes
-# volumes:
-#   tdt-model:
-#     driver: local
-#     driver_opts:
-#       type: none
-#       o: bind
-#       device: /path/to/tdt
-#   diarization-model:
-#     driver: local
-#     driver_opts:
-#       type: none
-#       o: bind
-#       device: /path/to/diar_sortformer_4spk-v1.onnx

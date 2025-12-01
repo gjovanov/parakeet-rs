@@ -67,6 +67,7 @@ use webrtc::{
     peer_connection::{
         configuration::RTCConfiguration,
         peer_connection_state::RTCPeerConnectionState,
+        policy::ice_transport_policy::RTCIceTransportPolicy,
         sdp::session_description::RTCSessionDescription,
         RTCPeerConnection,
     },
@@ -81,15 +82,18 @@ use webrtc::{
 #[command(about = "WebRTC server for ultra-low-latency real-time transcription")]
 struct Args {
     /// HTTP/WebSocket server port
-    #[arg(long, default_value = "8080")]
+    /// Can also be set via PORT environment variable
+    #[arg(long, env = "PORT", default_value = "8080")]
     port: u16,
 
     /// Path to TDT model directory
-    #[arg(long, default_value = ".")]
+    /// Can also be set via TDT_MODEL_PATH environment variable
+    #[arg(long, env = "TDT_MODEL_PATH", default_value = ".")]
     tdt_model: String,
 
     /// Path to diarization model (ONNX)
-    #[arg(long, default_value = "diar_streaming_sortformer_4spk-v2.onnx")]
+    /// Can also be set via DIAR_MODEL_PATH environment variable
+    #[arg(long, env = "DIAR_MODEL_PATH", default_value = "diar_streaming_sortformer_4spk-v2.onnx")]
     diar_model: String,
 
     /// Ring buffer size in seconds
@@ -112,13 +116,30 @@ struct Args {
     #[arg(long)]
     ultra_low_latency: bool,
 
+    /// Use extreme-low-latency mode (fastest, may reduce accuracy)
+    #[arg(long)]
+    extreme_low_latency: bool,
+
+    /// Use pause-based confirmation for better quality with low latency
+    /// Confirms tokens at natural speech pauses rather than fixed time threshold
+    #[arg(long)]
+    pause_based: bool,
+
+    /// Use speedy mode - optimized pause-based with lower latency
+    /// Good balance of latency and quality
+    /// Can also be set via SPEEDY_MODE=1 environment variable
+    #[arg(long, env = "SPEEDY_MODE")]
+    speedy: bool,
+
     /// Path to frontend directory
-    #[arg(long, default_value = "./frontend")]
+    /// Can also be set via FRONTEND_PATH environment variable
+    #[arg(long, env = "FRONTEND_PATH", default_value = "./frontend")]
     frontend: PathBuf,
 
     /// Public IP address for WebRTC ICE candidates (for WSL2/Docker)
     /// If not specified, tries to auto-detect the host IP
-    #[arg(long)]
+    /// Can also be set via PUBLIC_IP environment variable
+    #[arg(long, env = "PUBLIC_IP")]
     public_ip: Option<String>,
 }
 
@@ -127,6 +148,19 @@ struct ClientConnection {
     id: String,
     peer_connection: Arc<RTCPeerConnection>,
     ice_tx: mpsc::Sender<String>,
+}
+
+/// Runtime configuration for frontend
+#[derive(Clone)]
+struct RuntimeConfig {
+    /// WebSocket URL for signaling
+    ws_url: String,
+    /// TURN server URL
+    turn_server: String,
+    /// TURN username
+    turn_username: String,
+    /// TURN password
+    turn_password: String,
 }
 
 /// Shared application state
@@ -143,6 +177,8 @@ struct AppState {
     clients: Mutex<HashMap<String, ClientConnection>>,
     /// Client count
     client_count: AtomicU64,
+    /// Runtime configuration for frontend
+    config: RuntimeConfig,
 }
 
 #[cfg(not(feature = "sortformer"))]
@@ -158,12 +194,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Determine latency mode
-    let (buffer, interval, confirm, mode_name) = if args.ultra_low_latency {
-        (8.0, 1.0, 1.5, "ultra-low-latency")
+    // speedy: pause-based with faster settings, best balance of latency and quality
+    // pause-based: uses silence detection for confirmation, good quality with low latency
+    // extreme-low-latency: 5s buffer, 0.5s interval, 0.8s confirm = ~1.3s expected latency
+    // ultra-low-latency: 8s buffer, 1.0s interval, 1.5s confirm = ~2.5s expected latency
+    // low-latency: 10s buffer, 1.5s interval, 2.0s confirm = ~3.5s expected latency
+    let (buffer, interval, confirm, pause_based, mode_name) = if args.speedy {
+        // Speedy mode: faster pause-based with lower latency
+        (8.0, 0.2, 0.4, true, "speedy")
+    } else if args.pause_based {
+        // Pause-based mode: use silence detection for smarter confirmation
+        (10.0, 0.3, 0.5, true, "pause-based")
+    } else if args.extreme_low_latency {
+        (5.0, 0.5, 0.8, false, "extreme-low-latency")
+    } else if args.ultra_low_latency {
+        (8.0, 1.0, 1.5, false, "ultra-low-latency")
     } else if args.low_latency {
-        (10.0, 1.5, 2.0, "low-latency")
+        (10.0, 1.5, 2.0, false, "low-latency")
     } else {
-        (args.buffer, args.interval, args.confirm, "default")
+        (args.buffer, args.interval, args.confirm, false, "default")
     };
 
     eprintln!("===========================================");
@@ -173,10 +222,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("TDT Model: {}", args.tdt_model);
     eprintln!("Diarization Model: {}", args.diar_model);
     eprintln!(
-        "Mode: {} ({:.1}s buffer, {:.1}s interval, {:.1}s confirm)",
-        mode_name, buffer, interval, confirm
+        "Mode: {} ({:.1}s buffer, {:.1}s interval, {:.1}s confirm{})",
+        mode_name, buffer, interval, confirm,
+        if pause_based { ", pause-based" } else { "" }
     );
-    eprintln!("Expected transcription latency: ~{:.1}s", confirm + interval);
+    if pause_based {
+        eprintln!("Confirmation: pause-based (better quality with natural pauses)");
+        eprintln!("Expected transcription latency: ~0.3-1.5s (depends on speech pauses)");
+    } else {
+        eprintln!("Expected transcription latency: ~{:.1}s", confirm + interval);
+    }
     eprintln!("Expected audio latency: ~100-300ms (WebRTC)");
     eprintln!("Frontend: {}", args.frontend.display());
     eprintln!("===========================================");
@@ -243,6 +298,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (subtitle_tx, _) = broadcast::channel::<String>(1000);
     let (status_tx, _) = broadcast::channel::<String>(100);
 
+    // Read TURN configuration from environment
+    let turn_server = std::env::var("TURN_SERVER").unwrap_or_default();
+    let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
+    let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
+
+    // Build WebSocket URL based on public IP or detected IP
+    let ws_host = args.public_ip.clone()
+        .or(detected_ip.clone())
+        .unwrap_or_else(|| "localhost".to_owned());
+    let ws_url = format!("ws://{}:{}/ws", ws_host, args.port);
+
+    let runtime_config = RuntimeConfig {
+        ws_url: ws_url.clone(),
+        turn_server: turn_server.clone(),
+        turn_username: turn_username.clone(),
+        turn_password: turn_password.clone(),
+    };
+
+    eprintln!("Frontend config: ws_url={}, turn_server={}", ws_url, if turn_server.is_empty() { "(none)" } else { &turn_server });
+
     let state = Arc::new(AppState {
         subtitle_tx: subtitle_tx.clone(),
         status_tx: status_tx.clone(),
@@ -250,6 +325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api,
         clients: Mutex::new(HashMap::new()),
         client_count: AtomicU64::new(0),
+        config: runtime_config,
     });
 
     // Running flag for graceful shutdown
@@ -262,7 +338,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let run = running.clone();
     let tdt_model = args.tdt_model.clone();
     let diar_model = args.diar_model.clone();
+    let is_extreme_mode = args.extreme_low_latency;
 
+    let is_pause_based = pause_based;
     std::thread::spawn(move || {
         run_transcription_and_audio(
             &tdt_model,
@@ -270,10 +348,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             buffer,
             interval,
             confirm,
+            is_pause_based,
             sub_tx,
             stat_tx,
             audio_track_clone,
             run,
+            is_extreme_mode,
         )
     });
 
@@ -281,6 +361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "OK" }))
+        .route("/api/config", get(config_handler))
         .fallback_service(ServeDir::new(&args.frontend))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -318,6 +399,58 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// Configuration endpoint for frontend
+/// Returns runtime configuration as JSON
+#[cfg(feature = "sortformer")]
+async fn config_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let config = &state.config;
+
+    // Build ICE servers array
+    let mut ice_servers = vec![
+        serde_json::json!({ "urls": "stun:stun.l.google.com:19302" })
+    ];
+
+    if !config.turn_server.is_empty() {
+        ice_servers.push(serde_json::json!({
+            "urls": config.turn_server,
+            "username": config.turn_username,
+            "credential": config.turn_password
+        }));
+    }
+
+    let response = serde_json::json!({
+        "wsUrl": config.ws_url,
+        "iceServers": ice_servers,
+        "audio": {
+            "sampleRate": 16000,
+            "channels": 1,
+            "bufferSize": 4096
+        },
+        "subtitles": {
+            "maxSegments": 1000,
+            "autoScroll": true,
+            "showTimestamps": true
+        },
+        "speakerColors": [
+            "#4A90D9", "#50C878", "#E9967A", "#DDA0DD",
+            "#F0E68C", "#87CEEB", "#FFB6C1", "#98FB98"
+        ],
+        "reconnect": {
+            "enabled": true,
+            "delay": 2000,
+            "maxDelay": 30000,
+            "maxAttempts": 10
+        }
+    });
+
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        response.to_string()
+    )
+}
+
 /// Handle WebSocket connection for signaling
 #[cfg(feature = "sortformer")]
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
@@ -344,8 +477,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         ..Default::default()
     }];
 
+    // Check if TURN server is configured before moving the value
+    let has_turn_server = !turn_server.is_empty();
+
     // Add TURN server if configured
-    if !turn_server.is_empty() {
+    if has_turn_server {
         eprintln!("[WebRTC] Using TURN server: {}", turn_server);
         ice_servers.push(RTCIceServer {
             urls: vec![turn_server],
@@ -355,8 +491,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         });
     }
 
+    // Use All mode to allow direct connections with the public IP
+    // Note: webrtc-rs may not fully support TURNS relay-only mode
+    let ice_transport_policy = RTCIceTransportPolicy::All;
+    if has_turn_server {
+        eprintln!("[WebRTC] TURN server configured, using All ICE transport policy");
+    }
+
     let config = RTCConfiguration {
         ice_servers,
+        ice_transport_policy,
         ..Default::default()
     };
 
@@ -673,13 +817,16 @@ fn run_transcription_and_audio(
     buffer_secs: f32,
     interval_secs: f32,
     confirm_secs: f32,
+    pause_based_mode: bool,
     subtitle_tx: broadcast::Sender<String>,
     status_tx: broadcast::Sender<String>,
     audio_track: Arc<TrackLocalStaticRTP>,
     running: Arc<AtomicBool>,
+    extreme_mode: bool,
 ) {
     use parakeet_rs::{RealtimeTDTConfig, RealtimeTDTDiarized};
-    use std::time::Instant;
+    use std::sync::mpsc as std_mpsc;
+    use std::time::{Duration, Instant};
 
     // Initialize Opus encoder
     let mut opus_encoder = match OpusEncoder::new() {
@@ -700,9 +847,12 @@ fn run_transcription_and_audio(
         buffer_size_secs: buffer_secs,
         process_interval_secs: interval_secs,
         confirm_threshold_secs: confirm_secs,
+        pause_based_confirm: pause_based_mode,
+        pause_threshold_secs: if pause_based_mode { 0.35 } else { 0.4 },
+        silence_energy_threshold: if pause_based_mode { 0.008 } else { 0.01 },
     };
 
-    let mut transcriber = match RealtimeTDTDiarized::new(tdt_model, diar_model, None, Some(config)) {
+    let transcriber = match RealtimeTDTDiarized::new(tdt_model, diar_model, None, Some(config)) {
         Ok(t) => t,
         Err(e) => {
             let error_msg = serde_json::json!({
@@ -714,7 +864,21 @@ fn run_transcription_and_audio(
         }
     };
 
-    eprintln!("[Transcriber] Initialized with Opus encoder");
+    // In extreme mode, reduce batch size for faster response at cost of more overhead
+    let batch_mode_label = if extreme_mode { "extreme (50ms batches)" } else { "normal (100ms batches)" };
+    eprintln!("[Transcriber] Initialized with Opus encoder (separate threads, {} mode)", batch_mode_label);
+
+    // Create channel to send audio samples to transcription thread
+    // Use unbounded channel - we never want to drop audio samples for transcription
+    let (audio_tx, audio_rx) = std_mpsc::channel::<Vec<f32>>();
+
+    // Spawn transcription thread (non-blocking for audio streaming)
+    let sub_tx = subtitle_tx.clone();
+    let stat_tx = status_tx.clone();
+    let run_transcriber = running.clone();
+    let transcriber_handle = std::thread::spawn(move || {
+        run_transcription_thread(transcriber, audio_rx, sub_tx, stat_tx, run_transcriber);
+    });
 
     let mut stdin = io::stdin().lock();
     let sample_rate = 16000;
@@ -724,7 +888,18 @@ fn run_transcription_and_audio(
 
     let mut byte_buffer = vec![0u8; bytes_per_chunk];
     let mut total_samples: usize = 0;
-    let mut last_status_time = Instant::now();
+
+    // Buffer for batching samples to transcription
+    // In extreme mode: 50ms = 800 samples (faster but more overhead)
+    // In normal mode: 100ms = 1600 samples (balanced)
+    let transcription_batch_size = if extreme_mode { 800 } else { 1600 };
+    let mut transcription_buffer: Vec<f32> = Vec::with_capacity(transcription_batch_size);
+
+    // RTP pacing: track when streaming started and count packets sent
+    // Each Opus frame is 20ms, so we need to send packets at 20ms intervals
+    let stream_start_time = Instant::now();
+    let packet_duration = Duration::from_millis(20);
+    let mut packets_sent: u64 = 0;
 
     // Create tokio runtime for async audio track writing
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -737,11 +912,11 @@ fn run_transcription_and_audio(
         match stdin.read_exact(&mut byte_buffer) {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                eprintln!("[Transcriber] End of stdin input");
+                eprintln!("[Audio] End of stdin input");
                 break;
             }
             Err(e) => {
-                eprintln!("[Transcriber] Error reading stdin: {}", e);
+                eprintln!("[Audio] Error reading stdin: {}", e);
                 break;
             }
         }
@@ -756,11 +931,30 @@ fn run_transcription_and_audio(
             .collect();
 
         total_samples += samples.len();
-        let current_time = total_samples as f32 / sample_rate as f32;
 
-        // Encode to Opus and send via WebRTC
+        // Buffer samples for transcription (batch to reduce overhead)
+        transcription_buffer.extend_from_slice(&samples);
+        if transcription_buffer.len() >= transcription_batch_size {
+            // Send batch to transcription thread (never drop)
+            let batch = std::mem::replace(&mut transcription_buffer, Vec::with_capacity(transcription_batch_size));
+            if audio_tx.send(batch).is_err() {
+                eprintln!("[Audio] Transcription thread disconnected");
+                break;
+            }
+        }
+
+        // Encode to Opus and send via WebRTC with proper pacing
         let rtp_packets = opus_encoder.encode(&samples);
         for packet in &rtp_packets {
+            // Calculate when this packet should be sent based on packet count
+            let target_send_time = stream_start_time + packet_duration * (packets_sent as u32);
+            let now = Instant::now();
+
+            // If we're ahead of schedule, sleep until the target time
+            if now < target_send_time {
+                std::thread::sleep(target_send_time - now);
+            }
+
             let track = audio_track.clone();
             let pkt = packet.clone();
             rt.block_on(async {
@@ -768,7 +962,9 @@ fn run_transcription_and_audio(
                     Ok(n) => {
                         // Log occasionally (every ~1 second)
                         if total_samples % (sample_rate * 1) < chunk_samples {
-                            eprintln!("[RTP] Wrote {} bytes, seq={}", n, opus_encoder.sequence);
+                            eprintln!("[RTP] Wrote {} bytes, seq={}, pacing_drift={}ms",
+                                     n, opus_encoder.sequence,
+                                     (Instant::now() - target_send_time).as_millis() as i64);
                         }
                     }
                     Err(e) => {
@@ -780,10 +976,70 @@ fn run_transcription_and_audio(
                     }
                 }
             });
+
+            packets_sent += 1;
+        }
+    }
+
+    // Send any remaining samples
+    if !transcription_buffer.is_empty() {
+        audio_tx.send(transcription_buffer).ok();
+    }
+
+    // Signal end of audio and wait for transcription to finish
+    drop(audio_tx);
+    eprintln!("[Audio] Waiting for transcription to finalize...");
+    transcriber_handle.join().ok();
+
+    let end_msg = serde_json::json!({
+        "type": "end",
+        "total_duration": total_samples as f32 / sample_rate as f32
+    });
+    subtitle_tx.send(end_msg.to_string()).ok();
+
+    eprintln!(
+        "[Audio] Complete. Total duration: {:.2}s",
+        total_samples as f32 / sample_rate as f32
+    );
+}
+
+/// Separate thread for transcription to avoid blocking audio streaming
+#[cfg(feature = "sortformer")]
+fn run_transcription_thread(
+    mut transcriber: parakeet_rs::RealtimeTDTDiarized,
+    audio_rx: std::sync::mpsc::Receiver<Vec<f32>>,
+    subtitle_tx: broadcast::Sender<String>,
+    status_tx: broadcast::Sender<String>,
+    running: Arc<AtomicBool>,
+) {
+    use std::time::Instant;
+
+    let sample_rate = 16000;
+    let mut total_samples: usize = 0;
+    let mut last_status_time = Instant::now();
+
+    // Process audio samples as they arrive
+    while running.load(Ordering::SeqCst) {
+        // First, wait for at least one batch
+        let first_batch = match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(batch) => batch,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        // Collect the first batch
+        let mut all_samples = first_batch;
+
+        // Drain any additional pending batches to reduce latency
+        while let Ok(batch) = audio_rx.try_recv() {
+            all_samples.extend(batch);
         }
 
-        // Process through transcriber
-        match transcriber.push_audio(&samples) {
+        total_samples += all_samples.len();
+        let current_time = total_samples as f32 / sample_rate as f32;
+
+        // Process all collected samples through transcriber
+        match transcriber.push_audio(&all_samples) {
             Ok(result) => {
                 for segment in &result.segments {
                     let subtitle_msg = serde_json::json!({
@@ -821,6 +1077,12 @@ fn run_transcription_and_audio(
         }
     }
 
+    // Drain any remaining batches before finalizing
+    while let Ok(batch) = audio_rx.try_recv() {
+        total_samples += batch.len();
+        transcriber.push_audio(&batch).ok();
+    }
+
     // Finalize transcription
     eprintln!("[Transcriber] Finalizing...");
     match transcriber.finalize() {
@@ -850,16 +1112,7 @@ fn run_transcription_and_audio(
         }
     }
 
-    let end_msg = serde_json::json!({
-        "type": "end",
-        "total_duration": total_samples as f32 / sample_rate as f32
-    });
-    subtitle_tx.send(end_msg.to_string()).ok();
-
-    eprintln!(
-        "[Transcriber] Complete. Total duration: {:.2}s",
-        total_samples as f32 / sample_rate as f32
-    );
+    eprintln!("[Transcriber] Thread complete");
 }
 
 // Random number generator for SSRC

@@ -43,7 +43,7 @@ rustfft = "6.4"
 rayon = "1.10"
 num_cpus = "1.16"
 cpal = "0.15"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 ctrlc = "3.4"
 tokio = { version = "1", features = ["full"] }
 # High-performance web framework

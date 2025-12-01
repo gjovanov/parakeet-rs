@@ -3,8 +3,9 @@
  *
  * Uses WebRTC for ultra-low-latency audio streaming.
  * Browser handles all buffering via native jitter buffer.
+ * Configuration is loaded dynamically from server (/api/config).
  */
-import { config } from './config.js';
+import { loadConfig, getConfig } from './config.js';
 import { WebRTCClient } from './modules/webrtc.js';
 import { SubtitleRenderer } from './modules/subtitles.js';
 import { formatTime } from './modules/utils.js';
@@ -25,7 +26,10 @@ const elements = {};
 /**
  * Initialize the application
  */
-function init() {
+async function init() {
+  // Load configuration from server first
+  const config = await loadConfig();
+
   // Cache DOM elements
   elements.connectionStatus = document.getElementById('connection-status');
   elements.bufferInfo = document.getElementById('buffer-info');
@@ -71,7 +75,7 @@ function init() {
   // Show WebRTC mode indicator
   elements.bufferInfo.textContent = 'WebRTC Mode';
 
-  console.log('WebRTC Application initialized');
+  console.log('WebRTC Application initialized with config from server');
 }
 
 /**
@@ -184,9 +188,13 @@ function setupEventListeners() {
  * Connect to WebRTC server
  */
 async function connect() {
+  const config = getConfig();
   const url = elements.wsUrlInput?.value || config.wsUrl;
 
-  webrtcClient = new WebRTCClient(url);
+  // Create WebRTC client with ICE servers from server config
+  webrtcClient = new WebRTCClient(url, {
+    iceServers: config.iceServers
+  });
 
   // WebRTC events
   webrtcClient.on('welcome', (msg) => {

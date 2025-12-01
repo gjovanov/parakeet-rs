@@ -6,6 +6,7 @@
  * - Opus codec (optimized for speech)
  * - ~100-300ms latency
  * - Native audio playback via <audio> element
+ * - Dynamic configuration from server (/api/config)
  */
 import { createEventEmitter } from './utils.js';
 
@@ -13,22 +14,20 @@ export class WebRTCClient {
   /**
    * @param {string} wsUrl - WebSocket URL for signaling
    * @param {Object} options - Configuration options
+   * @param {Array} options.iceServers - ICE servers for WebRTC (from server config)
    */
   constructor(wsUrl, options = {}) {
     this.wsUrl = wsUrl;
 
+    // Default ICE servers (fallback if not provided by server)
+    const defaultIceServers = [
+      { urls: 'stun:stun.l.google.com:19302' }
+    ];
+
     this.options = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        {
-          // TURNS over UDP on port 443
-          urls: 'turns:coturn.roomler.live:443?transport=udp',
-          username: 'hammer',
-          credential: '3BARyRrfb0711392a9dD4uzW'
-        }
-      ],
-      // Force relay-only to avoid unstable direct connections in WSL2
-      iceTransportPolicy: 'relay',
+      iceServers: options.iceServers || defaultIceServers,
+      // Use 'all' to allow direct connections when server provides public IP candidates
+      iceTransportPolicy: 'all',
       ...options,
     };
 
