@@ -9,4 +9,4 @@ DS_Store
 *.onnx_data
 *.wav
 *.txt
-*.onnx.data
+*.onnx.data.env

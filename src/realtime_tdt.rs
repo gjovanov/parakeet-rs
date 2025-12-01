@@ -22,6 +22,15 @@ use std::path::Path;
 
 const SAMPLE_RATE: usize = 16000;
 
+/// Calculate RMS (root mean square) energy of audio samples
+fn calculate_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
 /// Configuration for quasi-realtime TDT processing
 #[derive(Debug, Clone)]
 pub struct RealtimeTDTConfig {
@@ -36,6 +45,19 @@ pub struct RealtimeTDTConfig {
     /// Confirmed zone: tokens older than this won't change (default: 3.0)
     /// This is the "safe zone" before the buffer end
     pub confirm_threshold_secs: f32,
+
+    /// Enable pause-based confirmation (default: false)
+    /// When true, tokens are confirmed when a pause is detected, enabling
+    /// lower latency with better quality
+    pub pause_based_confirm: bool,
+
+    /// Minimum pause duration to trigger confirmation (default: 0.4s)
+    /// Only used when pause_based_confirm is true
+    pub pause_threshold_secs: f32,
+
+    /// Energy threshold for silence detection (default: 0.01)
+    /// Audio RMS below this is considered silence
+    pub silence_energy_threshold: f32,
 }
 
 impl Default for RealtimeTDTConfig {
@@ -44,6 +66,9 @@ impl Default for RealtimeTDTConfig {
             buffer_size_secs: 15.0,
             process_interval_secs: 2.0,
             confirm_threshold_secs: 3.0,
+            pause_based_confirm: false,
+            pause_threshold_secs: 0.4,
+            silence_energy_threshold: 0.01,
         }
     }
 }
@@ -55,6 +80,9 @@ impl RealtimeTDTConfig {
             buffer_size_secs: 10.0,
             process_interval_secs: 1.5,
             confirm_threshold_secs: 2.0,
+            pause_based_confirm: false,
+            pause_threshold_secs: 0.4,
+            silence_energy_threshold: 0.01,
         }
     }
 
@@ -64,6 +92,35 @@ impl RealtimeTDTConfig {
             buffer_size_secs: 20.0,
             process_interval_secs: 3.0,
             confirm_threshold_secs: 4.0,
+            pause_based_confirm: false,
+            pause_threshold_secs: 0.4,
+            silence_energy_threshold: 0.01,
+        }
+    }
+
+    /// Pause-based low latency mode: uses silence detection for confirmation
+    /// This gives both low latency AND good quality by confirming at natural pauses
+    pub fn pause_based() -> Self {
+        Self {
+            buffer_size_secs: 10.0,      // Keep good context
+            process_interval_secs: 0.3,  // Process frequently
+            confirm_threshold_secs: 0.5, // Fallback threshold (rarely used)
+            pause_based_confirm: true,   // Enable pause detection
+            pause_threshold_secs: 0.35,  // 350ms pause triggers confirmation
+            silence_energy_threshold: 0.008, // Fairly sensitive silence detection
+        }
+    }
+
+    /// Speedy pause-based mode: optimized for lower latency while maintaining quality
+    /// Uses shorter pause detection and faster processing
+    pub fn speedy() -> Self {
+        Self {
+            buffer_size_secs: 8.0,       // Slightly smaller buffer
+            process_interval_secs: 0.2,  // Process very frequently
+            confirm_threshold_secs: 0.4, // Shorter fallback threshold
+            pause_based_confirm: true,   // Enable pause detection
+            pause_threshold_secs: 0.25,  // 250ms pause triggers confirmation (faster)
+            silence_energy_threshold: 0.01, // Slightly higher threshold (less sensitive)
         }
     }
 
@@ -116,6 +173,15 @@ pub struct RealtimeTDT {
     /// Accumulated results
     finalized_segments: Vec<Segment>,
     pending_tokens: Vec<TimedToken>,
+
+    /// Pause detection state
+    silence_start_time: Option<f32>,  // When current silence started (global time)
+    last_pause_end_time: f32,         // When last detected pause ended (for confirmation)
+    pause_boundary_time: Option<f32>, // Time boundary where a pause was detected (confirm tokens before this)
+
+    /// Track emitted token end times to prevent duplicates
+    /// This is more reliable than text-based deduplication
+    last_emitted_token_end: f32,
 }
 
 impl RealtimeTDT {
@@ -141,6 +207,10 @@ impl RealtimeTDT {
             confirmed_until: 0.0,
             finalized_segments: Vec::new(),
             pending_tokens: Vec::new(),
+            silence_start_time: None,
+            last_pause_end_time: 0.0,
+            pause_boundary_time: None,
+            last_emitted_token_end: 0.0,
         })
     }
 
@@ -149,9 +219,18 @@ impl RealtimeTDT {
     /// Ring buffer approach:
     /// 1. Add samples to ring buffer
     /// 2. Trim buffer to max size (keeping most recent)
-    /// 3. Process when enough new audio accumulated
-    /// 4. Only emit tokens in "confirmed zone"
+    /// 3. Detect pauses for smarter confirmation (if enabled)
+    /// 4. Process when enough new audio accumulated
+    /// 5. Only emit tokens in "confirmed zone"
     pub fn push_audio(&mut self, samples: &[f32]) -> Result<ChunkResult> {
+        // Calculate current time before adding samples
+        let current_time = self.total_samples_received as f32 / SAMPLE_RATE as f32;
+
+        // Pause detection (if enabled)
+        if self.config.pause_based_confirm {
+            self.detect_pause(samples, current_time);
+        }
+
         // Add to ring buffer
         self.audio_buffer.extend(samples.iter().copied());
         self.total_samples_received += samples.len();
@@ -191,6 +270,55 @@ impl RealtimeTDT {
         self.process_buffer()
     }
 
+    /// Detect pause/silence in audio for smarter token confirmation
+    ///
+    /// Tracks transitions between speech and silence. When silence exceeds
+    /// the threshold duration, marks a pause boundary for confirmation.
+    ///
+    /// Key insight: We add a small buffer (200ms) before the silence start
+    /// to ensure ASR has enough context to produce stable timestamps for
+    /// the last word before the pause.
+    fn detect_pause(&mut self, samples: &[f32], current_time: f32) {
+        let rms = calculate_rms(samples);
+        let is_silence = rms < self.config.silence_energy_threshold;
+
+        // Calculate the end time of this chunk
+        let chunk_duration = samples.len() as f32 / SAMPLE_RATE as f32;
+        let chunk_end_time = current_time + chunk_duration;
+
+        if is_silence {
+            // Currently in silence
+            if self.silence_start_time.is_none() {
+                // Just entered silence - record start time
+                self.silence_start_time = Some(current_time);
+            } else {
+                // Continuing silence - check if it exceeds threshold
+                let silence_start = self.silence_start_time.unwrap();
+                let silence_duration = chunk_end_time - silence_start;
+
+                if silence_duration >= self.config.pause_threshold_secs {
+                    // Detected a pause! Mark the boundary slightly BEFORE where speech ended
+                    // This buffer helps ensure ASR has context for the last word
+                    let pause_buffer = 0.25; // 250ms before silence start
+                    let boundary = (silence_start - pause_buffer).max(self.last_emitted_token_end);
+
+                    if self.pause_boundary_time.is_none()
+                        || boundary > self.pause_boundary_time.unwrap()
+                    {
+                        self.pause_boundary_time = Some(boundary);
+                        self.last_pause_end_time = chunk_end_time;
+                    }
+                }
+            }
+        } else {
+            // Speech detected - reset silence tracking
+            if self.silence_start_time.is_some() {
+                // Coming out of silence
+                self.silence_start_time = None;
+            }
+        }
+    }
+
     /// Process the ring buffer and emit confirmed tokens
     fn process_buffer(&mut self) -> Result<ChunkResult> {
         let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
@@ -221,21 +349,48 @@ impl RealtimeTDT {
             .collect();
 
         // Determine confirmed zone
-        // Tokens are "confirmed" if they end before (buffer_end - confirm_threshold)
+        // In pause-based mode: use detected pause boundary if available
+        // Otherwise: fall back to fixed threshold from buffer end
         let buffer_end_time = buffer_start_time + buffer_secs;
-        let confirm_until = buffer_end_time - self.config.confirm_threshold_secs;
+        let confirm_until = if self.config.pause_based_confirm {
+            if let Some(pause_time) = self.pause_boundary_time {
+                // Use pause boundary - confirm tokens ending before the pause
+                // Only if it's ahead of what we've already confirmed
+                if pause_time > self.confirmed_until {
+                    pause_time
+                } else {
+                    // Pause is before confirmed point, use fallback threshold
+                    buffer_end_time - self.config.confirm_threshold_secs
+                }
+            } else {
+                // No pause detected yet, use fallback threshold
+                buffer_end_time - self.config.confirm_threshold_secs
+            }
+        } else {
+            // Standard time-based confirmation
+            buffer_end_time - self.config.confirm_threshold_secs
+        };
 
         // Split tokens into confirmed and pending
-        // Use a small margin to prevent edge duplications due to timestamp variance
-        let margin = 0.1; // 100ms margin
+        // Use stricter timestamp-based filtering to prevent duplicates
+        // A token is considered "already emitted" if its START time overlaps with already-emitted content
+        // This handles the case where ASR gives slightly different timestamps on re-processing
+        let dedup_margin = 0.3; // 300ms margin - accounts for word-level variance in ASR timestamps
         let mut confirmed_tokens: Vec<TimedToken> = Vec::new();
         let mut new_pending: Vec<TimedToken> = Vec::new();
 
         for token in adjusted_tokens {
-            if token.end <= self.confirmed_until + margin {
-                // Already emitted or too close to boundary, skip
+            // Skip tokens that overlap with already-emitted content
+            // Use START time comparison - if token starts before our last emitted end (with margin),
+            // it's likely a duplicate from re-processing
+            // We add margin to last_emitted_token_end to catch tokens that appear just after
+            if token.start < self.last_emitted_token_end + dedup_margin {
+                // Token starts before (or very close to) our last emitted token end
+                // This is likely a duplicate from re-processing
                 continue;
-            } else if token.end < confirm_until {
+            }
+
+            if token.end < confirm_until {
                 // In confirmed zone
                 confirmed_tokens.push(token);
             } else {
@@ -259,20 +414,19 @@ impl RealtimeTDT {
             };
 
             if !final_tokens.is_empty() {
-                // Deduplicate: check if last emitted word matches first new word
-                let mut tokens_to_use = final_tokens.clone();
-                if let Some(last_seg) = self.finalized_segments.last() {
-                    if let Some(last_emitted) = last_seg.tokens.last() {
-                        if let Some(first_new) = tokens_to_use.first() {
-                            if last_emitted.text.trim() == first_new.text.trim() {
-                                // Remove duplicate first token
-                                tokens_to_use.remove(0);
-                            }
-                        }
-                    }
-                }
+                // The deduplication is now done at token filtering stage (above)
+                // Filter out tokens that are pure punctuation at the start (artifacts from boundary)
+                let tokens_to_use: Vec<_> = final_tokens
+                    .into_iter()
+                    .skip_while(|t| t.text.chars().all(|c| c.is_ascii_punctuation() || c.is_whitespace()))
+                    .collect();
 
-                if !tokens_to_use.is_empty() {
+                // Skip segments that are too short or contain only punctuation
+                let has_real_content = tokens_to_use.iter().any(|t|
+                    t.text.chars().any(|c| c.is_alphanumeric())
+                );
+
+                if !tokens_to_use.is_empty() && has_real_content {
                     let segment_text: String = tokens_to_use
                         .iter()
                         .map(|t| t.text.as_str())
@@ -287,9 +441,19 @@ impl RealtimeTDT {
                         is_final: true,
                     };
 
-                    // Update confirmed_until
+                    // Update both confirmed_until and last_emitted_token_end
                     if let Some(last) = tokens_to_use.last() {
                         self.confirmed_until = last.end;
+                        self.last_emitted_token_end = last.end;
+
+                        // Clear pause boundary if we've confirmed past it
+                        if self.config.pause_based_confirm {
+                            if let Some(pause_time) = self.pause_boundary_time {
+                                if self.confirmed_until >= pause_time {
+                                    self.pause_boundary_time = None;
+                                }
+                            }
+                        }
                     }
 
                     self.finalized_segments.push(segment.clone());
@@ -444,6 +608,12 @@ impl RealtimeTDT {
         self.confirmed_until = 0.0;
         self.finalized_segments.clear();
         self.pending_tokens.clear();
+        // Reset pause detection state
+        self.silence_start_time = None;
+        self.last_pause_end_time = 0.0;
+        self.pause_boundary_time = None;
+        // Reset deduplication tracking
+        self.last_emitted_token_end = 0.0;
     }
 }
 
