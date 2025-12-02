@@ -131,6 +131,18 @@ struct Args {
     #[arg(long, env = "SPEEDY_MODE")]
     speedy: bool,
 
+    /// Use lookahead mode - best quality transcription
+    /// Uses sliding window of pause segments for future context
+    /// Each segment is transcribed with knowledge of subsequent segments
+    /// Can also be set via LOOKAHEAD_MODE=1 environment variable
+    #[arg(long, env = "LOOKAHEAD_MODE")]
+    lookahead: bool,
+
+    /// Number of segments to look ahead (default: 2)
+    /// Only used in lookahead mode
+    #[arg(long, default_value = "2")]
+    lookahead_segments: usize,
+
     /// Path to frontend directory
     /// Can also be set via FRONTEND_PATH environment variable
     #[arg(long, env = "FRONTEND_PATH", default_value = "./frontend")]
@@ -194,25 +206,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Determine latency mode
+    // lookahead: best quality using sliding window of pause segments (includes pause-based)
     // speedy: pause-based with faster settings, best balance of latency and quality
     // pause-based: uses silence detection for confirmation, good quality with low latency
     // extreme-low-latency: 5s buffer, 0.5s interval, 0.8s confirm = ~1.3s expected latency
     // ultra-low-latency: 8s buffer, 1.0s interval, 1.5s confirm = ~2.5s expected latency
     // low-latency: 10s buffer, 1.5s interval, 2.0s confirm = ~3.5s expected latency
-    let (buffer, interval, confirm, pause_based, mode_name) = if args.speedy {
+    let (buffer, interval, confirm, pause_based, lookahead_mode, lookahead_segs, mode_name) = if args.lookahead {
+        // Lookahead mode: best quality with future context
+        (20.0, 0.3, 1.5, true, true, args.lookahead_segments, "lookahead")
+    } else if args.speedy {
         // Speedy mode: faster pause-based with lower latency
-        (8.0, 0.2, 0.4, true, "speedy")
+        (8.0, 0.2, 0.4, true, false, 2, "speedy")
     } else if args.pause_based {
         // Pause-based mode: use silence detection for smarter confirmation
-        (10.0, 0.3, 0.5, true, "pause-based")
+        (10.0, 0.3, 0.5, true, false, 2, "pause-based")
     } else if args.extreme_low_latency {
-        (5.0, 0.5, 0.8, false, "extreme-low-latency")
+        (5.0, 0.5, 0.8, false, false, 2, "extreme-low-latency")
     } else if args.ultra_low_latency {
-        (8.0, 1.0, 1.5, false, "ultra-low-latency")
+        (8.0, 1.0, 1.5, false, false, 2, "ultra-low-latency")
     } else if args.low_latency {
-        (10.0, 1.5, 2.0, false, "low-latency")
+        (10.0, 1.5, 2.0, false, false, 2, "low-latency")
     } else {
-        (args.buffer, args.interval, args.confirm, false, "default")
+        (args.buffer, args.interval, args.confirm, false, false, 2, "default")
     };
 
     eprintln!("===========================================");
@@ -226,7 +242,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode_name, buffer, interval, confirm,
         if pause_based { ", pause-based" } else { "" }
     );
-    if pause_based {
+    if lookahead_mode {
+        eprintln!("Lookahead: enabled ({} segments ahead)", lookahead_segs);
+        eprintln!("Confirmation: sliding window with future context");
+        eprintln!("Expected transcription latency: ~1-3s (depends on speech pauses, best quality)");
+    } else if pause_based {
         eprintln!("Confirmation: pause-based (better quality with natural pauses)");
         eprintln!("Expected transcription latency: ~0.3-1.5s (depends on speech pauses)");
     } else {
@@ -341,6 +361,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_extreme_mode = args.extreme_low_latency;
 
     let is_pause_based = pause_based;
+    let is_lookahead = lookahead_mode;
+    let lookahead_count = lookahead_segs;
     std::thread::spawn(move || {
         run_transcription_and_audio(
             &tdt_model,
@@ -349,6 +371,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interval,
             confirm,
             is_pause_based,
+            is_lookahead,
+            lookahead_count,
             sub_tx,
             stat_tx,
             audio_track_clone,
@@ -818,6 +842,8 @@ fn run_transcription_and_audio(
     interval_secs: f32,
     confirm_secs: f32,
     pause_based_mode: bool,
+    lookahead_mode: bool,
+    lookahead_segments: usize,
     subtitle_tx: broadcast::Sender<String>,
     status_tx: broadcast::Sender<String>,
     audio_track: Arc<TrackLocalStaticRTP>,
@@ -848,8 +874,10 @@ fn run_transcription_and_audio(
         process_interval_secs: interval_secs,
         confirm_threshold_secs: confirm_secs,
         pause_based_confirm: pause_based_mode,
-        pause_threshold_secs: if pause_based_mode { 0.35 } else { 0.4 },
-        silence_energy_threshold: if pause_based_mode { 0.008 } else { 0.01 },
+        pause_threshold_secs: if lookahead_mode { 0.4 } else if pause_based_mode { 0.35 } else { 0.4 },
+        silence_energy_threshold: if lookahead_mode { 0.01 } else if pause_based_mode { 0.008 } else { 0.01 },
+        lookahead_mode,
+        lookahead_segments,
     };
 
     let transcriber = match RealtimeTDTDiarized::new(tdt_model, diar_model, None, Some(config)) {

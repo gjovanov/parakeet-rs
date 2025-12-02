@@ -223,6 +223,8 @@ async function connect() {
     state.connected = false;
     updateConnectionStatus('disconnected');
     elements.connectBtn.textContent = 'Connect';
+    // Clear any stuck partial subtitle on disconnect
+    subtitleRenderer.clearCurrent();
     console.log('Disconnected:', code, reason);
   });
 
@@ -230,6 +232,8 @@ async function connect() {
     state.connected = false;
     updateConnectionStatus('disconnected');
     elements.bufferInfo.textContent = 'Connection failed';
+    // Clear any stuck partial subtitle on connection failure
+    subtitleRenderer.clearCurrent();
     console.error('WebRTC connection failed');
   });
 

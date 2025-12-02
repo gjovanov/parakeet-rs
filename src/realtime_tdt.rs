@@ -58,6 +58,16 @@ pub struct RealtimeTDTConfig {
     /// Energy threshold for silence detection (default: 0.01)
     /// Audio RMS below this is considered silence
     pub silence_energy_threshold: f32,
+
+    /// Enable lookahead mode for better transcription quality (default: false)
+    /// When true, waits for multiple pause segments before emitting,
+    /// giving ASR more context for better accuracy
+    pub lookahead_mode: bool,
+
+    /// Number of pause segments to look ahead (default: 2)
+    /// After initial ramp-up, always keeps this many future segments
+    /// for context when transcribing the segment to emit
+    pub lookahead_segments: usize,
 }
 
 impl Default for RealtimeTDTConfig {
@@ -69,6 +79,8 @@ impl Default for RealtimeTDTConfig {
             pause_based_confirm: false,
             pause_threshold_secs: 0.4,
             silence_energy_threshold: 0.01,
+            lookahead_mode: false,
+            lookahead_segments: 2,
         }
     }
 }
@@ -83,6 +95,8 @@ impl RealtimeTDTConfig {
             pause_based_confirm: false,
             pause_threshold_secs: 0.4,
             silence_energy_threshold: 0.01,
+            lookahead_mode: false,
+            lookahead_segments: 2,
         }
     }
 
@@ -95,6 +109,8 @@ impl RealtimeTDTConfig {
             pause_based_confirm: false,
             pause_threshold_secs: 0.4,
             silence_energy_threshold: 0.01,
+            lookahead_mode: false,
+            lookahead_segments: 2,
         }
     }
 
@@ -104,10 +120,12 @@ impl RealtimeTDTConfig {
         Self {
             buffer_size_secs: 10.0,      // Keep good context
             process_interval_secs: 0.3,  // Process frequently
-            confirm_threshold_secs: 0.5, // Fallback threshold (rarely used)
+            confirm_threshold_secs: 1.5, // Fallback threshold - increased for better quality
             pause_based_confirm: true,   // Enable pause detection
-            pause_threshold_secs: 0.35,  // 350ms pause triggers confirmation
-            silence_energy_threshold: 0.008, // Fairly sensitive silence detection
+            pause_threshold_secs: 0.5,   // 500ms pause triggers confirmation (increased for accuracy)
+            silence_energy_threshold: 0.005, // More sensitive silence detection
+            lookahead_mode: false,
+            lookahead_segments: 2,
         }
     }
 
@@ -121,6 +139,24 @@ impl RealtimeTDTConfig {
             pause_based_confirm: true,   // Enable pause detection
             pause_threshold_secs: 0.25,  // 250ms pause triggers confirmation (faster)
             silence_energy_threshold: 0.01, // Slightly higher threshold (less sensitive)
+            lookahead_mode: false,
+            lookahead_segments: 2,
+        }
+    }
+
+    /// Lookahead mode: uses sliding window of pause segments for best quality
+    /// Transcribes multiple segments together but only emits the oldest one,
+    /// giving ASR future context for better accuracy at segment boundaries
+    pub fn lookahead() -> Self {
+        Self {
+            buffer_size_secs: 20.0,      // Larger buffer for multiple segments
+            process_interval_secs: 0.3,  // Process frequently
+            confirm_threshold_secs: 1.5, // Fallback threshold
+            pause_based_confirm: true,   // Must use pause detection
+            pause_threshold_secs: 0.5,   // 500ms pause threshold
+            silence_energy_threshold: 0.005, // Sensitive silence detection
+            lookahead_mode: true,        // Enable lookahead
+            lookahead_segments: 2,       // Keep 2 future segments for context
         }
     }
 
@@ -142,6 +178,18 @@ pub struct Segment {
     pub end_time: f32,
     pub tokens: Vec<TimedToken>,
     pub is_final: bool,
+}
+
+/// A pause-delimited segment for lookahead transcription
+/// Stores audio between two pauses along with timing information
+#[derive(Debug, Clone)]
+struct PauseSegmentInfo {
+    /// Global start time of this segment (when speech started after previous pause)
+    start_time: f32,
+    /// Global end time of this segment (when pause was detected)
+    end_time: f32,
+    /// Audio samples for this segment
+    audio: Vec<f32>,
 }
 
 /// Result from processing
@@ -182,6 +230,20 @@ pub struct RealtimeTDT {
     /// Track emitted token end times to prevent duplicates
     /// This is more reliable than text-based deduplication
     last_emitted_token_end: f32,
+
+    // === Lookahead mode state ===
+    /// Queue of pause-delimited segments for lookahead transcription
+    /// When lookahead_mode is enabled, we accumulate segments here
+    lookahead_segments: VecDeque<PauseSegmentInfo>,
+
+    /// Audio accumulated since last pause (current segment being built)
+    current_segment_audio: Vec<f32>,
+
+    /// Start time of current segment being built
+    current_segment_start: f32,
+
+    /// Whether we're currently in speech (vs silence)
+    in_speech: bool,
 }
 
 impl RealtimeTDT {
@@ -211,6 +273,11 @@ impl RealtimeTDT {
             last_pause_end_time: 0.0,
             pause_boundary_time: None,
             last_emitted_token_end: 0.0,
+            // Lookahead mode state
+            lookahead_segments: VecDeque::new(),
+            current_segment_audio: Vec::new(),
+            current_segment_start: 0.0,
+            in_speech: false,
         })
     }
 
@@ -222,9 +289,19 @@ impl RealtimeTDT {
     /// 3. Detect pauses for smarter confirmation (if enabled)
     /// 4. Process when enough new audio accumulated
     /// 5. Only emit tokens in "confirmed zone"
+    ///
+    /// Lookahead mode:
+    /// - Accumulates audio into pause-delimited segments
+    /// - When enough segments are buffered, transcribes all together
+    /// - Only emits the oldest segment (with future context)
     pub fn push_audio(&mut self, samples: &[f32]) -> Result<ChunkResult> {
         // Calculate current time before adding samples
         let current_time = self.total_samples_received as f32 / SAMPLE_RATE as f32;
+
+        // Lookahead mode uses a different processing path
+        if self.config.lookahead_mode {
+            return self.push_audio_lookahead(samples, current_time);
+        }
 
         // Pause detection (if enabled)
         if self.config.pause_based_confirm {
@@ -270,6 +347,259 @@ impl RealtimeTDT {
         self.process_buffer()
     }
 
+    /// Push audio in lookahead mode
+    /// Accumulates segments delimited by pauses, then transcribes with future context
+    fn push_audio_lookahead(&mut self, samples: &[f32], current_time: f32) -> Result<ChunkResult> {
+        let rms = calculate_rms(samples);
+        let is_silence = rms < self.config.silence_energy_threshold;
+        let chunk_duration = samples.len() as f32 / SAMPLE_RATE as f32;
+        let chunk_end_time = current_time + chunk_duration;
+
+        // Update total samples tracking
+        self.total_samples_received += samples.len();
+
+        // State machine for segment accumulation
+        // IMPORTANT: Always accumulate audio when in_speech, even during brief silences
+        // This prevents losing words that are spoken softly or during transition
+        if is_silence {
+            // In silence
+            if self.in_speech {
+                // Still accumulate audio during silence gaps within speech
+                // This ensures we don't lose words during brief pauses
+                self.current_segment_audio.extend(samples.iter().copied());
+
+                // Transition: speech -> silence (potential pause)
+                // Check if this is a significant pause
+                if self.silence_start_time.is_none() {
+                    self.silence_start_time = Some(current_time);
+                }
+
+                let silence_duration = chunk_end_time - self.silence_start_time.unwrap();
+
+                if silence_duration >= self.config.pause_threshold_secs {
+                    // Pause detected! Finalize current segment
+                    if !self.current_segment_audio.is_empty() {
+                        let segment = PauseSegmentInfo {
+                            start_time: self.current_segment_start,
+                            end_time: chunk_end_time, // Include silence up to now
+                            audio: std::mem::take(&mut self.current_segment_audio),
+                        };
+                        self.lookahead_segments.push_back(segment);
+                    }
+                    self.in_speech = false;
+                    self.silence_start_time = None; // Reset for next pause detection
+                }
+            }
+            // When not in_speech and silence, just wait for speech to start
+        } else {
+            // In speech
+            if !self.in_speech {
+                // Transition: silence -> speech
+                self.in_speech = true;
+                self.current_segment_start = current_time;
+            }
+            self.silence_start_time = None; // Reset silence tracking on speech
+            // Accumulate audio
+            self.current_segment_audio.extend(samples.iter().copied());
+        }
+
+        // Also maintain the ring buffer for fallback processing
+        self.audio_buffer.extend(samples.iter().copied());
+        while self.audio_buffer.len() > self.buffer_size_samples {
+            self.audio_buffer.pop_front();
+        }
+
+        let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
+
+        // Time-based fallback: force segment break to keep latency low
+        // Use 3s segments for better quality while maintaining ~5-7s latency
+        let max_segment_duration = 3.0; // seconds - balance quality and latency
+        let current_segment_duration = chunk_end_time - self.current_segment_start;
+        if self.in_speech && current_segment_duration > max_segment_duration && !self.current_segment_audio.is_empty() {
+            // Force segment break
+            let segment = PauseSegmentInfo {
+                start_time: self.current_segment_start,
+                end_time: chunk_end_time,
+                audio: std::mem::take(&mut self.current_segment_audio),
+            };
+            self.lookahead_segments.push_back(segment);
+            self.current_segment_start = chunk_end_time;
+        }
+
+        // Check if we have enough segments to process with lookahead
+        // We need: lookahead_segments + 1 segments to emit one
+        // Example: with lookahead_segments=2, we need 3 segments to emit segment 0
+        let required_segments = self.config.lookahead_segments + 1;
+
+        if self.lookahead_segments.len() >= required_segments {
+            return self.process_lookahead();
+        }
+
+        // Ramp-up: emit immediately once we have at least 1 complete segment
+        // This minimizes initial latency - first output after ~2-4s
+        if !self.lookahead_segments.is_empty() {
+            return self.process_lookahead();
+        }
+
+        Ok(ChunkResult {
+            segments: Vec::new(),
+            full_text: self.get_full_text(),
+            buffer_time: buffer_secs,
+            needs_more_audio: true,
+        })
+    }
+
+    /// Process accumulated segments in lookahead mode
+    /// Transcribes all segments together but only emits the oldest one
+    /// Includes past context for better ASR quality
+    fn process_lookahead(&mut self) -> Result<ChunkResult> {
+        if self.lookahead_segments.is_empty() {
+            return Ok(ChunkResult {
+                segments: Vec::new(),
+                full_text: self.get_full_text(),
+                buffer_time: 0.0,
+                needs_more_audio: true,
+            });
+        }
+
+        // Add PAST context from ring buffer for better ASR quality
+        // Use up to 5 seconds of past audio (doesn't affect latency since it's already emitted)
+        let past_context_secs = 5.0;
+        let past_context_samples = (past_context_secs * SAMPLE_RATE as f32) as usize;
+
+        let first_segment_start = self.lookahead_segments.front().unwrap().start_time;
+        let first_segment_end = self.lookahead_segments.front().unwrap().end_time;
+
+        // Calculate how much past audio we need from the ring buffer
+        // The ring buffer contains audio up to the current time
+        // We want audio from (first_segment_start - past_context_secs) to first_segment_start
+        let total_audio_samples: usize = self.lookahead_segments.iter()
+            .map(|s| s.audio.len())
+            .sum();
+        let total_audio_samples = total_audio_samples + self.current_segment_audio.len();
+
+        // Get past context from ring buffer (already processed audio)
+        // The ring buffer might have more context than the segments
+        let buffer_len = self.audio_buffer.len();
+        let past_samples = past_context_samples.min(buffer_len.saturating_sub(total_audio_samples));
+
+        let mut combined_audio: Vec<f32> = Vec::new();
+        let mut time_offset = 0.0;
+
+        // Add past context from ring buffer if available
+        if past_samples > 0 {
+            // Get the oldest 'past_samples' from buffer that precede our segments
+            let start_idx = buffer_len.saturating_sub(total_audio_samples + past_samples);
+            let end_idx = buffer_len.saturating_sub(total_audio_samples);
+            if end_idx > start_idx {
+                combined_audio.extend(self.audio_buffer.range(start_idx..end_idx));
+                time_offset = (end_idx - start_idx) as f32 / SAMPLE_RATE as f32;
+            }
+        }
+
+        // Add all lookahead segment audio
+        for segment in &self.lookahead_segments {
+            combined_audio.extend(&segment.audio);
+        }
+
+        // Add current segment audio if any (for additional context)
+        if !self.current_segment_audio.is_empty() {
+            combined_audio.extend(&self.current_segment_audio);
+        }
+
+        if combined_audio.is_empty() {
+            return Ok(ChunkResult {
+                segments: Vec::new(),
+                full_text: self.get_full_text(),
+                buffer_time: 0.0,
+                needs_more_audio: true,
+            });
+        }
+
+        // Transcribe all segments together (past + current + future context)
+        let result = self.model.transcribe_samples(
+            combined_audio,
+            SAMPLE_RATE as u32,
+            1,
+            Some(TimestampMode::Words),
+        )?;
+
+        // Adjust timestamps to global time
+        // Account for the past context we prepended
+        let adjusted_tokens: Vec<TimedToken> = result.tokens
+            .into_iter()
+            .map(|mut t| {
+                t.start += first_segment_start - time_offset;
+                t.end += first_segment_start - time_offset;
+                t
+            })
+            .collect();
+
+        // Extract only tokens from the FIRST segment (the one we're emitting)
+        // Use timestamp-based filtering - emit tokens that START in the first segment
+        let dedup_margin = 0.15;
+        let emit_tokens: Vec<TimedToken> = adjusted_tokens
+            .into_iter()
+            .filter(|t| {
+                // Must be after last emitted (deduplication)
+                t.end > self.last_emitted_token_end + dedup_margin &&
+                // Token must START before or at first segment end (emit everything that started in this segment)
+                t.start <= first_segment_end + 0.3
+            })
+            .collect();
+
+        let mut new_segments = Vec::new();
+
+        if !emit_tokens.is_empty() {
+            // Filter out punctuation-only tokens at start
+            let tokens_to_use: Vec<_> = emit_tokens
+                .into_iter()
+                .skip_while(|t| t.text.chars().all(|c| c.is_ascii_punctuation() || c.is_whitespace()))
+                .collect();
+
+            let has_real_content = tokens_to_use.iter().any(|t|
+                t.text.chars().any(|c| c.is_alphanumeric())
+            );
+
+            if !tokens_to_use.is_empty() && has_real_content {
+                let segment_text: String = tokens_to_use
+                    .iter()
+                    .map(|t| t.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                let segment = Segment {
+                    text: segment_text,
+                    start_time: tokens_to_use.first().map(|t| t.start).unwrap_or(0.0),
+                    end_time: tokens_to_use.last().map(|t| t.end).unwrap_or(0.0),
+                    tokens: tokens_to_use.clone(),
+                    is_final: true,
+                };
+
+                // Update tracking
+                if let Some(last) = tokens_to_use.last() {
+                    self.confirmed_until = last.end;
+                    self.last_emitted_token_end = last.end;
+                }
+
+                self.finalized_segments.push(segment.clone());
+                new_segments.push(segment);
+            }
+        }
+
+        // Remove the first segment from the queue (we just processed it)
+        self.lookahead_segments.pop_front();
+
+        let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
+
+        Ok(ChunkResult {
+            segments: new_segments,
+            full_text: self.get_full_text(),
+            buffer_time: buffer_secs,
+            needs_more_audio: true,
+        })
+    }
+
     /// Detect pause/silence in audio for smarter token confirmation
     ///
     /// Tracks transitions between speech and silence. When silence exceeds
@@ -297,9 +627,10 @@ impl RealtimeTDT {
                 let silence_duration = chunk_end_time - silence_start;
 
                 if silence_duration >= self.config.pause_threshold_secs {
-                    // Detected a pause! Mark the boundary slightly BEFORE where speech ended
-                    // This buffer helps ensure ASR has context for the last word
-                    let pause_buffer = 0.25; // 250ms before silence start
+                    // Detected a pause! Mark the boundary AT the silence start
+                    // The confirm zone should include all words before the pause
+                    // Use a small buffer to account for ASR timestamp variance
+                    let pause_buffer = 0.1; // 100ms buffer - reduced to avoid cutting words
                     let boundary = (silence_start - pause_buffer).max(self.last_emitted_token_end);
 
                     if self.pause_boundary_time.is_none()
@@ -372,21 +703,20 @@ impl RealtimeTDT {
         };
 
         // Split tokens into confirmed and pending
-        // Use stricter timestamp-based filtering to prevent duplicates
-        // A token is considered "already emitted" if its START time overlaps with already-emitted content
-        // This handles the case where ASR gives slightly different timestamps on re-processing
-        let dedup_margin = 0.3; // 300ms margin - accounts for word-level variance in ASR timestamps
+        // Use timestamp-based filtering to prevent duplicates
+        // A token is considered "already emitted" if its END time is at or before our last emitted position
+        // Use a small margin to catch ASR timestamp variance without skipping distinct words
+        let dedup_margin = 0.15; // 150ms margin - balance between dedup and not skipping words
         let mut confirmed_tokens: Vec<TimedToken> = Vec::new();
         let mut new_pending: Vec<TimedToken> = Vec::new();
 
         for token in adjusted_tokens {
-            // Skip tokens that overlap with already-emitted content
-            // Use START time comparison - if token starts before our last emitted end (with margin),
-            // it's likely a duplicate from re-processing
-            // We add margin to last_emitted_token_end to catch tokens that appear just after
-            if token.start < self.last_emitted_token_end + dedup_margin {
-                // Token starts before (or very close to) our last emitted token end
-                // This is likely a duplicate from re-processing
+            // Skip tokens that have already been emitted
+            // Use END time comparison - if token ends before (or at) our last emitted position,
+            // it's definitely a duplicate
+            if token.end <= self.last_emitted_token_end + dedup_margin {
+                // Token ends before our last emitted token end
+                // This is a duplicate from re-processing
                 continue;
             }
 
@@ -614,6 +944,11 @@ impl RealtimeTDT {
         self.pause_boundary_time = None;
         // Reset deduplication tracking
         self.last_emitted_token_end = 0.0;
+        // Reset lookahead state
+        self.lookahead_segments.clear();
+        self.current_segment_audio.clear();
+        self.current_segment_start = 0.0;
+        self.in_speech = false;
     }
 }
 

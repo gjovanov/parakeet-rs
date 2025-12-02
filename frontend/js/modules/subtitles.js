@@ -43,6 +43,11 @@ export class SubtitleRenderer {
     // Current playback time
     this.currentTime = 0;
 
+    // Stale subtitle timeout (clear partial subtitles after 10 seconds of no updates)
+    this.staleTimeoutMs = 10000;
+    this.staleTimer = null;
+    this.lastSubtitleTime = 0;
+
     // Event emitter
     const emitter = createEventEmitter();
     this.on = emitter.on.bind(emitter);
@@ -102,6 +107,9 @@ export class SubtitleRenderer {
    * @param {Segment} segment - Segment to add
    */
   addSegment(segment) {
+    // Reset stale timer on any new segment
+    this.resetStaleTimer();
+
     if (segment.isFinal) {
       // Add to finalized segments
       this.segments.push(segment);
@@ -129,6 +137,40 @@ export class SubtitleRenderer {
 
     // Emit event
     this.emit('segment', segment);
+  }
+
+  /**
+   * Reset the stale subtitle timer
+   * Clears partial subtitles if no new messages arrive within timeout
+   */
+  resetStaleTimer() {
+    // Clear existing timer
+    if (this.staleTimer) {
+      clearTimeout(this.staleTimer);
+    }
+
+    this.lastSubtitleTime = Date.now();
+
+    // Set new timer to clear stale partial subtitles
+    this.staleTimer = setTimeout(() => {
+      if (this.currentSegment) {
+        console.log('[Subtitles] Clearing stale partial subtitle after timeout');
+        this.clearCurrent();
+      }
+    }, this.staleTimeoutMs);
+  }
+
+  /**
+   * Clear the current (partial) subtitle
+   * Called on disconnect or stale timeout
+   */
+  clearCurrent() {
+    this.currentSegment = null;
+    if (this.staleTimer) {
+      clearTimeout(this.staleTimer);
+      this.staleTimer = null;
+    }
+    this.updateLiveDisplay();
   }
 
   /**
@@ -302,6 +344,12 @@ export class SubtitleRenderer {
     this.segments = [];
     this.currentSegment = null;
     this.currentTime = 0;
+
+    // Clear stale timer
+    if (this.staleTimer) {
+      clearTimeout(this.staleTimer);
+      this.staleTimer = null;
+    }
 
     if (this.transcriptElement) {
       this.transcriptElement.innerHTML = '';
