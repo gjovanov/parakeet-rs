@@ -36,6 +36,8 @@ services:
       - ./diar_streaming_sortformer_4spk-v2.onnx:/app/models/diarization/model.onnx:ro
       # Mount audio files for testing (optional)
       - ./broadcast_2.wav:/tmp/broadcast_2.wav:ro
+      # Mount frontend for live development (read-only)
+      - ./frontend:/app/frontend:ro
 
     environment:
       # Server configuration
