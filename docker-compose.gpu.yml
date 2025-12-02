@@ -1,0 +1,105 @@
+# Docker Compose for parakeet-rs GPU-accelerated WebRTC Transcription
+#
+# Prerequisites:
+#   - NVIDIA GPU with CUDA support
+#   - NVIDIA Docker runtime (nvidia-docker2)
+#   - Docker Compose v2.0+
+#
+# Usage:
+#   # Build and start the GPU container
+#   docker compose -f docker-compose.gpu.yml up -d
+#
+#   # Run the transcriber with audio
+#   docker exec parakeet-transcriber-gpu sh -c \
+#     'ffmpeg -re -i /tmp/broadcast_2.wav -f s16le -ar 16000 -ac 1 - 2>/dev/null | \
+#      /app/webrtc_transcriber --speedy'
+#
+#   # View logs
+#   docker compose -f docker-compose.gpu.yml logs -f transcriber-gpu
+#
+#   # Stop all services
+#   docker compose -f docker-compose.gpu.yml down
+#
+# Access: http://localhost:8090 (or http://<PUBLIC_IP>:8090)
+
+services:
+  # GPU-accelerated WebRTC transcription server
+  transcriber-gpu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cuda
+    image: parakeet-transcriber-gpu
+    container_name: parakeet-transcriber-gpu
+    restart: unless-stopped
+
+    # Use host networking for WebRTC UDP media traffic
+    network_mode: host
+
+    # GPU resource allocation
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    volumes:
+      # Mount model directories (read-only)
+      - ./tdt:/app/models/tdt:ro
+      - ./diar_streaming_sortformer_4spk-v2.onnx:/app/models/diarization/model.onnx:ro
+      # Mount audio files for testing (optional)
+      - ./broadcast_2.wav:/tmp/broadcast_2.wav:ro
+      # Mount frontend for live development (read-only)
+      - ./frontend:/app/frontend:ro
+
+    environment:
+      # Server configuration - GPU version on port 8090
+      - PORT=${GPU_PORT:-8090}
+      - PUBLIC_IP=${PUBLIC_IP}
+      - FRONTEND_PATH=/app/frontend
+
+      # Model paths (match volume mounts)
+      - TDT_MODEL_PATH=/app/models/tdt
+      - DIAR_MODEL_PATH=/app/models/diarization/model.onnx
+
+      # GPU configuration
+      - USE_GPU=true
+      - INTRA_THREADS=${INTRA_THREADS:-2}
+      - INTER_THREADS=${INTER_THREADS:-1}
+
+      # Transcription mode: set to "1" for speedy mode (recommended)
+      - SPEEDY_MODE=${SPEEDY_MODE}
+
+      # TURN server for NAT traversal (optional but recommended for public access)
+      - TURN_SERVER=${TURN_SERVER}
+      - TURN_USERNAME=${TURN_USERNAME}
+      - TURN_PASSWORD=${TURN_PASSWORD}
+
+      # Logging
+      - RUST_LOG=${RUST_LOG:-info}
+
+      # NVIDIA runtime
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+    # Override entrypoint to keep container running
+    # The transcriber will be started manually via docker exec
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+
+    # stdin_open: true allows piping audio to the container
+    stdin_open: true
+    tty: true
+
+    # Health check - disabled since we start transcriber manually
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
+
+networks:
+  default:
+    name: parakeet-webrtc-gpu
+    driver: bridge
