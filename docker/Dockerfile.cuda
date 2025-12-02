@@ -1,0 +1,126 @@
+# Multi-stage Dockerfile for parakeet-rs WebRTC transcriber with CUDA support
+# Build: docker build -f docker/Dockerfile.cuda -t parakeet-transcriber-gpu .
+#
+# Requires: NVIDIA Docker runtime (nvidia-docker2)
+# Run: docker run --gpus all -e USE_GPU=true parakeet-transcriber-gpu
+
+# ==============================================================================
+# Stage 1: Build environment with CUDA
+# ==============================================================================
+FROM nvidia/cuda:12.2.2-cudnn8-devel-ubuntu22.04 AS builder
+
+WORKDIR /app
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Rust and build dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    cmake \
+    clang \
+    pkg-config \
+    libssl-dev \
+    libopus-dev \
+    libasound2-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Copy Cargo files first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy source for dependency compilation
+RUN mkdir -p src examples && \
+    echo "fn main() {}" > src/lib.rs && \
+    echo "fn main() {}" > examples/webrtc_transcriber.rs
+
+# Build dependencies only with CUDA feature (cache layer)
+RUN cargo build --release --example webrtc_transcriber --features "cuda,sortformer" 2>/dev/null || true
+
+# Remove dummy source and clear cached compilation to force rebuild
+RUN rm -rf src examples && rm -rf target/release/.fingerprint/parakeet* target/release/deps/parakeet* target/release/deps/libparakeet* target/release/examples/webrtc_transcriber
+
+# Copy actual source code
+COPY src/ ./src/
+COPY examples/ ./examples/
+
+# Build release binary with CUDA and sortformer features
+RUN touch src/lib.rs && cargo build --release --example webrtc_transcriber --features "cuda,sortformer"
+
+# ==============================================================================
+# Stage 2: Runtime environment with CUDA
+# ==============================================================================
+FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    libopus0 \
+    ca-certificates \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /app/target/release/examples/webrtc_transcriber /app/
+
+# Copy frontend files
+COPY frontend/ /app/frontend/
+
+# Create directories for model volumes
+RUN mkdir -p /app/models/tdt /app/models/diarization
+
+# Expose HTTP/WebSocket port (GPU version uses 8090)
+EXPOSE 8090
+
+# ==============================================================================
+# Environment variables (all configurable at runtime)
+# ==============================================================================
+
+# Server configuration
+ENV PORT=8090
+ENV PUBLIC_IP=""
+ENV FRONTEND_PATH=/app/frontend
+
+# Model paths
+ENV TDT_MODEL_PATH=/app/models/tdt
+ENV DIAR_MODEL_PATH=/app/models/diarization/model.onnx
+
+# GPU configuration - enabled by default for this image
+ENV USE_GPU=true
+
+# Thread configuration (can be lower with GPU since inference is on GPU)
+ENV INTRA_THREADS=2
+ENV INTER_THREADS=1
+
+# Transcription mode (set to "1" to enable speedy mode)
+ENV SPEEDY_MODE=""
+
+# TURN server configuration for NAT traversal
+ENV TURN_SERVER=""
+ENV TURN_USERNAME=""
+ENV TURN_PASSWORD=""
+
+# Logging
+ENV RUST_LOG=info
+
+# NVIDIA runtime environment
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# Default command
+ENTRYPOINT ["/app/webrtc_transcriber"]
+CMD ["--frontend", "/app/frontend"]

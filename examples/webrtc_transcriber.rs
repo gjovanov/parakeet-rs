@@ -850,7 +850,7 @@ fn run_transcription_and_audio(
     running: Arc<AtomicBool>,
     extreme_mode: bool,
 ) {
-    use parakeet_rs::{RealtimeTDTConfig, RealtimeTDTDiarized};
+    use parakeet_rs::{ExecutionConfig, RealtimeTDTConfig, RealtimeTDTDiarized};
     use std::sync::mpsc as std_mpsc;
     use std::time::{Duration, Instant};
 
@@ -880,7 +880,10 @@ fn run_transcription_and_audio(
         lookahead_segments,
     };
 
-    let transcriber = match RealtimeTDTDiarized::new(tdt_model, diar_model, None, Some(config)) {
+    // Use ExecutionConfig::from_env() for GPU detection via USE_GPU env var
+    let exec_config = ExecutionConfig::from_env();
+
+    let transcriber = match RealtimeTDTDiarized::new(tdt_model, diar_model, Some(exec_config), Some(config)) {
         Ok(t) => t,
         Err(e) => {
             let error_msg = serde_json::json!({
