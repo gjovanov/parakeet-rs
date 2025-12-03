@@ -58,6 +58,7 @@ use webrtc::{
         media_engine::{MediaEngine, MIME_TYPE_OPUS},
         APIBuilder,
     },
+    ice::network_type::NetworkType,
     ice_transport::{
         ice_candidate::RTCIceCandidateInit,
         ice_credential_type::RTCIceCredentialType,
@@ -295,6 +296,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
     );
 
+    // Enable both UDP and TCP candidates for better connectivity
+    // TCP is useful when UDP is blocked (e.g., WSL2/Docker environments)
+    setting_engine.set_network_types(vec![
+        NetworkType::Udp4,
+        NetworkType::Udp6,
+        NetworkType::Tcp4,
+        NetworkType::Tcp6,
+    ]);
+
     let api = APIBuilder::new()
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
@@ -323,10 +333,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
     let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
 
-    // Build WebSocket URL based on public IP or detected IP
-    let ws_host = args.public_ip.clone()
-        .or(detected_ip.clone())
-        .unwrap_or_else(|| "localhost".to_owned());
+    // Build WebSocket URL - always use localhost for signaling
+    // PUBLIC_IP is only for WebRTC ICE candidates (NAT traversal), not for WebSocket
+    let ws_host = if args.public_ip.is_some() {
+        // When PUBLIC_IP is set, browser connects locally but WebRTC uses external IP
+        "localhost".to_owned()
+    } else {
+        detected_ip.clone().unwrap_or_else(|| "localhost".to_owned())
+    };
     let ws_url = format!("ws://{}:{}/ws", ws_host, args.port);
 
     let runtime_config = RuntimeConfig {
