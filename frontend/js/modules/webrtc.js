@@ -26,7 +26,7 @@ export class WebRTCClient {
 
     this.options = {
       iceServers: options.iceServers || defaultIceServers,
-      // Use 'all' to allow direct connections when server provides public IP candidates
+      // Allow all transport (direct + relay)
       iceTransportPolicy: 'all',
       ...options,
     };
