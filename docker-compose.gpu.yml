@@ -57,6 +57,7 @@ services:
       # Server configuration - GPU version on port 8090
       - PORT=${GPU_PORT:-8090}
       - PUBLIC_IP=${PUBLIC_IP}
+      - WS_HOST=${WS_HOST}
       - FRONTEND_PATH=/app/frontend
 
       # Model paths (match volume mounts)
