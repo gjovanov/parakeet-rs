@@ -1,10 +1,18 @@
 #!/bin/bash
 #
 # Parakeet-rs Run Script
-# Starts the WebRTC transcription server in CPU or GPU mode
+# Starts the WebRTC transcription server
 #
-# Usage: ./run.sh [cpu|gpu]
-#        Default: gpu
+# Usage: ./run.sh [runtime] [mode] [file]
+#        runtime: cpu|gpu (default: gpu)
+#        mode: speedy|low-latency|ultra-low-latency|extreme-low-latency|pause-based|lookahead (default: speedy)
+#        file: audio file path (default: broadcast_2.wav)
+#
+# Examples:
+#        ./run.sh                              # GPU + speedy + broadcast_2.wav
+#        ./run.sh gpu speedy                   # GPU + speedy + broadcast_2.wav
+#        ./run.sh gpu speedy myaudio.wav       # GPU + speedy + custom audio
+#        ./run.sh cpu low-latency podcast.wav  # CPU + low-latency + custom audio
 #
 
 set -e
@@ -12,19 +20,51 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Default mode
-MODE="${1:-gpu}"
+# Default values
+RUNTIME="${1:-gpu}"
+MODE="${2:-speedy}"
+AUDIO_FILE="${3:-broadcast_2.wav}"
 
-# Validate mode
-if [[ "$MODE" != "cpu" && "$MODE" != "gpu" ]]; then
-    echo "Error: Invalid mode '$MODE'"
-    echo "Usage: ./run.sh [cpu|gpu]"
+# Valid options
+VALID_RUNTIMES="cpu gpu"
+VALID_MODES="speedy low-latency ultra-low-latency extreme-low-latency pause-based lookahead"
+
+# Validate runtime
+if [[ ! " $VALID_RUNTIMES " =~ " $RUNTIME " ]]; then
+    echo "Error: Invalid runtime '$RUNTIME'"
+    echo "Valid runtimes: $VALID_RUNTIMES"
+    echo ""
+    echo "Usage: ./run.sh [runtime] [mode]"
     exit 1
 fi
 
+# Validate mode
+if [[ ! " $VALID_MODES " =~ " $MODE " ]]; then
+    echo "Error: Invalid mode '$MODE'"
+    echo "Valid modes: $VALID_MODES"
+    echo ""
+    echo "Usage: ./run.sh [runtime] [mode]"
+    exit 1
+fi
+
+# Convert mode to CLI flag
+get_mode_flag() {
+    case "$MODE" in
+        speedy)              echo "--speedy" ;;
+        low-latency)         echo "--low-latency" ;;
+        ultra-low-latency)   echo "--ultra-low-latency" ;;
+        extreme-low-latency) echo "--extreme-low-latency" ;;
+        pause-based)         echo "--pause-based" ;;
+        lookahead)           echo "--lookahead" ;;
+        *)                   echo "--speedy" ;;
+    esac
+}
+
 echo "========================================"
 echo "  Parakeet-rs WebRTC Transcriber"
-echo "  Mode: $MODE"
+echo "  Runtime: $RUNTIME"
+echo "  Mode:    $MODE"
+echo "  Audio:   $AUDIO_FILE"
 echo "========================================"
 echo ""
 
@@ -61,8 +101,8 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Check GPU for GPU mode
-    if [ "$MODE" = "gpu" ]; then
+    # Check GPU for GPU runtime
+    if [ "$RUNTIME" = "gpu" ]; then
         if ! command -v nvidia-smi &> /dev/null; then
             echo "Warning: nvidia-smi not found, GPU may not be available"
         elif ! nvidia-smi &> /dev/null; then
@@ -71,27 +111,27 @@ check_prerequisites() {
     fi
 }
 
-# Select compose file based on mode
+# Select compose file based on runtime
 get_compose_file() {
-    if [ "$MODE" = "gpu" ]; then
+    if [ "$RUNTIME" = "gpu" ]; then
         echo "docker-compose.gpu.yml"
     else
         echo "docker-compose.yml"
     fi
 }
 
-# Get container name based on mode
+# Get container name based on runtime
 get_container_name() {
-    if [ "$MODE" = "gpu" ]; then
+    if [ "$RUNTIME" = "gpu" ]; then
         echo "parakeet-transcriber-gpu"
     else
         echo "parakeet-transcriber"
     fi
 }
 
-# Get port based on mode
+# Get port based on runtime
 get_port() {
-    if [ "$MODE" = "gpu" ]; then
+    if [ "$RUNTIME" = "gpu" ]; then
         # Read from .env or default
         grep -E "^GPU_PORT=" .env 2>/dev/null | cut -d'=' -f2 || echo "8090"
     else
@@ -140,24 +180,36 @@ wait_for_container() {
 start_transcriber() {
     local container_name=$(get_container_name)
     local port=$(get_port)
+    local mode_flag=$(get_mode_flag)
 
-    echo "[3/3] Starting transcriber..."
+    echo "[3/3] Starting transcriber with $mode_flag..."
 
-    # Check if audio file exists for demo
+    # Check if audio file exists
     local audio_cmd=""
-    if [ -f "broadcast_2.wav" ]; then
-        audio_cmd="ffmpeg -re -stream_loop -1 -i /tmp/broadcast_2.wav -f s16le -ar 16000 -ac 1 - 2>/dev/null |"
-        echo "  [INFO] Using broadcast_2.wav for demo audio"
+    if [ -f "$AUDIO_FILE" ]; then
+        # Get the filename for container path
+        local audio_basename=$(basename "$AUDIO_FILE")
+        local container_audio_path="/tmp/$audio_basename"
+
+        # Copy audio file to container if not already mounted
+        if ! docker exec "$container_name" test -f "$container_audio_path" 2>/dev/null; then
+            echo "  [INFO] Copying $AUDIO_FILE to container..."
+            docker cp "$AUDIO_FILE" "$container_name:$container_audio_path"
+        fi
+
+        audio_cmd="ffmpeg -re -stream_loop -1 -i $container_audio_path -f s16le -ar 16000 -ac 1 - 2>/dev/null |"
+        echo "  [INFO] Using $AUDIO_FILE for audio input"
     else
-        echo "  [INFO] No demo audio file found"
-        echo "  [INFO] Pipe audio to container: docker exec -i $container_name sh -c 'cat | /app/webrtc_transcriber --speedy'"
+        echo "  [WARN] Audio file not found: $AUDIO_FILE"
+        echo "  [INFO] Starting without audio input"
+        echo "  [INFO] Pipe audio to container: docker exec -i $container_name sh -c 'cat | /app/webrtc_transcriber $mode_flag'"
     fi
 
     # Start transcriber in background
     if [ -n "$audio_cmd" ]; then
-        docker exec -d "$container_name" sh -c "$audio_cmd /app/webrtc_transcriber --speedy 2>&1 | tee /tmp/transcriber.log"
+        docker exec -d "$container_name" sh -c "$audio_cmd /app/webrtc_transcriber $mode_flag 2>&1 | tee /tmp/transcriber.log"
     else
-        docker exec -d "$container_name" sh -c "/app/webrtc_transcriber --speedy 2>&1 | tee /tmp/transcriber.log"
+        docker exec -d "$container_name" sh -c "/app/webrtc_transcriber $mode_flag 2>&1 | tee /tmp/transcriber.log"
     fi
 
     # Wait for server to start
@@ -176,11 +228,18 @@ start_transcriber() {
 print_status() {
     local container_name=$(get_container_name)
     local port=$(get_port)
+    local mode_flag=$(get_mode_flag)
 
     echo ""
     echo "========================================"
     echo "  Server Running!"
     echo "========================================"
+    echo ""
+    echo "Configuration:"
+    echo "  Runtime: $RUNTIME"
+    echo "  Mode:    $MODE ($mode_flag)"
+    echo "  Audio:   $AUDIO_FILE"
+    echo "  Port:    $port"
     echo ""
     echo "Access:"
     echo "  WebSocket streaming: http://localhost:$port/"
@@ -190,7 +249,7 @@ print_status() {
     echo "  View logs:    docker exec $container_name cat /tmp/transcriber.log"
     echo "  Follow logs:  docker exec $container_name tail -f /tmp/transcriber.log"
     echo "  Stop:         docker compose -f $(get_compose_file) down"
-    echo "  Restart:      ./run.sh $MODE"
+    echo "  Restart:      ./run.sh $RUNTIME $MODE"
     echo ""
 
     # Show initial logs
@@ -201,8 +260,48 @@ print_status() {
     echo "----------------------------------------"
 }
 
+# Show help
+show_help() {
+    echo "Parakeet-rs Run Script"
+    echo ""
+    echo "Usage: ./run.sh [runtime] [mode] [file]"
+    echo ""
+    echo "Arguments:"
+    echo "  runtime    Execution runtime (default: gpu)"
+    echo "             cpu  - CPU-only execution"
+    echo "             gpu  - GPU-accelerated execution (requires NVIDIA GPU)"
+    echo ""
+    echo "  mode       Transcription mode (default: speedy)"
+    echo "             speedy              - Optimized pause-based, good balance"
+    echo "             low-latency         - 10s buffer, 1.5s interval"
+    echo "             ultra-low-latency   - 8s buffer, 1.0s interval"
+    echo "             extreme-low-latency - 5s buffer, 0.5s interval"
+    echo "             pause-based         - Confirms at natural speech pauses"
+    echo "             lookahead           - Best quality with future context"
+    echo ""
+    echo "  file       Audio file path (default: broadcast_2.wav)"
+    echo "             Path to a WAV file for audio input"
+    echo "             The file will be copied to the container and looped"
+    echo ""
+    echo "Examples:"
+    echo "  ./run.sh                              # GPU + speedy + broadcast_2.wav"
+    echo "  ./run.sh gpu                          # GPU + speedy + broadcast_2.wav"
+    echo "  ./run.sh cpu                          # CPU + speedy + broadcast_2.wav"
+    echo "  ./run.sh gpu speedy                   # GPU + speedy + broadcast_2.wav"
+    echo "  ./run.sh gpu speedy myaudio.wav       # GPU + speedy + custom audio"
+    echo "  ./run.sh cpu low-latency podcast.wav  # CPU + low-latency + custom audio"
+    echo "  ./run.sh gpu lookahead interview.wav  # GPU + lookahead + custom audio"
+    echo ""
+}
+
 # Main
 main() {
+    # Show help if requested
+    if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+        show_help
+        exit 0
+    fi
+
     check_prerequisites
     start_container
     wait_for_container

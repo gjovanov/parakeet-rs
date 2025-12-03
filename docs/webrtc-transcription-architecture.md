@@ -243,15 +243,82 @@ fn detect_silence(&mut self, samples: &[f32]) -> bool {
 
 ### Available Latency Modes
 
-| Mode | Buffer | Interval | Confirm | Expected Latency |
-|------|--------|----------|---------|------------------|
-| `--speedy` | 8.0s | 0.2s | 0.4s | ~0.3-1.5s |
-| `--pause-based` | 10.0s | 0.3s | 0.5s | ~0.5-2.0s |
-| `--low-latency` | 10.0s | 1.5s | 2.0s | ~3.5s |
-| `--ultra-low-latency` | 8.0s | 1.0s | 1.5s | ~2.5s |
-| `--extreme-low-latency` | 5.0s | 0.5s | 0.8s | ~1.3s |
+The transcriber supports multiple latency modes, each optimized for different use cases:
 
-**Speedy mode** (recommended) combines pause detection with aggressive timings for the best balance.
+| Mode | Buffer | Interval | Confirm | Expected Latency | Pause Detection |
+|------|--------|----------|---------|------------------|-----------------|
+| `--speedy` | 8.0s | 0.2s | 0.4s | ~0.3-1.5s | ✅ Yes |
+| `--pause-based` | 10.0s | 0.3s | 0.5s | ~0.5-2.0s | ✅ Yes |
+| `--low-latency` | 10.0s | 1.5s | 2.0s | ~3.5s | ❌ No |
+| `--ultra-low-latency` | 8.0s | 1.0s | 1.5s | ~2.5s | ❌ No |
+| `--extreme-low-latency` | 5.0s | 0.5s | 0.8s | ~1.3s | ❌ No |
+| `--lookahead` | 10.0s | 0.3s | 0.5s | ~1.0-3.0s | ✅ Yes |
+
+#### Mode Details
+
+**`--speedy`** (Recommended)
+- Best balance of latency and quality
+- Uses pause detection to confirm at natural speech boundaries
+- Aggressive timings (0.2s interval, 0.4s confirm threshold)
+- Ideal for: Live captioning, real-time subtitles, interactive applications
+
+**`--pause-based`**
+- Similar to speedy but with more conservative timings
+- Better accuracy at the cost of slightly higher latency
+- Ideal for: High-quality transcription where accuracy is more important than speed
+
+**`--low-latency`**
+- Time-based confirmation without pause detection
+- Predictable, fixed latency
+- Ideal for: Broadcast scenarios with consistent delay requirements
+
+**`--ultra-low-latency`**
+- Faster than low-latency with smaller buffer
+- Good for applications needing faster response
+- Ideal for: Live interviews, Q&A sessions
+
+**`--extreme-low-latency`**
+- Fastest possible response time
+- May sacrifice some accuracy for speed
+- Ideal for: Real-time voice assistants, gaming, interactive voice applications
+
+**`--lookahead`**
+- Best transcription quality
+- Uses future context for better accuracy
+- Processes segments with knowledge of subsequent audio
+- Ideal for: Post-processing, archival transcription, highest quality requirements
+
+#### Choosing the Right Mode
+
+```
+Quality vs Latency Spectrum:
+
+  Lower Latency                                    Higher Quality
+  ◄─────────────────────────────────────────────────────────────►
+
+  extreme    ultra      speedy     pause-     low-       lookahead
+  -low-      -low-                 based      latency
+  latency    latency
+
+  ~1.3s      ~2.5s      ~0.3-1.5s  ~0.5-2.0s  ~3.5s      ~1.0-3.0s
+```
+
+#### Usage Examples
+
+```bash
+# Via CLI flags
+./webrtc_transcriber --speedy
+./webrtc_transcriber --low-latency
+./webrtc_transcriber --lookahead
+
+# Via run.sh script
+./run.sh gpu speedy
+./run.sh cpu low-latency
+./run.sh gpu lookahead
+
+# Via environment variable (speedy mode only)
+SPEEDY_MODE=1 ./webrtc_transcriber
+```
 
 ---
 
