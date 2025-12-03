@@ -43,6 +43,7 @@ services:
       # Server configuration
       - PORT=${PORT}
       - PUBLIC_IP=${PUBLIC_IP}
+      - WS_HOST=${WS_HOST}
       - FRONTEND_PATH=/app/frontend
 
       # Model paths (match volume mounts)

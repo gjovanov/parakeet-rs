@@ -132,16 +132,25 @@ HF_TOKEN=
 # Server Configuration
 # =============================================================================
 
-# GPU Mode (set to false for CPU-only)
+# GPU Mode (set to false for CPU-only, or to cuda/tensorrt for specific provider)
 USE_GPU=true
 
 # HTTP/WebSocket server ports
 PORT=8080
 GPU_PORT=8090
 
-# Public IP address for WebRTC ICE candidates
+# Public IP address for WebRTC ICE candidates (NAT traversal)
 # Required for external access. Auto-detected or set manually.
 PUBLIC_IP=
+
+# WebSocket host for browser connection
+# This is the host that browsers use to connect to the WebSocket server
+# Priority: WS_HOST > PUBLIC_IP > auto-detected IP > localhost
+# Examples:
+#   - Leave empty for localhost (default)
+#   - Set to your LAN IP for local network access (e.g., 192.168.1.100)
+#   - Set to your public domain for internet access (e.g., transcribe.example.com)
+WS_HOST=
 
 # =============================================================================
 # Transcription Mode
@@ -199,6 +208,7 @@ EOF
     echo ""
     echo "  IMPORTANT: Edit .env to configure:"
     echo "    - HF_TOKEN (required for gated models)"
+    echo "    - WS_HOST (required for Docker/remote browser access)"
     echo "    - PUBLIC_IP (required for external WebRTC access)"
     echo "    - TURN_SERVER (recommended for NAT traversal)"
 }

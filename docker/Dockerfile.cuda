@@ -89,6 +89,7 @@ EXPOSE 8090
 # Server configuration
 ENV PORT=8090
 ENV PUBLIC_IP=""
+ENV WS_HOST=""
 ENV FRONTEND_PATH=/app/frontend
 
 # Model paths
