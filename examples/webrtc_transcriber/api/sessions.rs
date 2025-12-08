@@ -1,0 +1,182 @@
+//! API handlers for session management
+
+use super::models::ApiResponse;
+use crate::config::LatencyMode;
+use crate::state::{AppState, SessionAudioState};
+use crate::transcription::run_session_transcription;
+use axum::{extract::{Path, State}, Json};
+use parakeet_rs::SessionState;
+use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use webrtc::api::media_engine::MIME_TYPE_OPUS;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+
+/// Request to create a new session
+#[derive(Debug, Deserialize)]
+pub struct CreateSessionRequest {
+    pub model_id: String,
+    pub media_id: String,
+    #[serde(default)]
+    pub mode: LatencyMode,
+    /// Language code for transcription (default: "de" for German)
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+fn default_language() -> String {
+    "de".to_string()
+}
+
+/// List all sessions
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+) -> Json<ApiResponse<Vec<parakeet_rs::SessionInfo>>> {
+    let sessions = state.session_manager.list_sessions().await;
+    Json(ApiResponse::success(sessions))
+}
+
+/// Create a new session
+pub async fn create_session(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Json<ApiResponse<parakeet_rs::SessionInfo>> {
+    let mode_str = req.mode.as_str();
+    let language = if req.language.is_empty() { "de".to_string() } else { req.language };
+    match state.session_manager.create_session(&req.model_id, &req.media_id, mode_str, &language).await {
+        Ok(session) => {
+            let info = session.info().await;
+            Json(ApiResponse::success(info))
+        }
+        Err(e) => Json(ApiResponse::error(e.to_string())),
+    }
+}
+
+/// Get a specific session
+pub async fn get_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<parakeet_rs::SessionInfo>> {
+    match state.session_manager.get_session(&id).await {
+        Some(session) => {
+            let info = session.info().await;
+            Json(ApiResponse::success(info))
+        }
+        None => Json(ApiResponse::error("Session not found")),
+    }
+}
+
+/// Stop a session
+pub async fn stop_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<()>> {
+    // Stop the session
+    if let Err(e) = state.session_manager.stop_session(&id).await {
+        return Json(ApiResponse::error(e.to_string()));
+    }
+
+    // Clean up audio state and kill ffmpeg process
+    {
+        let mut audio_states = state.session_audio.write().await;
+        if let Some(audio_state) = audio_states.remove(&id) {
+            audio_state.running.store(false, Ordering::SeqCst);
+
+            // Kill ffmpeg process to unblock the audio streaming thread
+            let pid = audio_state.ffmpeg_pid.load(Ordering::SeqCst);
+            if pid != 0 {
+                eprintln!("[Session {}] Killing ffmpeg process (pid: {})", id, pid);
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    Json(ApiResponse::success(()))
+}
+
+/// Start a session
+pub async fn start_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<parakeet_rs::SessionInfo>> {
+    // Get the session
+    let session = match state.session_manager.get_session(&id).await {
+        Some(s) => s,
+        None => return Json(ApiResponse::error("Session not found")),
+    };
+
+    // Check if already running
+    if session.is_running() {
+        let info = session.info().await;
+        return Json(ApiResponse::success(info));
+    }
+
+    // Create audio track for this session
+    let audio_track = Arc::new(TrackLocalStaticRTP::new(
+        RTCRtpCodecCapability {
+            mime_type: MIME_TYPE_OPUS.to_owned(),
+            clock_rate: 48000,
+            channels: 1,
+            sdp_fmtp_line: "minptime=10;useinbandfec=1".to_owned(),
+            rtcp_feedback: vec![],
+        },
+        format!("audio-{}", id),
+        format!("session-{}", id),
+    ));
+
+    let running = Arc::new(AtomicBool::new(true));
+    let ffmpeg_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+    // Store audio state
+    {
+        let mut audio_states = state.session_audio.write().await;
+        audio_states.insert(
+            id.clone(),
+            SessionAudioState {
+                audio_track: audio_track.clone(),
+                running: running.clone(),
+                ffmpeg_pid: ffmpeg_pid.clone(),
+            },
+        );
+    }
+
+    // Get model config for this session
+    let model = match state.model_registry.get_model(&session.model_id) {
+        Some(m) => m.clone(),
+        None => return Json(ApiResponse::error("Model not found")),
+    };
+
+    // Start transcription thread
+    session.start();
+    session.set_state(SessionState::Running).await;
+
+    let session_clone = session.clone();
+    let wav_path = session.wav_path.clone();
+    let model_path = model.model_path.clone();
+    let diar_path = model.diarization_path.clone();
+    let exec_config = model.exec_config.clone();
+    let model_id = session.model_id.clone();
+    let language = session.language.clone();
+
+    std::thread::spawn(move || {
+        run_session_transcription(
+            session_clone,
+            wav_path,
+            model_path,
+            diar_path,
+            exec_config,
+            audio_track,
+            running,
+            model_id,
+            language,
+            ffmpeg_pid,
+        );
+    });
+
+    let info = session.info().await;
+    Json(ApiResponse::success(info))
+}

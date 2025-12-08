@@ -73,12 +73,6 @@ pub mod vad;
 pub mod realtime_canary_vad;
 #[cfg(feature = "sortformer")]
 pub mod realtime_tdt_vad;
-#[cfg(feature = "whisper")]
-pub mod whisper;
-#[cfg(feature = "whisper")]
-pub mod realtime_whisper;
-#[cfg(feature = "whisper")]
-pub mod realtime_whisper_vad;
 mod timestamps;
 mod transcriber;
 mod vocab;
@@ -139,10 +133,3 @@ pub use realtime_canary_vad::{CanaryVadResult, RealtimeCanaryVad, RealtimeCanary
 #[cfg(feature = "sortformer")]
 pub use realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig, TdtVadResult};
 
-// Whisper exports
-#[cfg(feature = "whisper")]
-pub use whisper::{WhisperConfig, WhisperModel, WhisperTokenizer, WhisperVariant};
-#[cfg(feature = "whisper")]
-pub use realtime_whisper::{RealtimeWhisper, RealtimeWhisperConfig, WhisperChunkResult};
-#[cfg(feature = "whisper")]
-pub use realtime_whisper_vad::{RealtimeWhisperVad, RealtimeWhisperVadConfig, WhisperVadResult};
