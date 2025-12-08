@@ -48,6 +48,16 @@ export class SubtitleRenderer {
     this.staleTimer = null;
     this.lastSubtitleTime = 0;
 
+    // Queue for segments that arrived ahead of playback time
+    /** @type {Segment[]} */
+    this.pendingSegments = [];
+
+    // Sync mode: if true, hold FINAL segments that are too far ahead of playback
+    // DISABLED: The sync logic causes issues when WebRTC reconnects and audio time resets
+    // Transcripts should display immediately as they arrive
+    this.syncWithPlayback = false;
+    this.maxAheadSecs = 30.0;  // Not used when syncWithPlayback is false
+
     // Event emitter
     const emitter = createEventEmitter();
     this.on = emitter.on.bind(emitter);
@@ -97,7 +107,7 @@ export class SubtitleRenderer {
    */
   getSpeakerName(speaker) {
     if (speaker === null || speaker === undefined) {
-      return 'Speaker ?';
+      return ''; // Hide speaker label when not available (e.g., Canary model)
     }
     return `Speaker ${speaker}`;
   }
@@ -107,9 +117,35 @@ export class SubtitleRenderer {
    * @param {Segment} segment - Segment to add
    */
   addSegment(segment) {
+    console.log('[Subtitles] addSegment called:', {
+      text: segment.text?.substring(0, 50),
+      isFinal: segment.isFinal,
+      start: segment.start,
+      end: segment.end
+    });
+
     // Reset stale timer on any new segment
     this.resetStaleTimer();
 
+    // If sync mode is enabled, check if FINAL segment should be queued
+    // Partial segments always display immediately (they're the live preview)
+    // Only queue FINAL segments that are WAY too far ahead of playback
+    if (this.syncWithPlayback && segment.isFinal && segment.start > this.currentTime + this.maxAheadSecs) {
+      // Add to pending queue (will be processed when playback catches up)
+      this.pendingSegments.push(segment);
+      // Sort by start time
+      this.pendingSegments.sort((a, b) => a.start - b.start);
+      return;
+    }
+
+    this._processSegment(segment);
+  }
+
+  /**
+   * Internal method to process a segment (display it)
+   * @param {Segment} segment - Segment to process
+   */
+  _processSegment(segment) {
     if (segment.isFinal) {
       // Add to finalized segments
       this.segments.push(segment);
@@ -187,8 +223,14 @@ export class SubtitleRenderer {
     el.dataset.speaker = segment.speaker ?? '?';
 
     const color = this.getSpeakerColor(segment.speaker);
+    const speakerName = this.getSpeakerName(segment.speaker);
 
-    let html = `<span class="segment-speaker" style="color: ${color}">[${this.getSpeakerName(segment.speaker)}]</span>`;
+    let html = '';
+
+    // Only show speaker label if available (TDT has diarization, Canary doesn't)
+    if (speakerName) {
+      html += `<span class="segment-speaker" style="color: ${color}">[${speakerName}]</span>`;
+    }
 
     if (this.options.showTimestamps) {
       html += `<span class="segment-time">${formatTime(segment.start)}</span>`;
@@ -203,11 +245,12 @@ export class SubtitleRenderer {
       this.emit('seek', segment.start);
     });
 
-    this.transcriptElement.appendChild(el);
+    // Insert at top (newest first) instead of appending at bottom
+    this.transcriptElement.insertBefore(el, this.transcriptElement.firstChild);
 
-    // Auto-scroll
+    // Auto-scroll to top when new segments arrive
     if (this.options.autoScroll) {
-      this.scrollToBottom();
+      this.scrollToTop();
     }
   }
 
@@ -215,19 +258,40 @@ export class SubtitleRenderer {
    * Update the live subtitle display
    */
   updateLiveDisplay() {
-    if (!this.liveElement) return;
+    if (!this.liveElement) {
+      console.warn('[Subtitles] liveElement is null, cannot update live display');
+      return;
+    }
 
-    const segment = this.currentSegment || this.getSegmentAtTime(this.currentTime);
+    // Priority: currentSegment (partial) > segment at playback time > most recent finalized segment
+    let segment = this.currentSegment || this.getSegmentAtTime(this.currentTime);
+
+    // If no segment from above, show the most recent finalized segment
+    if (!segment && this.segments.length > 0) {
+      segment = this.segments[this.segments.length - 1];
+      console.log('[Subtitles] Showing last finalized segment:', segment?.text?.substring(0, 50));
+    }
 
     if (segment) {
       const color = this.getSpeakerColor(segment.speaker);
-      this.liveSpeakerEl.textContent = this.getSpeakerName(segment.speaker);
-      this.liveSpeakerEl.style.color = color;
+      const speakerName = this.getSpeakerName(segment.speaker);
+
+      // Only show speaker label if available (TDT has diarization, Canary doesn't)
+      if (speakerName) {
+        this.liveSpeakerEl.textContent = speakerName;
+        this.liveSpeakerEl.style.color = color;
+        this.liveSpeakerEl.style.display = '';
+      } else {
+        this.liveSpeakerEl.textContent = '';
+        this.liveSpeakerEl.style.display = 'none';
+      }
       this.liveSpeakerEl.dataset.speaker = segment.speaker ?? '?';
       this.liveTextEl.textContent = segment.text;
       this.liveElement.classList.add('active');
+      console.log('[Subtitles] Live display updated, added .active class, text:', segment.text?.substring(0, 50));
     } else {
       this.liveSpeakerEl.textContent = '';
+      this.liveSpeakerEl.style.display = 'none';
       this.liveTextEl.textContent = '';
       this.liveElement.classList.remove('active');
     }
@@ -239,8 +303,32 @@ export class SubtitleRenderer {
    */
   updateTime(time) {
     this.currentTime = time;
+
+    // Process any pending segments that playback has caught up to
+    this._processPendingSegments();
+
     this.updateLiveDisplay();
     this.highlightCurrentSegment(time);
+  }
+
+  /**
+   * Process pending segments that are now ready (within maxAhead window)
+   * Only FINAL segments are queued, so we check their start time
+   */
+  _processPendingSegments() {
+    while (this.pendingSegments.length > 0) {
+      const segment = this.pendingSegments[0];
+
+      // Release segment if it's now within the allowed ahead window
+      if (segment.start <= this.currentTime + this.maxAheadSecs) {
+        // Remove from queue and process
+        this.pendingSegments.shift();
+        this._processSegment(segment);
+      } else {
+        // Remaining segments are too far in the future
+        break;
+      }
+    }
   }
 
   /**
@@ -329,6 +417,15 @@ export class SubtitleRenderer {
   }
 
   /**
+   * Scroll transcript to top (for newest-first display)
+   */
+  scrollToTop() {
+    if (this.transcriptElement) {
+      this.transcriptElement.scrollTop = 0;
+    }
+  }
+
+  /**
    * Scroll transcript to bottom
    */
   scrollToBottom() {
@@ -344,6 +441,7 @@ export class SubtitleRenderer {
     this.segments = [];
     this.currentSegment = null;
     this.currentTime = 0;
+    this.pendingSegments = [];
 
     // Clear stale timer
     if (this.staleTimer) {
@@ -357,6 +455,30 @@ export class SubtitleRenderer {
 
     this.updateLiveDisplay();
     this.emit('clear');
+  }
+
+  /**
+   * Enable/disable sync with playback
+   * @param {boolean} enabled - Whether to sync subtitles with playback time
+   */
+  setSyncWithPlayback(enabled) {
+    this.syncWithPlayback = enabled;
+    // If disabling sync, process all pending segments immediately
+    if (!enabled) {
+      while (this.pendingSegments.length > 0) {
+        this._processSegment(this.pendingSegments.shift());
+      }
+    }
+  }
+
+  /**
+   * Set the lookahead window for transcript display
+   * @param {number} seconds - How many seconds ahead to show transcripts
+   */
+  setLookahead(seconds) {
+    this.lookaheadSecs = seconds;
+    // Process any segments that are now within the new lookahead window
+    this._processPendingSegments();
   }
 
   /**
@@ -387,11 +509,13 @@ export class SubtitleRenderer {
 
   /**
    * Re-render transcript from segments
+   * Renders in reverse order (newest first)
    */
   rerender() {
     if (!this.transcriptElement) return;
 
     this.transcriptElement.innerHTML = '';
+    // Render oldest first so newest ends up at top after insertBefore
     for (const segment of this.segments) {
       this.appendToTranscript(segment);
     }

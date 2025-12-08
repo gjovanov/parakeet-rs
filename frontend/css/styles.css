@@ -209,7 +209,7 @@ body {
 
 #live-subtitle {
   text-align: center;
-  opacity: 0;
+  opacity: 0.3;
   transition: opacity 0.3s;
 }
 

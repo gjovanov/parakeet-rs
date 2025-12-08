@@ -44,6 +44,7 @@
 //! - Bit Depth: 16-bit PCM or 32-bit float
 
 mod audio;
+pub mod canary;
 mod config;
 mod decoder;
 mod decoder_tdt;
@@ -62,7 +63,22 @@ pub mod sortformer;
 pub mod sortformer_stream;
 #[cfg(feature = "sortformer")]
 pub mod realtime;
+pub mod realtime_canary;
 pub mod realtime_tdt;
+pub mod streaming_transcriber;
+pub mod model_registry;
+pub mod media_manager;
+pub mod session;
+pub mod vad;
+pub mod realtime_canary_vad;
+#[cfg(feature = "sortformer")]
+pub mod realtime_tdt_vad;
+#[cfg(feature = "whisper")]
+pub mod whisper;
+#[cfg(feature = "whisper")]
+pub mod realtime_whisper;
+#[cfg(feature = "whisper")]
+pub mod realtime_whisper_vad;
 mod timestamps;
 mod transcriber;
 mod vocab;
@@ -98,3 +114,35 @@ pub use realtime_tdt::{ChunkResult, RealtimeTDT, RealtimeTDTConfig, Segment};
 
 #[cfg(feature = "sortformer")]
 pub use realtime_tdt::{DiarizedChunkResult, DiarizedSegment, RealtimeTDTDiarized};
+
+pub use streaming_transcriber::{
+    ModelInfo, StreamingChunkResult, StreamingTranscriber, TranscriptionSegment, TranscriberFactory,
+};
+
+pub use model_registry::{ModelRegistry, ModelType, RegisteredModel, SharedModelRegistry};
+
+pub use media_manager::{
+    MediaFile, MediaFormat, MediaManager, MediaManagerConfig, SharedMediaManager,
+};
+
+pub use session::{
+    SessionInfo, SessionManager, SessionState, SharedSessionManager, TranscriptionSession,
+};
+
+pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};
+pub use realtime_canary::{CanaryChunkResult, RealtimeCanary, RealtimeCanaryConfig};
+
+// VAD exports
+pub use vad::{SileroVad, VadConfig, VadSegment, VadSegmenter, VadState, VAD_CHUNK_SIZE, VAD_SAMPLE_RATE};
+pub use realtime_canary_vad::{CanaryVadResult, RealtimeCanaryVad, RealtimeCanaryVadConfig};
+
+#[cfg(feature = "sortformer")]
+pub use realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig, TdtVadResult};
+
+// Whisper exports
+#[cfg(feature = "whisper")]
+pub use whisper::{WhisperConfig, WhisperModel, WhisperTokenizer, WhisperVariant};
+#[cfg(feature = "whisper")]
+pub use realtime_whisper::{RealtimeWhisper, RealtimeWhisperConfig, WhisperChunkResult};
+#[cfg(feature = "whisper")]
+pub use realtime_whisper_vad::{RealtimeWhisperVad, RealtimeWhisperVadConfig, WhisperVadResult};
