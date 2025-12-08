@@ -108,12 +108,13 @@ impl Transcriber for ParakeetTDT {
         result.tokens = process_timestamps(&result.tokens, mode);
 
         // Rebuild full text from processed tokens
+        // Tokens already have spaces from SentencePiece ▁ replacement, so join without adding more
         result.text = result
             .tokens
             .iter()
             .map(|t| t.text.as_str())
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("");
 
         Ok(result)
     }

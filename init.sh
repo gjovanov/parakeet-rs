@@ -74,7 +74,7 @@ download_file() {
 # Download TDT model (multilingual transcription)
 download_tdt_model() {
     echo ""
-    echo "[1/2] Downloading TDT Model (Multilingual Transcription)..."
+    echo "[1/3] Downloading TDT Model (Multilingual Transcription)..."
     echo "      Source: huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx"
     echo ""
 
@@ -91,12 +91,30 @@ download_tdt_model() {
 # Download Diarization model (speaker identification)
 download_diarization_model() {
     echo ""
-    echo "[2/2] Downloading Diarization Model (Speaker Identification)..."
+    echo "[2/3] Downloading Diarization Model (Speaker Identification)..."
     echo "      Source: huggingface.co/altunenes/parakeet-rs"
     echo ""
 
     local url="https://huggingface.co/altunenes/parakeet-rs/resolve/main/diar_streaming_sortformer_4spk-v2.onnx"
     download_file "$url" "diar_streaming_sortformer_4spk-v2.onnx"
+}
+
+# Download Canary model (multilingual ASR)
+download_canary_model() {
+    echo ""
+    echo "[3/3] Downloading Canary 1B v2 Model (Multilingual ASR)..."
+    echo "      Source: huggingface.co/istupakov/canary-1b-v2-onnx"
+    echo "      Note: Using INT8 quantized models (~1GB total)"
+    echo ""
+
+    mkdir -p canary
+
+    local base_url="https://huggingface.co/istupakov/canary-1b-v2-onnx/resolve/main"
+
+    download_file "$base_url/encoder-model.int8.onnx" "canary/encoder-model.int8.onnx"
+    download_file "$base_url/decoder-model.int8.onnx" "canary/decoder-model.int8.onnx"
+    download_file "$base_url/vocab.txt" "canary/vocab.txt"
+    download_file "$base_url/config.json" "canary/config.json"
 }
 
 # Create .env file from template
@@ -165,6 +183,7 @@ SPEEDY_MODE=true
 
 TDT_MODEL_PATH=/app/models/tdt
 DIAR_MODEL_PATH=/app/models/diarization/model.onnx
+CANARY_MODEL_PATH=/app/models/canary
 FRONTEND_PATH=/app/frontend
 
 # =============================================================================
@@ -226,6 +245,7 @@ main() {
 
     download_tdt_model
     download_diarization_model
+    download_canary_model
     create_env_file
 
     echo ""
@@ -243,6 +263,9 @@ main() {
     fi
     if [ -f "diar_streaming_sortformer_4spk-v2.onnx" ]; then
         du -sh diar_streaming_sortformer_4spk-v2.onnx
+    fi
+    if [ -d "canary" ]; then
+        du -sh canary/
     fi
 }
 

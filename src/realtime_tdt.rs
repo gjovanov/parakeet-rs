@@ -536,15 +536,22 @@ impl RealtimeTDT {
             .collect();
 
         // Extract only tokens from the FIRST segment (the one we're emitting)
-        // Use timestamp-based filtering - emit tokens that START in the first segment
-        let dedup_margin = 0.15;
+        // Use stricter deduplication to prevent repeated sentences at segment boundaries.
+        // The key insight: tokens should START at or after our last emitted position.
+        // Using a small negative tolerance (0.2s) allows for minor ASR timestamp variance
+        // while still preventing the same word from being emitted twice.
         let emit_tokens: Vec<TimedToken> = adjusted_tokens
             .into_iter()
             .filter(|t| {
-                // Must be after last emitted (deduplication)
-                t.end > self.last_emitted_token_end + dedup_margin &&
-                // Token must START before or at first segment end (emit everything that started in this segment)
-                t.start <= first_segment_end + 0.3
+                // Token must START at or after our last emitted token end
+                // Small tolerance for ASR timestamp variance between transcriptions
+                let is_new_content = t.start >= self.last_emitted_token_end - 0.2;
+
+                // Token must belong to the first segment being processed
+                let in_first_segment = t.start >= first_segment_start - 0.2 &&
+                                       t.start <= first_segment_end + 0.3;
+
+                is_new_content && in_first_segment
             })
             .collect();
 
@@ -552,9 +559,51 @@ impl RealtimeTDT {
 
         if !emit_tokens.is_empty() {
             // Filter out punctuation-only tokens at start
+            // Also apply text-based deduplication: skip tokens that match the last emitted word
+            // Find the last actual WORD (not punctuation) from previous segments
+            let last_emitted_word = self.finalized_segments.last()
+                .and_then(|seg| {
+                    seg.tokens.iter().rev()
+                        .find(|t| t.text.trim().chars().any(|c| c.is_alphanumeric()))
+                        .map(|t| {
+                            // Extract the word without punctuation
+                            t.text.trim()
+                                .chars()
+                                .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                                .collect::<String>()
+                                .trim()
+                                .to_lowercase()
+                        })
+                });
+
             let tokens_to_use: Vec<_> = emit_tokens
                 .into_iter()
-                .skip_while(|t| t.text.chars().all(|c| c.is_ascii_punctuation() || c.is_whitespace()))
+                .skip_while(|t| {
+                    let text = t.text.trim();
+                    // Skip punctuation-only tokens
+                    if text.chars().all(|c| c.is_ascii_punctuation() || c.is_whitespace()) {
+                        return true;
+                    }
+                    // Skip if this token matches the last emitted word (text-based dedup)
+                    if let Some(ref last_word) = last_emitted_word {
+                        if !last_word.is_empty() {
+                            // Extract just the alphanumeric part for comparison
+                            let current_word: String = text.chars()
+                                .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+                                .collect::<String>()
+                                .trim()
+                                .to_lowercase();
+                            // Check for exact match or if one contains the other (handles partial words)
+                            if !current_word.is_empty() &&
+                               (current_word == *last_word ||
+                                last_word.contains(&current_word) ||
+                                current_word.contains(last_word.as_str())) {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                })
                 .collect();
 
             let has_real_content = tokens_to_use.iter().any(|t|
@@ -562,11 +611,13 @@ impl RealtimeTDT {
             );
 
             if !tokens_to_use.is_empty() && has_real_content {
+                // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
                 let segment_text: String = tokens_to_use
                     .iter()
                     .map(|t| t.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
 
                 let segment = Segment {
                     text: segment_text,
@@ -576,10 +627,12 @@ impl RealtimeTDT {
                     is_final: true,
                 };
 
-                // Update tracking
+                // Update tracking - use SEGMENT boundary not token time for more stable dedup
+                // This ensures the next process will correctly skip tokens from this segment
                 if let Some(last) = tokens_to_use.last() {
                     self.confirmed_until = last.end;
-                    self.last_emitted_token_end = last.end;
+                    // Use the segment end time as the boundary, clamped to at least the last token
+                    self.last_emitted_token_end = last.end.max(first_segment_end);
                 }
 
                 self.finalized_segments.push(segment.clone());
@@ -588,6 +641,11 @@ impl RealtimeTDT {
         }
 
         // Remove the first segment from the queue (we just processed it)
+        // Even if no tokens were emitted, update tracking to prevent re-processing
+        if new_segments.is_empty() {
+            // No tokens emitted but we're done with this segment
+            self.last_emitted_token_end = self.last_emitted_token_end.max(first_segment_end);
+        }
         self.lookahead_segments.pop_front();
 
         let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
@@ -757,11 +815,13 @@ impl RealtimeTDT {
                 );
 
                 if !tokens_to_use.is_empty() && has_real_content {
+                    // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
                     let segment_text: String = tokens_to_use
                         .iter()
                         .map(|t| t.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                        .collect::<String>()
+                        .trim()
+                        .to_string();
 
                     let segment = Segment {
                         text: segment_text,
@@ -822,11 +882,13 @@ impl RealtimeTDT {
             // Just emit pending tokens
             let mut new_segments = Vec::new();
             if !self.pending_tokens.is_empty() {
+                // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
                 let segment_text: String = self.pending_tokens
                     .iter()
                     .map(|t| t.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
 
                 let segment = Segment {
                     text: segment_text,
@@ -871,11 +933,13 @@ impl RealtimeTDT {
         let mut new_segments = Vec::new();
 
         if !final_tokens.is_empty() {
+            // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
             let segment_text: String = final_tokens
                 .iter()
                 .map(|t| t.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect::<String>()
+                .trim()
+                .to_string();
 
             let segment = Segment {
                 text: segment_text,
@@ -912,16 +976,16 @@ impl RealtimeTDT {
             .join(" ");
 
         if !self.pending_tokens.is_empty() {
+            // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
             let pending: String = self.pending_tokens
                 .iter()
                 .map(|t| t.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect::<String>();
 
-            if !text.is_empty() && !pending.is_empty() {
+            if !text.is_empty() && !pending.trim().is_empty() {
                 text.push(' ');
             }
-            text.push_str(&pending);
+            text.push_str(pending.trim());
         }
 
         text
@@ -929,6 +993,16 @@ impl RealtimeTDT {
 
     pub fn current_time(&self) -> f32 {
         self.total_samples_received as f32 / SAMPLE_RATE as f32
+    }
+
+    /// Get the current buffer size in samples
+    pub fn buffer_len(&self) -> usize {
+        self.audio_buffer.len()
+    }
+
+    /// Get the current buffer duration in seconds
+    pub fn buffer_duration(&self) -> f32 {
+        self.audio_buffer.len() as f32 / SAMPLE_RATE as f32
     }
 
     pub fn reset(&mut self) {
@@ -1069,6 +1143,97 @@ impl RealtimeTDTDiarized {
     pub fn reset(&mut self) {
         self.tdt.reset();
         self.diarization.reset();
+    }
+
+    /// Get the current total audio duration processed
+    pub fn current_time(&self) -> f32 {
+        self.tdt.current_time()
+    }
+
+    /// Get the current buffer duration
+    pub fn buffer_duration(&self) -> f32 {
+        self.tdt.buffer_duration()
+    }
+}
+
+// ============================================================================
+// StreamingTranscriber implementation for RealtimeTDTDiarized
+// ============================================================================
+
+#[cfg(feature = "sortformer")]
+use crate::streaming_transcriber::{ModelInfo, StreamingChunkResult, StreamingTranscriber, TranscriptionSegment};
+
+#[cfg(feature = "sortformer")]
+impl StreamingTranscriber for RealtimeTDTDiarized {
+    fn model_info(&self) -> ModelInfo {
+        ModelInfo {
+            id: "parakeet-tdt".to_string(),
+            display_name: "Parakeet TDT 0.6B".to_string(),
+            description: "NVIDIA's Parakeet TDT model for high-quality speech recognition with word-level timestamps".to_string(),
+            supports_diarization: true,
+            languages: vec!["en".to_string()],
+            is_loaded: true,
+        }
+    }
+
+    fn push_audio(&mut self, samples: &[f32]) -> Result<StreamingChunkResult> {
+        // Call the inherent method using fully-qualified syntax
+        let result = RealtimeTDTDiarized::push_audio(self, samples)?;
+
+        let segments = result.segments
+            .into_iter()
+            .map(|seg| TranscriptionSegment {
+                text: seg.text,
+                start_time: seg.start_time,
+                end_time: seg.end_time,
+                speaker: seg.speaker,
+                confidence: None,
+                is_final: seg.is_final,
+            })
+            .collect();
+
+        Ok(StreamingChunkResult {
+            segments,
+            buffer_duration: result.buffer_time,
+            total_duration: self.current_time(),
+        })
+    }
+
+    fn finalize(&mut self) -> Result<StreamingChunkResult> {
+        // Call the inherent method using fully-qualified syntax
+        let result = RealtimeTDTDiarized::finalize(self)?;
+
+        let segments = result.segments
+            .into_iter()
+            .map(|seg| TranscriptionSegment {
+                text: seg.text,
+                start_time: seg.start_time,
+                end_time: seg.end_time,
+                speaker: seg.speaker,
+                confidence: None,
+                is_final: seg.is_final,
+            })
+            .collect();
+
+        Ok(StreamingChunkResult {
+            segments,
+            buffer_duration: 0.0,
+            total_duration: self.current_time(),
+        })
+    }
+
+    fn reset(&mut self) {
+        // Call the inherent method using fully-qualified syntax
+        RealtimeTDTDiarized::reset(self);
+    }
+
+    fn buffer_duration(&self) -> f32 {
+        // Call the inherent method using fully-qualified syntax
+        RealtimeTDTDiarized::buffer_duration(self)
+    }
+
+    fn total_duration(&self) -> f32 {
+        self.current_time()
     }
 }
 

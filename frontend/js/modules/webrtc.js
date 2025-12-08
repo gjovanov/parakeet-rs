@@ -219,18 +219,19 @@ export class WebRTCClient {
         break;
 
       case 'subtitle':
+        console.log('[WebRTC] Received subtitle message:', msg);
         this.emit('subtitle', {
           text: msg.text,
           speaker: msg.speaker,
           start: msg.start,
           end: msg.end,
-          is_final: msg.is_final,
+          isFinal: msg.is_final,
         });
         break;
 
       case 'status':
         this.emit('status', {
-          bufferTime: msg.buffer_time,
+          bufferTime: msg.buffer_time || msg.progress_secs,
           totalDuration: msg.total_duration,
         });
         break;
@@ -244,6 +245,10 @@ export class WebRTCClient {
       case 'error':
         console.error('[WebRTC] Server error:', msg.message);
         this.emit('serverError', { message: msg.message });
+        break;
+
+      default:
+        console.log('[WebRTC] Unhandled message type:', msg.type, 'Full message:', msg);
         break;
     }
   }
