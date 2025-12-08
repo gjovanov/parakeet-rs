@@ -21,10 +21,6 @@ pub enum ModelType {
     ParakeetTdt,
     /// Canary 1B model
     Canary1B,
-    /// Whisper Large v2 (99 languages)
-    WhisperLargeV2,
-    /// Whisper Large v3 (99 languages, improved)
-    WhisperLargeV3,
 }
 
 impl ModelType {
@@ -33,8 +29,6 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "parakeet-tdt",
             ModelType::Canary1B => "canary-1b",
-            ModelType::WhisperLargeV2 => "whisper-large-v2",
-            ModelType::WhisperLargeV3 => "whisper-large-v3",
         }
     }
 
@@ -43,8 +37,6 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "Parakeet TDT 0.6B",
             ModelType::Canary1B => "Canary 1B",
-            ModelType::WhisperLargeV2 => "Whisper Large v2",
-            ModelType::WhisperLargeV3 => "Whisper Large v3",
         }
     }
 
@@ -53,15 +45,8 @@ impl ModelType {
         match s {
             "parakeet-tdt" => Some(ModelType::ParakeetTdt),
             "canary-1b" => Some(ModelType::Canary1B),
-            "whisper-large-v2" => Some(ModelType::WhisperLargeV2),
-            "whisper-large-v3" => Some(ModelType::WhisperLargeV3),
             _ => None,
         }
-    }
-
-    /// Check if this is a Whisper model
-    pub fn is_whisper(&self) -> bool {
-        matches!(self, ModelType::WhisperLargeV2 | ModelType::WhisperLargeV3)
     }
 
     /// Get supported languages for this model type
@@ -69,10 +54,6 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => vec!["en"],
             ModelType::Canary1B => vec!["en", "de", "fr", "es"],
-            ModelType::WhisperLargeV2 | ModelType::WhisperLargeV3 => vec![
-                "en", "de", "fr", "es", "it", "pt", "nl", "pl", "ru",
-                "zh", "ja", "ko", "ar", "hi", "tr", "vi", "auto"
-            ],
         }
     }
 }
@@ -169,37 +150,6 @@ impl ModelRegistry {
                 is_available: canary_available,
                 description: "NVIDIA's Canary 1B encoder-decoder model for multilingual ASR and translation".to_string(),
                 languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
-            });
-        }
-
-        // Register Whisper models if paths are configured
-        // WHISPER_MODEL_PATH or WHISPER_V2_MODEL_PATH for v2
-        // WHISPER_V3_MODEL_PATH for v3
-        if let Ok(path) = std::env::var("WHISPER_V2_MODEL_PATH").or_else(|_| std::env::var("WHISPER_MODEL_PATH")) {
-            let whisper_path = PathBuf::from(&path);
-            let whisper_available = whisper_path.exists();
-            registry.register(RegisteredModel {
-                model_type: ModelType::WhisperLargeV2,
-                model_path: whisper_path,
-                diarization_path: None,
-                exec_config: registry.default_exec_config.clone(),
-                is_available: whisper_available,
-                description: "OpenAI Whisper Large v2 for 99-language ASR and translation".to_string(),
-                languages: ModelType::WhisperLargeV2.languages().into_iter().map(String::from).collect(),
-            });
-        }
-
-        if let Ok(path) = std::env::var("WHISPER_V3_MODEL_PATH") {
-            let whisper_path = PathBuf::from(&path);
-            let whisper_available = whisper_path.exists();
-            registry.register(RegisteredModel {
-                model_type: ModelType::WhisperLargeV3,
-                model_path: whisper_path,
-                diarization_path: None,
-                exec_config: registry.default_exec_config.clone(),
-                is_available: whisper_available,
-                description: "OpenAI Whisper Large v3 for 99-language ASR and translation (improved)".to_string(),
-                languages: ModelType::WhisperLargeV3.languages().into_iter().map(String::from).collect(),
             });
         }
 
@@ -314,28 +264,6 @@ impl ModelRegistry {
 
                 Ok(Box::new(transcriber))
             }
-            ModelType::WhisperLargeV2 | ModelType::WhisperLargeV3 => {
-                #[cfg(feature = "whisper")]
-                {
-                    use crate::realtime_whisper::{RealtimeWhisper, RealtimeWhisperConfig};
-
-                    let whisper_config = RealtimeWhisperConfig::balanced();
-
-                    let transcriber = RealtimeWhisper::new(
-                        &model.model_path,
-                        Some(model.exec_config.clone()),
-                        Some(whisper_config),
-                    )?;
-
-                    Ok(Box::new(transcriber))
-                }
-                #[cfg(not(feature = "whisper"))]
-                {
-                    Err(Error::Model(
-                        "Whisper support requires the 'whisper' feature flag".to_string()
-                    ))
-                }
-            }
         }
     }
 
@@ -365,22 +293,10 @@ mod tests {
     fn test_model_type_roundtrip() {
         assert_eq!(ModelType::from_str("parakeet-tdt"), Some(ModelType::ParakeetTdt));
         assert_eq!(ModelType::from_str("canary-1b"), Some(ModelType::Canary1B));
-        assert_eq!(ModelType::from_str("whisper-large-v2"), Some(ModelType::WhisperLargeV2));
-        assert_eq!(ModelType::from_str("whisper-large-v3"), Some(ModelType::WhisperLargeV3));
         assert_eq!(ModelType::from_str("unknown"), None);
 
         assert_eq!(ModelType::ParakeetTdt.as_str(), "parakeet-tdt");
         assert_eq!(ModelType::Canary1B.as_str(), "canary-1b");
-        assert_eq!(ModelType::WhisperLargeV2.as_str(), "whisper-large-v2");
-        assert_eq!(ModelType::WhisperLargeV3.as_str(), "whisper-large-v3");
-    }
-
-    #[test]
-    fn test_model_type_is_whisper() {
-        assert!(!ModelType::ParakeetTdt.is_whisper());
-        assert!(!ModelType::Canary1B.is_whisper());
-        assert!(ModelType::WhisperLargeV2.is_whisper());
-        assert!(ModelType::WhisperLargeV3.is_whisper());
     }
 
     #[test]

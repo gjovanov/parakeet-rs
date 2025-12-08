@@ -75,12 +75,8 @@ name = "realtime_tdt"
 path = "examples/realtime_tdt.rs"
 
 [[example]]
-name = "ws_transcriber"
-path = "examples/ws_transcriber.rs"
-
-[[example]]
 name = "webrtc_transcriber"
-path = "examples/webrtc_transcriber.rs"
+path = "examples/webrtc_transcriber/main.rs"
 
 [features]
 default = ["cpu"]
@@ -93,4 +89,3 @@ rocm = ["ort/rocm"]
 openvino = ["ort/openvino"]
 webgpu = ["ort/webgpu"]
 sortformer = []
-whisper = []
