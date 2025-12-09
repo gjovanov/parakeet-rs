@@ -450,6 +450,21 @@ async function connect(sessionId) {
     console.log('Disconnected:', code, reason);
   });
 
+  webrtcClient.on('reconnecting', ({ attempt, delay }) => {
+    state.connected = false;
+    updateConnectionStatus('reconnecting');
+    elements.bufferInfo.textContent = `Reconnecting... (attempt ${attempt})`;
+    console.log(`Reconnecting in ${delay}ms (attempt ${attempt})`);
+  });
+
+  webrtcClient.on('reconnectFailed', () => {
+    state.connected = false;
+    updateConnectionStatus('disconnected');
+    elements.bufferInfo.textContent = 'Reconnection failed';
+    elements.connectBtn.textContent = 'Join Session';
+    console.error('Max reconnection attempts reached');
+  });
+
   webrtcClient.on('connectionFailed', () => {
     state.connected = false;
     updateConnectionStatus('disconnected');
@@ -521,6 +536,9 @@ function updateConnectionStatus(status) {
       break;
     case 'connecting':
       elements.connectionStatus.textContent = 'Connecting...';
+      break;
+    case 'reconnecting':
+      elements.connectionStatus.textContent = 'Reconnecting...';
       break;
   }
 }

@@ -4,6 +4,59 @@
 import { formatTime, escapeHtml, createEventEmitter } from './utils.js';
 
 /**
+ * Detect if text contains excessive repetition (hallucination)
+ * @param {string} text - Text to check
+ * @param {number} threshold - Max allowed consecutive repetitions (default: 3)
+ * @returns {boolean} True if text appears to be hallucinated
+ */
+function isHallucinated(text, threshold = 3) {
+  if (!text || text.length < 10) return false;
+
+  // Split into words
+  const words = text.toLowerCase().trim().split(/\s+/);
+  if (words.length < threshold * 2) return false;
+
+  // Check for consecutive word repetitions
+  let consecutiveCount = 1;
+  for (let i = 1; i < words.length; i++) {
+    if (words[i] === words[i - 1] && words[i].length > 1) {
+      consecutiveCount++;
+      if (consecutiveCount >= threshold) {
+        console.warn('[Subtitles] Hallucination detected: repeated word "' + words[i] + '" ' + consecutiveCount + ' times');
+        return true;
+      }
+    } else {
+      consecutiveCount = 1;
+    }
+  }
+
+  // Check for repeated phrases (2-3 word patterns)
+  for (let patternLen = 2; patternLen <= 3; patternLen++) {
+    if (words.length < patternLen * threshold) continue;
+
+    for (let i = 0; i <= words.length - patternLen * threshold; i++) {
+      const pattern = words.slice(i, i + patternLen).join(' ');
+      let patternCount = 1;
+
+      for (let j = i + patternLen; j <= words.length - patternLen; j += patternLen) {
+        const candidate = words.slice(j, j + patternLen).join(' ');
+        if (candidate === pattern) {
+          patternCount++;
+          if (patternCount >= threshold) {
+            console.warn('[Subtitles] Hallucination detected: repeated phrase "' + pattern + '" ' + patternCount + ' times');
+            return true;
+          }
+        } else {
+          break;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Subtitle segment
  * @typedef {Object} Segment
  * @property {string} text - Segment text
@@ -126,6 +179,13 @@ export class SubtitleRenderer {
       start: segment.start,
       end: segment.end
     });
+
+    // Filter out hallucinated transcripts (excessive repetition)
+    if (isHallucinated(segment.text)) {
+      console.warn('[Subtitles] Filtering hallucinated segment:', segment.text?.substring(0, 100));
+      this.emit('hallucination', segment);
+      return;
+    }
 
     // Reset stale timer on any new segment
     this.resetStaleTimer();

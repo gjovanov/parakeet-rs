@@ -15,6 +15,10 @@ export class WebRTCClient {
    * @param {string} wsUrl - WebSocket URL for signaling
    * @param {Object} options - Configuration options
    * @param {Array} options.iceServers - ICE servers for WebRTC (from server config)
+   * @param {boolean} options.autoReconnect - Enable auto-reconnection (default: true)
+   * @param {number} options.reconnectDelay - Initial reconnect delay in ms (default: 2000)
+   * @param {number} options.maxReconnectDelay - Max reconnect delay in ms (default: 30000)
+   * @param {number} options.maxReconnectAttempts - Max attempts before giving up (default: 10)
    */
   constructor(wsUrl, options = {}) {
     this.wsUrl = wsUrl;
@@ -28,6 +32,11 @@ export class WebRTCClient {
       iceServers: options.iceServers || defaultIceServers,
       // Allow all transport (direct + relay)
       iceTransportPolicy: 'all',
+      // Reconnection options
+      autoReconnect: options.autoReconnect !== false,
+      reconnectDelay: options.reconnectDelay || 2000,
+      maxReconnectDelay: options.maxReconnectDelay || 30000,
+      maxReconnectAttempts: options.maxReconnectAttempts || 10,
       ...options,
     };
 
@@ -46,6 +55,11 @@ export class WebRTCClient {
     this.connected = false;
     this.clientId = null;
 
+    // Reconnection state
+    this.intentionalClose = false;
+    this.reconnectAttempts = 0;
+    this.reconnectTimeout = null;
+
     // Event emitter
     const emitter = createEventEmitter();
     this.on = emitter.on.bind(emitter);
@@ -58,7 +72,11 @@ export class WebRTCClient {
    * @param {HTMLAudioElement} audioElement - Audio element for playback
    */
   async connect(audioElement) {
-    this.audioElement = audioElement;
+    if (audioElement) {
+      this.audioElement = audioElement;
+    }
+
+    this.intentionalClose = false;
 
     return new Promise((resolve, reject) => {
       // Create WebSocket for signaling
@@ -66,6 +84,7 @@ export class WebRTCClient {
 
       this.ws.onopen = () => {
         console.log('[WebRTC] Signaling connected');
+        this.reconnectAttempts = 0; // Reset on successful connection
         this.setupPeerConnection();
       };
 
@@ -73,6 +92,11 @@ export class WebRTCClient {
         console.log('[WebRTC] Signaling disconnected:', event.code, event.reason);
         this.connected = false;
         this.emit('disconnect', { code: event.code, reason: event.reason });
+
+        // Auto-reconnect if enabled and not intentional close
+        if (!this.intentionalClose && this.options.autoReconnect) {
+          this.scheduleReconnect();
+        }
       };
 
       this.ws.onerror = (error) => {
@@ -90,6 +114,61 @@ export class WebRTCClient {
         }
       };
     });
+  }
+
+  /**
+   * Schedule a reconnection attempt with exponential backoff
+   */
+  scheduleReconnect() {
+    if (this.options.maxReconnectAttempts > 0 &&
+        this.reconnectAttempts >= this.options.maxReconnectAttempts) {
+      console.error('[WebRTC] Max reconnection attempts reached');
+      this.emit('reconnectFailed');
+      return;
+    }
+
+    // Exponential backoff
+    const delay = Math.min(
+      this.options.reconnectDelay * Math.pow(1.5, this.reconnectAttempts),
+      this.options.maxReconnectDelay
+    );
+
+    console.log(`[WebRTC] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts + 1})`);
+    this.emit('reconnecting', { attempt: this.reconnectAttempts + 1, delay });
+
+    this.reconnectTimeout = setTimeout(() => {
+      this.reconnectAttempts++;
+      this.reconnect();
+    }, delay);
+  }
+
+  /**
+   * Perform reconnection (cleanup old connection and create new one)
+   */
+  async reconnect() {
+    console.log('[WebRTC] Attempting reconnection...');
+
+    // Cleanup old peer connection
+    if (this.pc) {
+      this.pc.close();
+      this.pc = null;
+    }
+
+    // Don't close the audio element - we want to resume playback
+    if (this.audioElement) {
+      this.audioElement.srcObject = null;
+    }
+
+    this.remoteStream = null;
+
+    // Reconnect
+    try {
+      await this.connect();
+      console.log('[WebRTC] Reconnected successfully');
+    } catch (e) {
+      console.error('[WebRTC] Reconnection failed:', e);
+      // Will trigger onclose which will schedule another attempt
+    }
   }
 
   /**
@@ -258,6 +337,14 @@ export class WebRTCClient {
    * Disconnect from server
    */
   disconnect() {
+    this.intentionalClose = true;
+
+    // Cancel any pending reconnection
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
     if (this.pc) {
       this.pc.close();
       this.pc = null;
@@ -274,6 +361,7 @@ export class WebRTCClient {
 
     this.remoteStream = null;
     this.connected = false;
+    this.reconnectAttempts = 0;
 
     this.emit('disconnect', { code: 1000, reason: 'User disconnect' });
   }
