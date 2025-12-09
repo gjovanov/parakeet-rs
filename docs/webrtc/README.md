@@ -1,26 +1,43 @@
 # WebRTC Transcription Server Documentation
 
-> **This documentation has been reorganized into multiple focused documents for easier navigation.**
+Real-time speech transcription with WebRTC audio delivery and live subtitles.
 
-## Documentation Index
+## Overview
+
+The parakeet-rs WebRTC transcriber is a **multi-session transcription server** that supports multiple concurrent transcription sessions with different models and media files. Each session streams audio via WebRTC (~100-400ms latency) and subtitles via WebSocket.
+
+## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [Index](./webrtc/README.md) | Overview, quick start, and feature summary |
-| [Architecture](./webrtc/architecture.md) | System architecture, components, and data flow |
-| [API Reference](./webrtc/api-reference.md) | REST API and WebSocket endpoints |
-| [Latency Modes](./webrtc/latency-modes.md) | 10 transcription modes with trade-offs |
-| [Frontend Guide](./webrtc/frontend.md) | Web UI components and JavaScript API |
-| [Deployment](./webrtc/deployment.md) | Configuration, Docker, and production setup |
+| [Architecture](./architecture.md) | System architecture, components, and data flow |
+| [API Reference](./api-reference.md) | REST API and WebSocket endpoints |
+| [Latency Modes](./latency-modes.md) | 10 transcription modes with trade-offs |
+| [Frontend Guide](./frontend.md) | Web UI components and JavaScript API |
+| [Deployment](./deployment.md) | Configuration, Docker, and production setup |
 
-## Quick Links
+## Quick Start
 
-- **Getting Started**: See [Deployment Guide](./webrtc/deployment.md#quick-start)
-- **API Endpoints**: See [API Reference](./webrtc/api-reference.md)
-- **Choosing a Mode**: See [Latency Modes](./webrtc/latency-modes.md#choosing-the-right-mode)
-- **Frontend Integration**: See [Frontend Guide](./webrtc/frontend.md)
+```bash
+# 1. Build
+cargo build --release --example webrtc_transcriber --features sortformer
 
-## Features Overview
+# 2. Create media directory
+mkdir -p media
+
+# 3. Run the server
+./target/release/examples/webrtc_transcriber \
+  --tdt-model ./tdt \
+  --diar-model ./diar_streaming_sortformer_4spk-v2.onnx \
+  --vad-model ./silero_vad.onnx \
+  --frontend ./frontend \
+  --media-dir ./media \
+  --port 8080
+
+# 4. Open http://localhost:8080 in browser
+```
+
+## Features
 
 - **Multi-session support** - Run multiple concurrent transcription sessions
 - **Multiple models** - TDT (25 languages), Canary (multilingual), VAD variants
@@ -30,7 +47,7 @@
 - **RESTful API** - Programmatic session and media management
 - **Modern web UI** - Multi-session interface with real-time subtitles
 
-## Architecture Summary
+## Architecture Overview
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -50,4 +67,27 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-For detailed architecture documentation, see [Architecture](./webrtc/architecture.md).
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/sessions` | POST | Create new transcription session |
+| `/api/sessions/:id/start` | POST | Start transcription |
+| `/api/media/upload` | POST | Upload media file |
+| `/ws/:session_id` | WS | Join session for audio + subtitles |
+
+See [API Reference](./api-reference.md) for complete documentation.
+
+## Supported Languages
+
+25 European languages via Canary model:
+
+German, English, French, Spanish, Italian, Portuguese, Dutch, Polish, Russian, Ukrainian, Czech, Slovak, Hungarian, Romanian, Bulgarian, Croatian, Slovenian, Estonian, Latvian, Lithuanian, Finnish, Swedish, Danish, Greek, Maltese
+
+## Further Reading
+
+- [WebRTC.rs Documentation](https://webrtc.rs/)
+- [NVIDIA NeMo TDT](https://docs.nvidia.com/nemo-framework/)
+- [Silero VAD](https://github.com/snakers4/silero-vad)
+- [Opus Codec](https://opus-codec.org/)
+- [ONNX Runtime](https://onnxruntime.ai/)
