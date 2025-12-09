@@ -14,7 +14,9 @@ use futures_util::{SinkExt, StreamExt};
 use parakeet_rs::TranscriptionSession;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::interval;
 use uuid::Uuid;
 use webrtc::{
     ice_transport::{
@@ -215,6 +217,9 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
         }
     }
 
+    // Create ping interval to keep WebSocket alive
+    let mut ping_interval = interval(Duration::from_secs(10));
+
     // Main message loop
     loop {
         tokio::select! {
@@ -229,8 +234,14 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
                             eprintln!("[WebRTC] Error handling message: {}", e);
                         }
                     }
+                    Some(Ok(Message::Pong(_))) => {
+                        // Client responded to ping, connection is alive
+                    }
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
+                    Some(Err(e)) => {
+                        eprintln!("[WebRTC] WebSocket error: {}", e);
+                        break;
+                    }
                     _ => {}
                 }
             }
@@ -267,6 +278,14 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(_) => break,
+                }
+            }
+
+            _ = ping_interval.tick() => {
+                // Send ping to keep connection alive
+                if ws_sender.send(Message::Ping(vec![])).await.is_err() {
+                    eprintln!("[WebRTC] Failed to send ping, connection closed");
+                    break;
                 }
             }
         }

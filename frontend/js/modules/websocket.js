@@ -143,6 +143,7 @@ export class WebSocketClient {
             start: message.start,
             end: message.end,
             isFinal: message.is_final,
+            inferenceTimeMs: message.inference_time_ms,
           });
           break;
 

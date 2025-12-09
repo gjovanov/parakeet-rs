@@ -91,6 +91,11 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
             description: "Silero VAD triggered. More accurate with longer pause detection.",
         },
         ModeInfo {
+            id: "vad_sliding_window",
+            name: "VAD Sliding Window (5 seg / 10s)",
+            description: "Sliding window VAD. Buffers 5 segments or 10s, transcribes with context overlap for better accuracy.",
+        },
+        ModeInfo {
             id: "asr",
             name: "ASR (Pure streaming)",
             description: "Pure streaming ASR without VAD. Processes audio continuously with sliding window.",

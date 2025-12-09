@@ -11,6 +11,7 @@ import { formatTime, escapeHtml, createEventEmitter } from './utils.js';
  * @property {number} start - Start time in seconds
  * @property {number} end - End time in seconds
  * @property {boolean} isFinal - Whether segment is finalized
+ * @property {number|null} inferenceTimeMs - Model inference time in milliseconds
  */
 
 export class SubtitleRenderer {
@@ -77,9 +78,11 @@ export class SubtitleRenderer {
       this.liveElement.innerHTML = `
         <div class="speaker-label" data-speaker="?">Speaker ?</div>
         <div class="subtitle-text"></div>
+        <div class="inference-time"></div>
       `;
       this.liveSpeakerEl = this.liveElement.querySelector('.speaker-label');
       this.liveTextEl = this.liveElement.querySelector('.subtitle-text');
+      this.liveInferenceTimeEl = this.liveElement.querySelector('.inference-time');
     }
 
     // Clear transcript
@@ -238,6 +241,14 @@ export class SubtitleRenderer {
 
     html += `<span class="segment-text">${escapeHtml(segment.text)}</span>`;
 
+    // Show inference time if available
+    if (segment.inferenceTimeMs != null) {
+      const inferenceTime = segment.inferenceTimeMs >= 1000
+        ? `${(segment.inferenceTimeMs / 1000).toFixed(1)}s`
+        : `${segment.inferenceTimeMs}ms`;
+      html += `<span class="segment-inference-time" title="Model inference time">${inferenceTime}</span>`;
+    }
+
     el.innerHTML = html;
 
     // Add click handler to seek
@@ -287,12 +298,29 @@ export class SubtitleRenderer {
       }
       this.liveSpeakerEl.dataset.speaker = segment.speaker ?? '?';
       this.liveTextEl.textContent = segment.text;
+
+      // Show inference time if available
+      if (this.liveInferenceTimeEl && segment.inferenceTimeMs != null) {
+        const inferenceTime = segment.inferenceTimeMs >= 1000
+          ? `${(segment.inferenceTimeMs / 1000).toFixed(1)}s`
+          : `${segment.inferenceTimeMs}ms`;
+        this.liveInferenceTimeEl.textContent = `Inference: ${inferenceTime}`;
+        this.liveInferenceTimeEl.style.display = '';
+      } else if (this.liveInferenceTimeEl) {
+        this.liveInferenceTimeEl.textContent = '';
+        this.liveInferenceTimeEl.style.display = 'none';
+      }
+
       this.liveElement.classList.add('active');
       console.log('[Subtitles] Live display updated, added .active class, text:', segment.text?.substring(0, 50));
     } else {
       this.liveSpeakerEl.textContent = '';
       this.liveSpeakerEl.style.display = 'none';
       this.liveTextEl.textContent = '';
+      if (this.liveInferenceTimeEl) {
+        this.liveInferenceTimeEl.textContent = '';
+        this.liveInferenceTimeEl.style.display = 'none';
+      }
       this.liveElement.classList.remove('active');
     }
   }

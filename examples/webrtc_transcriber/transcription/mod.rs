@@ -66,18 +66,24 @@ pub fn run_session_transcription(
         let mut transcriber: Box<dyn StreamingTranscriber> = if is_vad_mode {
             // VAD-triggered transcription
             if is_canary {
-                // VAD + Canary
+                // VAD + Canary with optional diarization
                 use parakeet_rs::realtime_canary_vad::{RealtimeCanaryVad, RealtimeCanaryVadConfig};
 
-                let config = RealtimeCanaryVadConfig::buffered(language.clone());
+                // Choose config based on VAD sub-mode
+                let config = if vad_base_mode == "sliding_window" {
+                    RealtimeCanaryVadConfig::sliding_window(language.clone())
+                } else {
+                    RealtimeCanaryVadConfig::buffered(language.clone())
+                };
 
                 eprintln!(
-                    "[Session {}] Creating VAD+Canary transcriber from {:?} (language: {}, vad_mode: {})",
-                    transcription_session.id, model_path, language, &vad_base_mode
+                    "[Session {}] Creating VAD+Canary transcriber from {:?} (language: {}, vad_mode: {}, diar: {:?})",
+                    transcription_session.id, model_path, language, &vad_base_mode, diar_path
                 );
 
                 match RealtimeCanaryVad::new(
                     &model_path,
+                    diar_path.as_ref(),
                     &vad_model_path,
                     Some(exec_config),
                     Some(config),
@@ -94,7 +100,6 @@ pub fn run_session_transcription(
             } else {
                 // VAD + TDT with diarization
                 use parakeet_rs::realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig};
-                use parakeet_rs::vad::VadConfig;
 
                 let diar_path = match diar_path {
                     Some(p) => p,
@@ -107,10 +112,11 @@ pub fn run_session_transcription(
                     }
                 };
 
-                let vad_config = VadConfig::from_mode(&vad_base_mode);
-                let config = RealtimeTdtVadConfig {
-                    vad: vad_config,
-                    enable_diarization: true,
+                // Choose config based on VAD sub-mode
+                let config = if vad_base_mode == "sliding_window" {
+                    RealtimeTdtVadConfig::sliding_window()
+                } else {
+                    RealtimeTdtVadConfig::from_mode(&vad_base_mode)
                 };
 
                 eprintln!(
@@ -223,8 +229,26 @@ pub fn run_session_transcription(
             chunks_processed += 1;
 
             // Process all collected samples
+            let inference_start = std::time::Instant::now();
             match transcriber.push_audio(&all_samples) {
-                Ok(result) => {
+                Ok(mut result) => {
+                    let inference_time = inference_start.elapsed();
+                    let inference_time_ms = inference_time.as_millis() as u32;
+
+                    // Set inference time on all segments
+                    for segment in &mut result.segments {
+                        segment.inference_time_ms = Some(inference_time_ms);
+                    }
+
+                    // Log slow inference calls (> 5 seconds)
+                    if inference_time.as_secs() > 5 {
+                        eprintln!(
+                            "[Session {}] SLOW inference: {:.1}s for {} samples",
+                            transcription_session.id,
+                            inference_time.as_secs_f32(),
+                            all_samples.len()
+                        );
+                    }
                     emit_streaming_segments(&transcription_session, &result.segments);
                 }
                 Err(e) => {
@@ -431,8 +455,32 @@ pub fn run_session_transcription(
     let _ = ffmpeg.kill();
     let _ = ffmpeg.wait();
 
-    // Wait for transcription to finish
-    transcription_thread.join().ok();
+    // Wait for transcription to finish with timeout
+    // If transcription is stuck in a long ONNX inference call, we don't want to wait forever
+    eprintln!("[Session {}] Waiting for transcription thread to finish...", session.id);
+    let join_timeout = std::time::Duration::from_secs(5);
+    let join_start = std::time::Instant::now();
+
+    // Use a loop with short sleeps to allow checking timeout
+    // Note: std::thread::JoinHandle doesn't support timeout directly,
+    // so we'll use try_recv pattern with the thread
+    loop {
+        if transcription_thread.is_finished() {
+            transcription_thread.join().ok();
+            eprintln!("[Session {}] Transcription thread joined successfully", session.id);
+            break;
+        }
+        if join_start.elapsed() > join_timeout {
+            eprintln!(
+                "[Session {}] Transcription thread did not finish within {}s - abandoning (may continue in background)",
+                session.id, join_timeout.as_secs()
+            );
+            // The thread will continue running but we won't wait for it
+            // This prevents the cleanup from blocking indefinitely
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 
     // Mark session as completed
     rt.block_on(session.set_state(SessionState::Completed));
@@ -601,7 +649,8 @@ fn emit_streaming_segments(
             "speaker": segment.speaker,
             "start": segment.start_time,
             "end": segment.end_time,
-            "is_final": segment.is_final
+            "is_final": segment.is_final,
+            "inference_time_ms": segment.inference_time_ms
         });
 
         let receiver_count = session.subtitle_tx.receiver_count();
