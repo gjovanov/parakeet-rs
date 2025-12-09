@@ -145,7 +145,7 @@ impl ModelRegistry {
             registry.register(RegisteredModel {
                 model_type: ModelType::Canary1B,
                 model_path: path,
-                diarization_path: None, // Canary doesn't use external diarization
+                diarization_path: diar_path.clone(), // Use same diarization model as TDT
                 exec_config: registry.default_exec_config.clone(),
                 is_available: canary_available,
                 description: "NVIDIA's Canary 1B encoder-decoder model for multilingual ASR and translation".to_string(),

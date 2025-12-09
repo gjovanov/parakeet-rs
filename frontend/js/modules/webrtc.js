@@ -226,6 +226,7 @@ export class WebRTCClient {
           start: msg.start,
           end: msg.end,
           isFinal: msg.is_final,
+          inferenceTimeMs: msg.inference_time_ms,
         });
         break;
 

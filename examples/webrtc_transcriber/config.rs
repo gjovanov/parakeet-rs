@@ -16,6 +16,8 @@ pub enum LatencyMode {
     /// VAD-triggered mode: transcribe only after speech pauses (Silero VAD)
     VadSpeedy,
     VadPauseBased,
+    /// VAD sliding window mode: buffer multiple segments, transcribe with context
+    VadSlidingWindow,
     /// Pure streaming ASR mode: continuous transcription without VAD
     Asr,
 }
@@ -31,6 +33,7 @@ impl LatencyMode {
             LatencyMode::Lookahead => "lookahead",
             LatencyMode::VadSpeedy => "vad_speedy",
             LatencyMode::VadPauseBased => "vad_pause_based",
+            LatencyMode::VadSlidingWindow => "vad_sliding_window",
             LatencyMode::Asr => "asr",
         }
     }
@@ -45,13 +48,14 @@ impl LatencyMode {
             LatencyMode::Lookahead => "Lookahead (~1.0-3.0s)",
             LatencyMode::VadSpeedy => "VAD Speedy (~0.3s pause)",
             LatencyMode::VadPauseBased => "VAD Pause-Based (~0.7s pause)",
+            LatencyMode::VadSlidingWindow => "VAD Sliding Window (10 seg / 15s)",
             LatencyMode::Asr => "ASR (Pure streaming)",
         }
     }
 
     /// Check if this mode uses VAD-triggered transcription
     pub fn is_vad_mode(&self) -> bool {
-        matches!(self, LatencyMode::VadSpeedy | LatencyMode::VadPauseBased)
+        matches!(self, LatencyMode::VadSpeedy | LatencyMode::VadPauseBased | LatencyMode::VadSlidingWindow)
     }
 
     /// Get the underlying VAD mode string for VadConfig::from_mode()
@@ -59,6 +63,7 @@ impl LatencyMode {
         match self {
             LatencyMode::VadSpeedy => "speedy",
             LatencyMode::VadPauseBased => "pause_based",
+            LatencyMode::VadSlidingWindow => "sliding_window",
             _ => "speedy", // Default for non-VAD modes
         }
     }
@@ -73,6 +78,7 @@ impl LatencyMode {
             LatencyMode::Lookahead,
             LatencyMode::VadSpeedy,
             LatencyMode::VadPauseBased,
+            LatencyMode::VadSlidingWindow,
             LatencyMode::Asr,
         ]
     }

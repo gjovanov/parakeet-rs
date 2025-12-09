@@ -1189,6 +1189,7 @@ impl StreamingTranscriber for RealtimeTDTDiarized {
                 speaker: seg.speaker,
                 confidence: None,
                 is_final: seg.is_final,
+                inference_time_ms: None,  // Set by transcription handler
             })
             .collect();
 
@@ -1212,6 +1213,7 @@ impl StreamingTranscriber for RealtimeTDTDiarized {
                 speaker: seg.speaker,
                 confidence: None,
                 is_final: seg.is_final,
+                inference_time_ms: None,
             })
             .collect();
 

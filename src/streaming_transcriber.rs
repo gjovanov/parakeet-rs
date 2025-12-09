@@ -21,6 +21,9 @@ pub struct TranscriptionSegment {
     pub confidence: Option<f32>,
     /// Whether this segment is finalized (won't change)
     pub is_final: bool,
+    /// Inference time in milliseconds (how long the model took to generate this segment)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_time_ms: Option<u32>,
 }
 
 /// Result of processing an audio chunk
@@ -148,6 +151,7 @@ mod tests {
             speaker: Some(0),
             confidence: Some(0.95),
             is_final: true,
+            inference_time_ms: None,
         });
 
         result.segments.push(TranscriptionSegment {
@@ -157,6 +161,7 @@ mod tests {
             speaker: Some(0),
             confidence: Some(0.90),
             is_final: false,
+            inference_time_ms: None,
         });
 
         assert!(result.has_segments());

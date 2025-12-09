@@ -368,6 +368,7 @@ impl StreamingTranscriber for RealtimeCanary {
                 speaker: None, // Canary doesn't support diarization
                 confidence: None,
                 is_final: true,
+                inference_time_ms: None,
             });
         }
 
@@ -380,6 +381,7 @@ impl StreamingTranscriber for RealtimeCanary {
                 speaker: None,
                 confidence: None,
                 is_final: false,
+                inference_time_ms: None,
             });
         }
 
@@ -408,6 +410,7 @@ impl StreamingTranscriber for RealtimeCanary {
                 speaker: None,
                 confidence: None,
                 is_final: true,
+                inference_time_ms: None,
             }]
         } else {
             vec![]
