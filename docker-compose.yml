@@ -23,7 +23,7 @@ services:
   transcriber:
     build:
       context: .
-      dockerfile: docker/Dockerfile.transcriber
+      dockerfile: docker/Dockerfile.cpu
     container_name: parakeet-transcriber
     restart: unless-stopped
 
@@ -35,6 +35,7 @@ services:
       - ./tdt:/app/models/tdt:ro
       - ./diar_streaming_sortformer_4spk-v2.onnx:/app/models/diarization/model.onnx:ro
       - ./canary:/app/models/canary:ro
+      - ./silero_vad.onnx:/app/models/silero_vad.onnx:ro
       # Mount audio files for testing (optional)
       - ./broadcast_2.wav:/tmp/broadcast_2.wav:ro
       # Mount media directory for multi-session support
@@ -53,7 +54,11 @@ services:
       - TDT_MODEL_PATH=/app/models/tdt
       - DIAR_MODEL_PATH=/app/models/diarization/model.onnx
       - CANARY_MODEL_PATH=/app/models/canary
+      - VAD_MODEL_PATH=/app/models/silero_vad.onnx
       - MEDIA_DIR=/app/media
+
+      # CPU mode (explicit)
+      - USE_GPU=false
 
       # Transcription mode: set to "1" for speedy mode (recommended)
       - SPEEDY_MODE=${SPEEDY_MODE}
@@ -73,12 +78,12 @@ services:
     stdin_open: true
     tty: true
 
-    # Health check - disabled since we start transcriber manually
-    # healthcheck:
-    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3
-    #   start_period: 10s
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${PORT:-8080}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 # Network configuration is not needed when using network_mode: host

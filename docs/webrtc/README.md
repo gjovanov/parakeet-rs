@@ -12,7 +12,7 @@ The parakeet-rs WebRTC transcriber is a **multi-session transcription server** t
 |----------|-------------|
 | [Architecture](./architecture.md) | System architecture, components, and data flow |
 | [API Reference](./api-reference.md) | REST API and WebSocket endpoints |
-| [Latency Modes](./latency-modes.md) | 10 transcription modes with trade-offs |
+| [Latency Modes](./latency-modes.md) | 12 transcription modes with trade-offs |
 | [Frontend Guide](./frontend.md) | Web UI components and JavaScript API |
 | [Deployment](./deployment.md) | Configuration, Docker, and production setup |
 
@@ -41,7 +41,7 @@ mkdir -p media
 
 - **Multi-session support** - Run multiple concurrent transcription sessions
 - **Multiple models** - TDT (25 languages), Canary (multilingual), VAD variants
-- **10 latency modes** - From ~1.3s (extreme low latency) to highest quality (lookahead)
+- **12 latency modes** - From ~1.3s (extreme low latency) to highest quality (lookahead), plus parallel modes
 - **Speaker diarization** - Sortformer identifies up to 4 speakers
 - **WebRTC audio** - Ultra-low latency audio delivery (~100-400ms)
 - **RESTful API** - Programmatic session and media management

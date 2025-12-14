@@ -65,6 +65,10 @@ pub mod sortformer_stream;
 pub mod realtime;
 pub mod realtime_canary;
 pub mod realtime_tdt;
+pub mod parallel_canary;
+pub mod pause_parallel_canary;
+pub mod parallel_tdt;
+pub mod pause_parallel_tdt;
 pub mod streaming_transcriber;
 pub mod model_registry;
 pub mod media_manager;
@@ -125,6 +129,10 @@ pub use session::{
 
 pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};
 pub use realtime_canary::{CanaryChunkResult, RealtimeCanary, RealtimeCanaryConfig};
+pub use parallel_canary::{ParallelCanary, ParallelCanaryConfig};
+pub use pause_parallel_canary::{PauseParallelCanary, PauseParallelConfig};
+pub use parallel_tdt::{ParallelTDT, ParallelTDTConfig};
+pub use pause_parallel_tdt::{PauseParallelTDT, PauseParallelTDTConfig};
 
 // VAD exports
 pub use vad::{SileroVad, VadConfig, VadSegment, VadSegmenter, VadState, VAD_CHUNK_SIZE, VAD_SAMPLE_RATE};

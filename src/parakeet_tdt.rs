@@ -108,13 +108,32 @@ impl Transcriber for ParakeetTDT {
         result.tokens = process_timestamps(&result.tokens, mode);
 
         // Rebuild full text from processed tokens
-        // Tokens already have spaces from SentencePiece ▁ replacement, so join without adding more
-        result.text = result
-            .tokens
-            .iter()
-            .map(|t| t.text.as_str())
-            .collect::<Vec<_>>()
-            .join("");
+        // For Words/Sentences mode, tokens have spaces stripped, so we need to add them back
+        // For Tokens mode, the original text with spaces from ▁ replacement is preserved
+        result.text = match mode {
+            TimestampMode::Tokens => result
+                .tokens
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>()
+                .join(""),
+            TimestampMode::Words | TimestampMode::Sentences => {
+                // Join words with spaces, but handle punctuation properly
+                let mut output = String::new();
+                for (i, token) in result.tokens.iter().enumerate() {
+                    let is_standalone_punct = token.text.len() == 1
+                        && token
+                            .text
+                            .chars()
+                            .all(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | ')'));
+                    if i > 0 && !is_standalone_punct {
+                        output.push(' ');
+                    }
+                    output.push_str(&token.text);
+                }
+                output
+            }
+        };
 
         Ok(result)
     }

@@ -5,7 +5,7 @@
 #
 # Usage: ./run.sh [runtime] [mode] [file]
 #        runtime: cpu|gpu (default: gpu)
-#        mode: speedy|low-latency|ultra-low-latency|extreme-low-latency|pause-based|lookahead (default: speedy)
+#        mode: speedy|low-latency|ultra-low-latency|extreme-low-latency|pause-based|lookahead|vad-speedy|vad-pause-based|vad-sliding-window|asr|parallel|pause-parallel (default: speedy)
 #        file: audio file path (default: broadcast_2.wav)
 #
 # Examples:
@@ -27,7 +27,7 @@ AUDIO_FILE="${3:-broadcast_2.wav}"
 
 # Valid options
 VALID_RUNTIMES="cpu gpu"
-VALID_MODES="speedy low-latency ultra-low-latency extreme-low-latency pause-based lookahead"
+VALID_MODES="speedy low-latency ultra-low-latency extreme-low-latency pause-based lookahead vad-speedy vad-pause-based vad-sliding-window asr parallel pause-parallel"
 
 # Validate runtime
 if [[ ! " $VALID_RUNTIMES " =~ " $RUNTIME " ]]; then
@@ -56,6 +56,12 @@ get_mode_flag() {
         extreme-low-latency) echo "--extreme-low-latency" ;;
         pause-based)         echo "--pause-based" ;;
         lookahead)           echo "--lookahead" ;;
+        vad-speedy)          echo "--vad-speedy" ;;
+        vad-pause-based)     echo "--vad-pause-based" ;;
+        vad-sliding-window)  echo "--vad-sliding-window" ;;
+        asr)                 echo "--asr" ;;
+        parallel)            echo "--parallel" ;;
+        pause-parallel)      echo "--pause-parallel" ;;
         *)                   echo "--speedy" ;;
     esac
 }
@@ -86,6 +92,12 @@ check_prerequisites() {
 
     if [ ! -f "diar_streaming_sortformer_4spk-v2.onnx" ]; then
         echo "Error: Diarization model not found"
+        echo "Run ./init.sh first to download models"
+        exit 1
+    fi
+
+    if [ ! -f "silero_vad.onnx" ]; then
+        echo "Error: VAD model not found"
         echo "Run ./init.sh first to download models"
         exit 1
     fi
@@ -271,12 +283,24 @@ show_help() {
     echo "             gpu  - GPU-accelerated execution (requires NVIDIA GPU)"
     echo ""
     echo "  mode       Transcription mode (default: speedy)"
-    echo "             speedy              - Optimized pause-based, good balance"
-    echo "             low-latency         - 10s buffer, 1.5s interval"
-    echo "             ultra-low-latency   - 8s buffer, 1.0s interval"
-    echo "             extreme-low-latency - 5s buffer, 0.5s interval"
-    echo "             pause-based         - Confirms at natural speech pauses"
-    echo "             lookahead           - Best quality with future context"
+    echo ""
+    echo "             Standard modes (continuous processing):"
+    echo "             speedy              - Best balance of latency and quality (~0.3-1.5s)"
+    echo "             pause-based         - Conservative pause-based (~0.5-2.0s)"
+    echo "             low-latency         - Time-based, fixed latency (~3.5s)"
+    echo "             ultra-low-latency   - Faster time-based (~2.5s)"
+    echo "             extreme-low-latency - Fastest response (~1.3s)"
+    echo "             lookahead           - Best quality with future context (~1.0-3.0s)"
+    echo ""
+    echo "             VAD-triggered modes (utterance-based):"
+    echo "             vad-speedy          - Short pause detection (~0.3s pause)"
+    echo "             vad-pause-based     - Longer pause detection (~0.7s pause)"
+    echo "             vad-sliding-window  - Multi-segment buffered transcription"
+    echo ""
+    echo "             Other modes:"
+    echo "             asr                 - Pure streaming without VAD"
+    echo "             parallel            - Multi-threaded sliding window inference"
+    echo "             pause-parallel      - Pause-triggered parallel with ordered output"
     echo ""
     echo "  file       Audio file path (default: broadcast_2.wav)"
     echo "             Path to a WAV file for audio input"

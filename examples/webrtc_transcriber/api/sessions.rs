@@ -6,12 +6,40 @@ use crate::state::{AppState, SessionAudioState};
 use crate::transcription::run_session_transcription;
 use axum::{extract::{Path, State}, Json};
 use parakeet_rs::SessionState;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+
+/// Configuration for parallel sliding window mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParallelConfig {
+    /// Number of worker threads (default: 8)
+    #[serde(default = "default_num_threads")]
+    pub num_threads: usize,
+    /// Buffer size in seconds (default: 6)
+    #[serde(default = "default_buffer_size")]
+    pub buffer_size_secs: usize,
+}
+
+fn default_num_threads() -> usize {
+    8
+}
+
+fn default_buffer_size() -> usize {
+    6
+}
+
+impl Default for ParallelConfig {
+    fn default() -> Self {
+        Self {
+            num_threads: 8,
+            buffer_size_secs: 6,
+        }
+    }
+}
 
 /// Request to create a new session
 #[derive(Debug, Deserialize)]
@@ -23,6 +51,9 @@ pub struct CreateSessionRequest {
     /// Language code for transcription (default: "de" for German)
     #[serde(default = "default_language")]
     pub language: String,
+    /// Configuration for parallel mode (only used when mode is "parallel")
+    #[serde(default)]
+    pub parallel_config: Option<ParallelConfig>,
 }
 
 fn default_language() -> String {
@@ -47,6 +78,13 @@ pub async fn create_session(
     match state.session_manager.create_session(&req.model_id, &req.media_id, mode_str, &language).await {
         Ok(session) => {
             let info = session.info().await;
+
+            // Store parallel config if provided
+            if let Some(parallel_config) = req.parallel_config {
+                let mut configs = state.parallel_configs.write().await;
+                configs.insert(session.id.clone(), parallel_config);
+            }
+
             Json(ApiResponse::success(info))
         }
         Err(e) => Json(ApiResponse::error(e.to_string())),
@@ -67,15 +105,13 @@ pub async fn get_session(
     }
 }
 
-/// Stop a session
+/// Stop and remove a session
 pub async fn stop_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    // Stop the session
-    if let Err(e) = state.session_manager.stop_session(&id).await {
-        return Json(ApiResponse::error(e.to_string()));
-    }
+    // First try to stop the session (may fail if session doesn't exist)
+    let _ = state.session_manager.stop_session(&id).await;
 
     // Clean up audio state and kill ffmpeg process
     {
@@ -94,6 +130,15 @@ pub async fn stop_session(
             }
         }
     }
+
+    // Clean up parallel config
+    {
+        let mut configs = state.parallel_configs.write().await;
+        configs.remove(&id);
+    }
+
+    // Always remove the session from the manager
+    let _ = state.session_manager.remove_session(&id).await;
 
     Json(ApiResponse::success(()))
 }
@@ -150,6 +195,12 @@ pub async fn start_session(
         None => return Json(ApiResponse::error("Model not found")),
     };
 
+    // Get parallel config if any
+    let parallel_config = {
+        let configs = state.parallel_configs.read().await;
+        configs.get(&id).cloned()
+    };
+
     // Start transcription thread
     session.start();
     session.set_state(SessionState::Running).await;
@@ -174,6 +225,7 @@ pub async fn start_session(
             model_id,
             language,
             ffmpeg_pid,
+            parallel_config,
         );
     });
 

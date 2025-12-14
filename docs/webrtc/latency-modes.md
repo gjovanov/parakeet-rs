@@ -2,7 +2,7 @@
 
 > **Navigation**: [Index](./README.md) | [Architecture](./architecture.md) | [API Reference](./api-reference.md) | Latency Modes | [Frontend](./frontend.md) | [Deployment](./deployment.md)
 
-The server supports **10 latency modes**, each optimized for different use cases. Modes are selected per-session via the `mode` parameter when creating a session.
+The server supports **12 latency modes**, each optimized for different use cases. Modes are selected per-session via the `mode` parameter when creating a session.
 
 ## Mode Overview
 
@@ -30,6 +30,13 @@ The server supports **10 latency modes**, each optimized for different use cases
 | Mode | Description |
 |------|-------------|
 | `asr` | Pure streaming ASR without VAD, continuous processing |
+
+### Parallel Modes (Multi-threaded CPU Optimization)
+
+| Mode | Threads | Description |
+|------|---------|-------------|
+| `parallel` | 8 (Canary) / 4 (TDT) | Multi-threaded sliding window inference |
+| `pause_parallel` | 8 (Canary) / 4 (TDT) | Pause-triggered parallel with ordered output |
 
 ---
 
@@ -166,6 +173,43 @@ Pure streaming without VAD.
 - Continuous sliding window processing
 - **Ideal for:** Continuous audio streams without natural pauses
 
+### `parallel`
+
+Multi-threaded parallel inference with sliding window.
+
+- Uses 8 threads for Canary model, 4 threads for TDT (TDT is faster)
+- Each thread processes overlapping audio windows in round-robin
+- Results are merged and deduplicated
+- **Ideal for:** CPU-bound scenarios where you want maximum throughput
+
+```json
+{
+  "num_threads": 8,
+  "buffer_size_chunks": 6,
+  "chunk_duration_secs": 1.0,
+  "intra_threads": 1
+}
+```
+
+### `pause_parallel`
+
+Pause-triggered parallel inference with ordered output.
+
+- Dispatches transcription jobs on speech pauses (natural boundaries)
+- Multiple model instances process segments in parallel
+- Maintains chronological order of output
+- **Ideal for:** Conversational audio with multiple speakers
+
+```json
+{
+  "num_threads": 8,
+  "pause_threshold_secs": 0.3,
+  "silence_energy_threshold": 0.008,
+  "max_segment_duration_secs": 5.0,
+  "context_buffer_secs": 3.0
+}
+```
+
 ---
 
 ## Choosing the Right Mode
@@ -208,6 +252,8 @@ Pure streaming without VAD.
 | Presentations/lectures | `vad_pause_based` |
 | Multi-speaker meetings | `vad_sliding_window` |
 | Continuous audio streams | `asr` |
+| High-throughput CPU transcription | `parallel` |
+| Multi-speaker with CPU optimization | `pause_parallel` |
 
 ---
 

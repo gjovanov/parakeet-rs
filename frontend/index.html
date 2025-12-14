@@ -345,6 +345,21 @@
               <option value="mt">Maltese (Malti)</option>
             </select>
           </div>
+
+          <!-- Parallel Mode Config (hidden by default) -->
+          <div id="parallel-config" style="display: none;">
+            <div class="form-group">
+              <label for="parallel-threads">Worker Threads: <span id="threads-value">8</span></label>
+              <input type="range" id="parallel-threads" min="1" max="8" value="8" step="1">
+              <small style="color: #666;">More threads = lower latency but higher CPU/memory usage</small>
+            </div>
+            <div class="form-group">
+              <label for="parallel-buffer">Buffer Size: <span id="buffer-value">6</span>s</label>
+              <input type="range" id="parallel-buffer" min="1" max="10" value="6" step="1">
+              <small style="color: #666;">Larger buffer = better accuracy but higher latency</small>
+            </div>
+          </div>
+
           <div class="form-actions">
             <button id="create-session-btn" class="action-btn">Create Session</button>
           </div>

@@ -1,5 +1,6 @@
 //! Transcription logic for sessions
 
+use crate::api::sessions::ParallelConfig;
 use crate::webrtc_handlers::audio::OpusEncoder;
 use parakeet_rs::{SessionState, TranscriptionSession};
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ pub fn run_session_transcription(
     model_id: String,
     language: String,
     ffmpeg_pid: Arc<AtomicU32>,
+    parallel_config: Option<ParallelConfig>,
 ) {
     use parakeet_rs::streaming_transcriber::StreamingTranscriber;
     use std::io::Read;
@@ -58,12 +60,193 @@ pub fn run_session_transcription(
     let vad_model_path =
         std::env::var("VAD_MODEL_PATH").unwrap_or_else(|_| "silero_vad.onnx".to_string());
 
-    // Spawn transcription thread
+    // Spawn transcription thread with panic catching
     let transcription_session = session.clone();
     let transcription_running = running.clone();
     let transcription_thread = std::thread::spawn(move || {
+        // Wrap entire transcription in catch_unwind to prevent server crash
+        let session_id = transcription_session.id.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_transcription_inner(
+                transcription_session.clone(),
+                audio_rx,
+                model_path,
+                diar_path,
+                exec_config,
+                is_canary,
+                is_vad_mode,
+                mode,
+                vad_base_mode,
+                vad_model_path,
+                language,
+                transcription_running,
+                parallel_config,
+            );
+        }));
+
+        if let Err(panic_err) = result {
+            let panic_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_err.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic".to_string()
+            };
+            eprintln!(
+                "[Session {}] PANIC in transcription thread: {}",
+                session_id, panic_msg
+            );
+            // Session will be marked as stopped by cleanup
+        }
+    });
+
+    // Inner function containing actual transcription logic
+    fn run_transcription_inner(
+        transcription_session: Arc<TranscriptionSession>,
+        audio_rx: std::sync::mpsc::Receiver<Vec<f32>>,
+        model_path: PathBuf,
+        diar_path: Option<PathBuf>,
+        exec_config: parakeet_rs::ExecutionConfig,
+        is_canary: bool,
+        is_vad_mode: bool,
+        mode: String,
+        vad_base_mode: String,
+        vad_model_path: String,
+        language: String,
+        transcription_running: Arc<AtomicBool>,
+        parallel_config: Option<super::api::sessions::ParallelConfig>,
+    ) {
+        use parakeet_rs::streaming_transcriber::StreamingTranscriber;
+        use std::sync::mpsc as std_mpsc;
+
+        // Check if parallel mode
+        let is_parallel_mode = mode == "parallel";
+        let is_pause_parallel_mode = mode == "pause_parallel";
+
         // Create the appropriate transcriber based on model type and mode
-        let mut transcriber: Box<dyn StreamingTranscriber> = if is_vad_mode {
+        let mut transcriber: Box<dyn StreamingTranscriber> = if is_pause_parallel_mode {
+            // Pause-based parallel mode - supports both Canary and TDT
+            let num_threads = match &parallel_config {
+                Some(cfg) => cfg.num_threads,
+                None => if is_canary { 8 } else { 4 }, // TDT is faster, needs fewer threads
+            };
+
+            if is_canary {
+                use parakeet_rs::pause_parallel_canary::{PauseParallelCanary, PauseParallelConfig};
+
+                let config = PauseParallelConfig {
+                    num_threads,
+                    language: language.clone(),
+                    intra_threads: 1,
+                    pause_threshold_secs: 0.3,
+                    silence_energy_threshold: 0.008,
+                    max_segment_duration_secs: 5.0,
+                    context_buffer_secs: 3.0,
+                };
+
+                eprintln!(
+                    "[Session {}] Creating PauseParallelCanary transcriber with {} threads, {}ms pause threshold",
+                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32
+                );
+
+                match PauseParallelCanary::new(&model_path, Some(exec_config), Some(config)) {
+                    Ok(t) => Box::new(t),
+                    Err(e) => {
+                        eprintln!(
+                            "[Session {}] Failed to create PauseParallelCanary transcriber: {}",
+                            transcription_session.id, e
+                        );
+                        return;
+                    }
+                }
+            } else {
+                use parakeet_rs::pause_parallel_tdt::{PauseParallelTDT, PauseParallelTDTConfig};
+
+                let config = PauseParallelTDTConfig {
+                    num_threads,
+                    intra_threads: 2,
+                    pause_threshold_secs: 0.3,
+                    silence_energy_threshold: 0.008,
+                    max_segment_duration_secs: 5.0,
+                    context_buffer_secs: 2.0,
+                };
+
+                eprintln!(
+                    "[Session {}] Creating PauseParallelTDT transcriber with {} threads, {}ms pause threshold",
+                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32
+                );
+
+                match PauseParallelTDT::new(&model_path, Some(exec_config), Some(config)) {
+                    Ok(t) => Box::new(t),
+                    Err(e) => {
+                        eprintln!(
+                            "[Session {}] Failed to create PauseParallelTDT transcriber: {}",
+                            transcription_session.id, e
+                        );
+                        return;
+                    }
+                }
+            }
+        } else if is_parallel_mode {
+            // Parallel sliding window mode - supports both Canary and TDT
+            let (num_threads, buffer_size) = match &parallel_config {
+                Some(cfg) => (cfg.num_threads, cfg.buffer_size_secs),
+                None => if is_canary { (8, 6) } else { (4, 6) }, // TDT is faster, needs fewer threads
+            };
+
+            if is_canary {
+                use parakeet_rs::parallel_canary::{ParallelCanary, ParallelCanaryConfig};
+
+                let config = ParallelCanaryConfig {
+                    num_threads,
+                    buffer_size_chunks: buffer_size,
+                    chunk_duration_secs: 1.0,
+                    language: language.clone(),
+                    intra_threads: 1,
+                };
+
+                eprintln!(
+                    "[Session {}] Creating ParallelCanary transcriber with {} threads, {}s buffer",
+                    transcription_session.id, config.num_threads, config.buffer_size_chunks
+                );
+
+                match ParallelCanary::new(&model_path, Some(exec_config), Some(config)) {
+                    Ok(t) => Box::new(t),
+                    Err(e) => {
+                        eprintln!(
+                            "[Session {}] Failed to create ParallelCanary transcriber: {}",
+                            transcription_session.id, e
+                        );
+                        return;
+                    }
+                }
+            } else {
+                use parakeet_rs::parallel_tdt::{ParallelTDT, ParallelTDTConfig};
+
+                let config = ParallelTDTConfig {
+                    num_threads,
+                    buffer_size_chunks: buffer_size,
+                    chunk_duration_secs: 1.0,
+                    intra_threads: 2,
+                };
+
+                eprintln!(
+                    "[Session {}] Creating ParallelTDT transcriber with {} threads, {}s buffer",
+                    transcription_session.id, config.num_threads, config.buffer_size_chunks
+                );
+
+                match ParallelTDT::new(&model_path, Some(exec_config), Some(config)) {
+                    Ok(t) => Box::new(t),
+                    Err(e) => {
+                        eprintln!(
+                            "[Session {}] Failed to create ParallelTDT transcriber: {}",
+                            transcription_session.id, e
+                        );
+                        return;
+                    }
+                }
+            }
+        } else if is_vad_mode {
             // VAD-triggered transcription
             if is_canary {
                 // VAD + Canary with optional diarization
@@ -81,13 +264,22 @@ pub fn run_session_transcription(
                     transcription_session.id, model_path, language, &vad_base_mode, diar_path
                 );
 
-                match RealtimeCanaryVad::new(
+                #[cfg(feature = "sortformer")]
+                let result = RealtimeCanaryVad::new(
                     &model_path,
                     diar_path.as_ref(),
                     &vad_model_path,
                     Some(exec_config),
                     Some(config),
-                ) {
+                );
+                #[cfg(not(feature = "sortformer"))]
+                let result = RealtimeCanaryVad::new(
+                    &model_path,
+                    &vad_model_path,
+                    Some(exec_config),
+                    Some(config),
+                );
+                match result {
                     Ok(t) => Box::new(t),
                     Err(e) => {
                         eprintln!(
@@ -98,47 +290,58 @@ pub fn run_session_transcription(
                     }
                 }
             } else {
-                // VAD + TDT with diarization
-                use parakeet_rs::realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig};
+                // VAD + TDT with diarization (requires sortformer feature)
+                #[cfg(feature = "sortformer")]
+                {
+                    use parakeet_rs::realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig};
 
-                let diar_path = match diar_path {
-                    Some(p) => p,
-                    None => {
-                        eprintln!(
-                            "[Session {}] No diarization model configured for TDT",
-                            transcription_session.id
-                        );
-                        return;
+                    let diar_path = match diar_path {
+                        Some(p) => p,
+                        None => {
+                            eprintln!(
+                                "[Session {}] No diarization model configured for TDT",
+                                transcription_session.id
+                            );
+                            return;
+                        }
+                    };
+
+                    // Choose config based on VAD sub-mode
+                    let config = if vad_base_mode == "sliding_window" {
+                        RealtimeTdtVadConfig::sliding_window()
+                    } else {
+                        RealtimeTdtVadConfig::from_mode(&vad_base_mode)
+                    };
+
+                    eprintln!(
+                        "[Session {}] Creating VAD+TDT transcriber from {:?} (vad_mode: {})",
+                        transcription_session.id, model_path, &vad_base_mode
+                    );
+
+                    match RealtimeTdtVad::new(
+                        &model_path,
+                        Some(&diar_path),
+                        &vad_model_path,
+                        Some(exec_config),
+                        Some(config),
+                    ) {
+                        Ok(t) => Box::new(t),
+                        Err(e) => {
+                            eprintln!(
+                                "[Session {}] Failed to create VAD+TDT transcriber: {}",
+                                transcription_session.id, e
+                            );
+                            return;
+                        }
                     }
-                };
-
-                // Choose config based on VAD sub-mode
-                let config = if vad_base_mode == "sliding_window" {
-                    RealtimeTdtVadConfig::sliding_window()
-                } else {
-                    RealtimeTdtVadConfig::from_mode(&vad_base_mode)
-                };
-
-                eprintln!(
-                    "[Session {}] Creating VAD+TDT transcriber from {:?} (vad_mode: {})",
-                    transcription_session.id, model_path, &vad_base_mode
-                );
-
-                match RealtimeTdtVad::new(
-                    &model_path,
-                    Some(&diar_path),
-                    &vad_model_path,
-                    Some(exec_config),
-                    Some(config),
-                ) {
-                    Ok(t) => Box::new(t),
-                    Err(e) => {
-                        eprintln!(
-                            "[Session {}] Failed to create VAD+TDT transcriber: {}",
-                            transcription_session.id, e
-                        );
-                        return;
-                    }
+                }
+                #[cfg(not(feature = "sortformer"))]
+                {
+                    eprintln!(
+                        "[Session {}] VAD+TDT mode requires sortformer feature",
+                        transcription_session.id
+                    );
+                    return;
                 }
             }
         } else if is_canary {
@@ -163,45 +366,83 @@ pub fn run_session_transcription(
                 }
             }
         } else {
-            // Use TDT with diarization (non-VAD)
-            use parakeet_rs::RealtimeTDTDiarized;
-
-            let diar_path = match diar_path {
-                Some(p) => p,
-                None => {
-                    eprintln!(
-                        "[Session {}] No diarization model configured for TDT",
-                        transcription_session.id
-                    );
-                    return;
-                }
-            };
-
-            let config = create_transcription_config(&mode);
-
-            eprintln!(
-                "[Session {}] Creating TDT transcriber from {:?}",
-                transcription_session.id, model_path
-            );
-
-            match RealtimeTDTDiarized::new(&model_path, &diar_path, Some(exec_config), Some(config))
+            // Use TDT with diarization (non-VAD) - requires sortformer feature
+            #[cfg(feature = "sortformer")]
             {
-                Ok(t) => Box::new(t),
-                Err(e) => {
-                    eprintln!(
-                        "[Session {}] Failed to create TDT transcriber: {}",
-                        transcription_session.id, e
-                    );
-                    return;
+                use parakeet_rs::RealtimeTDTDiarized;
+
+                let diar_path = match diar_path {
+                    Some(p) => p,
+                    None => {
+                        eprintln!(
+                            "[Session {}] No diarization model configured for TDT",
+                            transcription_session.id
+                        );
+                        return;
+                    }
+                };
+
+                let config = create_transcription_config(&mode);
+
+                eprintln!(
+                    "[Session {}] Creating TDT transcriber from {:?}",
+                    transcription_session.id, model_path
+                );
+
+                match RealtimeTDTDiarized::new(&model_path, &diar_path, Some(exec_config), Some(config))
+                {
+                    Ok(t) => Box::new(t),
+                    Err(e) => {
+                        eprintln!(
+                            "[Session {}] Failed to create TDT transcriber: {}",
+                            transcription_session.id, e
+                        );
+                        return;
+                    }
+                }
+            }
+            #[cfg(not(feature = "sortformer"))]
+            {
+                // Use ParallelTDT with 1 thread as fallback when sortformer is not available
+                use parakeet_rs::parallel_tdt::{ParallelTDT, ParallelTDTConfig};
+
+                let config = ParallelTDTConfig {
+                    num_threads: 1,
+                    buffer_size_chunks: 6,
+                    chunk_duration_secs: 1.0,
+                    intra_threads: 4,
+                };
+
+                eprintln!(
+                    "[Session {}] Creating TDT transcriber from {:?} (single-thread fallback, no diarization)",
+                    transcription_session.id, model_path
+                );
+
+                match ParallelTDT::new(&model_path, Some(exec_config), Some(config))
+                {
+                    Ok(t) => Box::new(t),
+                    Err(e) => {
+                        eprintln!(
+                            "[Session {}] Failed to create TDT transcriber: {}",
+                            transcription_session.id, e
+                        );
+                        return;
+                    }
                 }
             }
         };
 
-        let model_type = match (is_vad_mode, is_canary) {
-            (true, true) => "VAD+Canary",
-            (true, false) => "VAD+TDT",
-            (false, true) => "Canary",
-            (false, false) => "TDT",
+        let model_type = if is_pause_parallel_mode {
+            if is_canary { "PauseParallelCanary" } else { "PauseParallelTDT" }
+        } else if is_parallel_mode {
+            if is_canary { "ParallelCanary" } else { "ParallelTDT" }
+        } else {
+            match (is_vad_mode, is_canary) {
+                (true, true) => "VAD+Canary",
+                (true, false) => "VAD+TDT",
+                (false, true) => "Canary",
+                (false, false) => "TDT",
+            }
         };
         eprintln!(
             "[Session {}] Transcription thread started ({})",
@@ -235,13 +476,16 @@ pub fn run_session_transcription(
                     let inference_time = inference_start.elapsed();
                     let inference_time_ms = inference_time.as_millis() as u32;
 
-                    // Set inference time on all segments
+                    // Set inference time on segments that don't already have it
+                    // (Parallel modes set inference_time_ms internally from worker threads)
                     for segment in &mut result.segments {
-                        segment.inference_time_ms = Some(inference_time_ms);
+                        if segment.inference_time_ms.is_none() {
+                            segment.inference_time_ms = Some(inference_time_ms);
+                        }
                     }
 
-                    // Log slow inference calls (> 5 seconds)
-                    if inference_time.as_secs() > 5 {
+                    // Log slow inference calls (> 5 seconds) for non-parallel modes
+                    if inference_time.as_secs() > 5 && !is_parallel_mode && !is_pause_parallel_mode {
                         eprintln!(
                             "[Session {}] SLOW inference: {:.1}s for {} samples",
                             transcription_session.id,
@@ -308,7 +552,7 @@ pub fn run_session_transcription(
             "[Session {}] Transcription thread finished",
             transcription_session.id
         );
-    });
+    } // end of run_transcription_inner
 
     // Initialize Opus encoder
     let mut opus_encoder = match OpusEncoder::new() {
@@ -664,7 +908,7 @@ fn emit_streaming_segments(
         // Log all segments
         let partial_marker = if segment.is_final { "FINAL" } else { "partial" };
         eprintln!(
-            "[Session {} | {} | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (receivers: {})",
+            "[Session {} | {} | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (inference: {}ms, receivers: {})",
             session.id,
             partial_marker,
             segment
@@ -674,6 +918,7 @@ fn emit_streaming_segments(
             segment.text,
             segment.start_time,
             segment.end_time,
+            segment.inference_time_ms.unwrap_or(0),
             receiver_count
         );
     }

@@ -40,7 +40,19 @@ impl ParakeetTDTDecoder {
                 };
 
                 // Handle SentencePiece format (▁ prefix for word start)
-                let display_text = token_text.replace('▁', " ");
+                let mut display_text = token_text.replace('▁', " ");
+
+                // Heuristic: If token starts with uppercase and previous char is lowercase,
+                // this is likely a new word (handles non-English text where ▁ may be missing)
+                if !display_text.starts_with(' ') && !full_text.is_empty() {
+                    let first_char = display_text.chars().next();
+                    let last_char = full_text.chars().last();
+                    if let (Some(fc), Some(lc)) = (first_char, last_char) {
+                        if fc.is_uppercase() && lc.is_lowercase() {
+                            display_text = format!(" {}", display_text);
+                        }
+                    }
+                }
 
                 // Skip special tokens
                 if !(token_text.starts_with('<')

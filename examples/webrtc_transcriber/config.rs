@@ -20,6 +20,10 @@ pub enum LatencyMode {
     VadSlidingWindow,
     /// Pure streaming ASR mode: continuous transcription without VAD
     Asr,
+    /// Parallel sliding window: 8 threads processing overlapping windows
+    Parallel,
+    /// Pause-based parallel: dispatch on pause detection, ordered output
+    PauseParallel,
 }
 
 impl LatencyMode {
@@ -35,6 +39,8 @@ impl LatencyMode {
             LatencyMode::VadPauseBased => "vad_pause_based",
             LatencyMode::VadSlidingWindow => "vad_sliding_window",
             LatencyMode::Asr => "asr",
+            LatencyMode::Parallel => "parallel",
+            LatencyMode::PauseParallel => "pause_parallel",
         }
     }
 
@@ -50,6 +56,8 @@ impl LatencyMode {
             LatencyMode::VadPauseBased => "VAD Pause-Based (~0.7s pause)",
             LatencyMode::VadSlidingWindow => "VAD Sliding Window (10 seg / 15s)",
             LatencyMode::Asr => "ASR (Pure streaming)",
+            LatencyMode::Parallel => "Parallel Sliding Window (8 threads)",
+            LatencyMode::PauseParallel => "Pause-Parallel (8 threads, ordered)",
         }
     }
 
@@ -80,6 +88,8 @@ impl LatencyMode {
             LatencyMode::VadPauseBased,
             LatencyMode::VadSlidingWindow,
             LatencyMode::Asr,
+            LatencyMode::Parallel,
+            LatencyMode::PauseParallel,
         ]
     }
 }

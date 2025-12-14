@@ -1,5 +1,6 @@
 //! Application state types for the WebRTC transcription server
 
+use crate::api::sessions::ParallelConfig;
 use crate::config::RuntimeConfig;
 use parakeet_rs::{SharedMediaManager, SharedModelRegistry, SharedSessionManager};
 use std::collections::HashMap;
@@ -43,4 +44,6 @@ pub struct AppState {
     pub config: RuntimeConfig,
     /// Per-session audio tracks
     pub session_audio: RwLock<HashMap<String, SessionAudioState>>,
+    /// Per-session parallel configs (for parallel mode)
+    pub parallel_configs: RwLock<HashMap<String, ParallelConfig>>,
 }

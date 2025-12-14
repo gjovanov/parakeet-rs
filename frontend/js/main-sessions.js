@@ -99,6 +99,13 @@ function cacheElements() {
   elements.uploadZone = document.getElementById('upload-zone');
   elements.fileInput = document.getElementById('file-input');
   elements.mediaList = document.getElementById('media-list');
+
+  // Parallel config elements
+  elements.parallelConfig = document.getElementById('parallel-config');
+  elements.parallelThreads = document.getElementById('parallel-threads');
+  elements.parallelBuffer = document.getElementById('parallel-buffer');
+  elements.threadsValue = document.getElementById('threads-value');
+  elements.bufferValue = document.getElementById('buffer-value');
 }
 
 function setupSessionManagerListeners() {
@@ -126,6 +133,33 @@ function setupEventListeners() {
     });
   });
 
+  // Mode select - show/hide parallel config
+  if (elements.modeSelect) {
+    elements.modeSelect.addEventListener('change', () => {
+      const isParallelMode = elements.modeSelect.value === 'parallel' || elements.modeSelect.value === 'pause_parallel';
+      if (elements.parallelConfig) {
+        elements.parallelConfig.style.display = isParallelMode ? 'block' : 'none';
+        // Hide buffer size for pause_parallel (not applicable)
+        const bufferRow = elements.parallelBuffer?.parentElement;
+        if (bufferRow) {
+          bufferRow.style.display = elements.modeSelect.value === 'parallel' ? 'flex' : 'none';
+        }
+      }
+    });
+  }
+
+  // Parallel sliders - update displayed values
+  if (elements.parallelThreads) {
+    elements.parallelThreads.addEventListener('input', () => {
+      elements.threadsValue.textContent = elements.parallelThreads.value;
+    });
+  }
+  if (elements.parallelBuffer) {
+    elements.parallelBuffer.addEventListener('input', () => {
+      elements.bufferValue.textContent = elements.parallelBuffer.value;
+    });
+  }
+
   // Create session
   elements.createSessionBtn.addEventListener('click', async () => {
     const modelId = elements.modelSelect.value;
@@ -138,10 +172,19 @@ function setupEventListeners() {
       return;
     }
 
+    // Get parallel config if in parallel or pause_parallel mode
+    let parallelConfig = null;
+    if ((mode === 'parallel' || mode === 'pause_parallel') && elements.parallelThreads) {
+      parallelConfig = {
+        num_threads: parseInt(elements.parallelThreads.value, 10),
+        buffer_size_secs: mode === 'parallel' ? parseInt(elements.parallelBuffer?.value || 6, 10) : 6
+      };
+    }
+
     try {
       elements.createSessionBtn.disabled = true;
       elements.createSessionBtn.textContent = 'Creating...';
-      const session = await sessionManager.createSession(modelId, mediaId, mode, language);
+      const session = await sessionManager.createSession(modelId, mediaId, mode, language, parallelConfig);
       // Auto-start the session
       await sessionManager.startSession(session.id);
     } catch (e) {

@@ -48,8 +48,12 @@ services:
       # Mount model directories (read-only)
       - ./tdt:/app/models/tdt:ro
       - ./diar_streaming_sortformer_4spk-v2.onnx:/app/models/diarization/model.onnx:ro
+      - ./canary:/app/models/canary:ro
+      - ./silero_vad.onnx:/app/models/silero_vad.onnx:ro
       # Mount audio files for testing (optional)
       - ./broadcast_2.wav:/tmp/broadcast_2.wav:ro
+      # Mount media directory for multi-session support
+      - ./media:/app/media
       # Mount frontend for live development (read-only)
       - ./frontend:/app/frontend:ro
 
@@ -63,6 +67,9 @@ services:
       # Model paths (match volume mounts)
       - TDT_MODEL_PATH=/app/models/tdt
       - DIAR_MODEL_PATH=/app/models/diarization/model.onnx
+      - CANARY_MODEL_PATH=/app/models/canary
+      - VAD_MODEL_PATH=/app/models/silero_vad.onnx
+      - MEDIA_DIR=/app/media
 
       # GPU configuration
       - USE_GPU=true
@@ -84,21 +91,20 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-    # Override entrypoint to keep container running
-    # The transcriber will be started manually via docker exec
-    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+    # Start the multi-session WebRTC transcriber automatically
+    entrypoint: ["/app/webrtc_transcriber"]
 
     # stdin_open: true allows piping audio to the container
     stdin_open: true
     tty: true
 
-    # Health check - disabled since we start transcriber manually
-    # healthcheck:
-    #   test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3
-    #   start_period: 10s
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${GPU_PORT:-8090}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 networks:
   default:

@@ -100,6 +100,16 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
             name: "ASR (Pure streaming)",
             description: "Pure streaming ASR without VAD. Processes audio continuously with sliding window.",
         },
+        ModeInfo {
+            id: "parallel",
+            name: "Parallel Sliding Window",
+            description: "Multi-threaded parallel inference with sliding window. Uses 8 threads for Canary, 4 for TDT. Works with both models.",
+        },
+        ModeInfo {
+            id: "pause_parallel",
+            name: "Pause-Parallel (ordered)",
+            description: "Pause-triggered parallel inference. Dispatches on speech pauses for natural boundaries. Ordered output. Works with both models.",
+        },
     ];
     Json(ApiResponse::success(modes))
 }

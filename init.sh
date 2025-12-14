@@ -74,7 +74,7 @@ download_file() {
 # Download TDT model (multilingual transcription)
 download_tdt_model() {
     echo ""
-    echo "[1/3] Downloading TDT Model (Multilingual Transcription)..."
+    echo "[1/4] Downloading TDT Model (Multilingual Transcription)..."
     echo "      Source: huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx"
     echo ""
 
@@ -91,7 +91,7 @@ download_tdt_model() {
 # Download Diarization model (speaker identification)
 download_diarization_model() {
     echo ""
-    echo "[2/3] Downloading Diarization Model (Speaker Identification)..."
+    echo "[2/4] Downloading Diarization Model (Speaker Identification)..."
     echo "      Source: huggingface.co/altunenes/parakeet-rs"
     echo ""
 
@@ -102,7 +102,7 @@ download_diarization_model() {
 # Download Canary model (multilingual ASR)
 download_canary_model() {
     echo ""
-    echo "[3/3] Downloading Canary 1B v2 Model (Multilingual ASR)..."
+    echo "[3/4] Downloading Canary 1B v2 Model (Multilingual ASR)..."
     echo "      Source: huggingface.co/istupakov/canary-1b-v2-onnx"
     echo "      Note: Using INT8 quantized models (~1GB total)"
     echo ""
@@ -115,6 +115,17 @@ download_canary_model() {
     download_file "$base_url/decoder-model.int8.onnx" "canary/decoder-model.int8.onnx"
     download_file "$base_url/vocab.txt" "canary/vocab.txt"
     download_file "$base_url/config.json" "canary/config.json"
+}
+
+# Download VAD model (Voice Activity Detection)
+download_vad_model() {
+    echo ""
+    echo "[4/4] Downloading VAD Model (Voice Activity Detection)..."
+    echo "      Source: huggingface.co/snakers4/silero-vad"
+    echo ""
+
+    local url="https://huggingface.co/snakers4/silero-vad/resolve/master/files/silero_vad.onnx"
+    download_file "$url" "silero_vad.onnx"
 }
 
 # Create .env file from template
@@ -184,6 +195,7 @@ SPEEDY_MODE=true
 TDT_MODEL_PATH=/app/models/tdt
 DIAR_MODEL_PATH=/app/models/diarization/model.onnx
 CANARY_MODEL_PATH=/app/models/canary
+VAD_MODEL_PATH=/app/models/silero_vad.onnx
 FRONTEND_PATH=/app/frontend
 
 # =============================================================================
@@ -246,6 +258,7 @@ main() {
     download_tdt_model
     download_diarization_model
     download_canary_model
+    download_vad_model
     create_env_file
 
     echo ""
@@ -266,6 +279,9 @@ main() {
     fi
     if [ -d "canary" ]; then
         du -sh canary/
+    fi
+    if [ -f "silero_vad.onnx" ]; then
+        du -sh silero_vad.onnx
     fi
 }
 

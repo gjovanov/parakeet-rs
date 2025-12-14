@@ -88,12 +88,19 @@ export class SessionManager {
     }
   }
 
-  async createSession(modelId, mediaId, mode = 'speedy', language = 'de') {
+  async createSession(modelId, mediaId, mode = 'speedy', language = 'de', parallelConfig = null) {
     try {
+      const body = { model_id: modelId, media_id: mediaId, mode, language };
+
+      // Add parallel config if provided and mode is parallel
+      if (mode === 'parallel' && parallelConfig) {
+        body.parallel_config = parallelConfig;
+      }
+
       const res = await fetch(`${API_BASE}/api/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: modelId, media_id: mediaId, mode, language })
+        body: JSON.stringify(body)
       });
       const json = await res.json();
       if (json.success) {

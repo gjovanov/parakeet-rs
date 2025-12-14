@@ -136,6 +136,48 @@ fn main() {
 #[cfg(feature = "sortformer")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install panic hook to log crashes
+    std::panic::set_hook(Box::new(|panic_info| {
+        let backtrace = std::backtrace::Backtrace::capture();
+        let timestamp = {
+            let now = std::time::SystemTime::now();
+            let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let secs = duration.as_secs();
+            // Format as simple timestamp
+            format!("{}", secs)
+        };
+
+        let panic_msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic".to_string()
+        };
+
+        let location = panic_info.location().map(|loc| {
+            format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
+        }).unwrap_or_else(|| "unknown location".to_string());
+
+        let crash_msg = format!(
+            "\n=== PANIC at {} ===\nLocation: {}\nMessage: {}\nBacktrace:\n{}\n==================\n",
+            timestamp, location, panic_msg, backtrace
+        );
+
+        // Log to stderr
+        eprintln!("{}", crash_msg);
+
+        // Try to log to file
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("crash.log")
+        {
+            use std::io::Write;
+            let _ = file.write_all(crash_msg.as_bytes());
+        }
+    }));
+
     let args = Args::parse();
 
     eprintln!("===========================================");
@@ -250,6 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_count: AtomicU64::new(0),
         config: runtime_config,
         session_audio: RwLock::new(HashMap::new()),
+        parallel_configs: RwLock::new(HashMap::new()),
     });
 
     // Build router

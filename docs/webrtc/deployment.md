@@ -34,6 +34,22 @@
 | `TURN_USERNAME` | - | TURN authentication username |
 | `TURN_PASSWORD` | - | TURN authentication password |
 
+#### GPU Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `USE_GPU` | `false` | Enable GPU acceleration (`true`, `cuda`, `tensorrt`, `rocm`) |
+| `INTRA_THREADS` | `4` | ONNX Runtime intra-op parallelism |
+| `INTER_THREADS` | `1` | ONNX Runtime inter-op parallelism |
+
+**Supported GPU Providers:**
+- `cuda` - NVIDIA CUDA (requires `--features cuda`)
+- `tensorrt` - NVIDIA TensorRT (requires `--features tensorrt`)
+- `rocm` - AMD ROCm (requires `--features rocm`)
+- `coreml` - Apple CoreML (requires `--features coreml`)
+- `directml` - Windows DirectML (requires `--features directml`)
+- `openvino` - Intel OpenVINO (requires `--features openvino`)
+
 ### Example .env File
 
 ```bash
@@ -46,8 +62,14 @@ MAX_CONCURRENT_SESSIONS=10
 
 # Models
 TDT_MODEL_PATH=/app/models/tdt
+CANARY_MODEL_PATH=/app/models/canary
 DIAR_MODEL_PATH=/app/models/diar_streaming_sortformer_4spk-v2.onnx
 VAD_MODEL_PATH=/app/models/silero_vad.onnx
+
+# GPU (optional - requires compilation with --features cuda)
+USE_GPU=false
+INTRA_THREADS=4
+INTER_THREADS=1
 
 # TURN (for NAT traversal)
 TURN_SERVER=turns:coturn.example.com:443?transport=udp
@@ -192,6 +214,62 @@ services:
 ```
 
 **Note:** `network_mode: host` is required for WebRTC UDP traffic. For Kubernetes, use `hostNetwork: true`.
+
+---
+
+## GPU Deployment
+
+### Building with GPU Support
+
+```bash
+# NVIDIA CUDA
+cargo build --release --example webrtc_transcriber --features "cuda,sortformer"
+
+# NVIDIA TensorRT (faster inference)
+cargo build --release --example webrtc_transcriber --features "tensorrt,sortformer"
+
+# AMD ROCm
+cargo build --release --example webrtc_transcriber --features "rocm,sortformer"
+```
+
+### Docker GPU Deployment
+
+Use `docker-compose.gpu.yml` for GPU acceleration:
+
+```bash
+# Build GPU image
+docker-compose -f docker-compose.gpu.yml build
+
+# Run with GPU
+docker-compose -f docker-compose.gpu.yml up -d
+```
+
+**Requirements:**
+- NVIDIA Container Toolkit installed
+- NVIDIA drivers installed on host
+- CUDA 12.2+ compatible GPU
+
+### GPU Environment Variables
+
+```bash
+# Enable GPU
+USE_GPU=true
+
+# Or specify provider explicitly
+USE_GPU=cuda
+USE_GPU=tensorrt
+
+# GPU thread tuning (lower values recommended)
+INTRA_THREADS=2
+INTER_THREADS=1
+```
+
+### GPU Performance Notes
+
+- GPU inference is typically 5-10x faster than CPU
+- For parallel modes, GPU workers share the same GPU device
+- Reduce `INTRA_THREADS` to avoid GPU contention
+- TensorRT provides fastest inference (requires TensorRT installation)
 
 ---
 
