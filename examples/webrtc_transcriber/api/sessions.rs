@@ -41,6 +41,54 @@ impl Default for ParallelConfig {
     }
 }
 
+/// Configuration for pause detection parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PauseConfig {
+    /// Silence duration (ms) to trigger segment boundary (150-600, default: 300)
+    #[serde(default = "default_pause_threshold_ms")]
+    pub pause_threshold_ms: u32,
+
+    /// RMS energy threshold for silence detection (0.003-0.02, default: 0.008)
+    #[serde(default = "default_silence_energy")]
+    pub silence_energy_threshold: f32,
+
+    /// Maximum segment duration in seconds (3.0-15.0, default: 5.0)
+    #[serde(default = "default_max_segment_secs")]
+    pub max_segment_secs: f32,
+
+    /// Context buffer in seconds for parallel modes (0.0-3.0, default: 0.0)
+    /// Higher values improve accuracy at segment boundaries but cause text overlap
+    #[serde(default = "default_context_buffer_secs")]
+    pub context_buffer_secs: f32,
+}
+
+fn default_pause_threshold_ms() -> u32 {
+    300
+}
+
+fn default_silence_energy() -> f32 {
+    0.008
+}
+
+fn default_max_segment_secs() -> f32 {
+    5.0
+}
+
+fn default_context_buffer_secs() -> f32 {
+    0.0
+}
+
+impl Default for PauseConfig {
+    fn default() -> Self {
+        Self {
+            pause_threshold_ms: default_pause_threshold_ms(),
+            silence_energy_threshold: default_silence_energy(),
+            max_segment_secs: default_max_segment_secs(),
+            context_buffer_secs: default_context_buffer_secs(),
+        }
+    }
+}
+
 /// Request to create a new session
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
@@ -54,10 +102,23 @@ pub struct CreateSessionRequest {
     /// Configuration for parallel mode (only used when mode is "parallel")
     #[serde(default)]
     pub parallel_config: Option<ParallelConfig>,
+    /// Noise cancellation type ("none", "rnnoise", "deepfilternet3")
+    #[serde(default = "default_noise_cancellation")]
+    pub noise_cancellation: String,
+    /// Whether to enable speaker diarization
+    #[serde(default)]
+    pub diarization: bool,
+    /// Pause detection configuration (only used for pause-related modes)
+    #[serde(default)]
+    pub pause_config: Option<PauseConfig>,
 }
 
 fn default_language() -> String {
     "de".to_string()
+}
+
+fn default_noise_cancellation() -> String {
+    "none".to_string()
 }
 
 /// List all sessions
@@ -75,7 +136,32 @@ pub async fn create_session(
 ) -> Json<ApiResponse<parakeet_rs::SessionInfo>> {
     let mode_str = req.mode.as_str();
     let language = if req.language.is_empty() { "de".to_string() } else { req.language };
-    match state.session_manager.create_session(&req.model_id, &req.media_id, mode_str, &language).await {
+    let noise_cancellation = if req.noise_cancellation.is_empty() {
+        "none".to_string()
+    } else {
+        req.noise_cancellation
+    };
+
+    // Determine diarization model name if enabled
+    let diarization_model = if req.diarization {
+        Some("Sortformer v2 (4 speakers)".to_string())
+    } else {
+        None
+    };
+
+    match state
+        .session_manager
+        .create_session(
+            &req.model_id,
+            &req.media_id,
+            mode_str,
+            &language,
+            &noise_cancellation,
+            req.diarization,
+            diarization_model,
+        )
+        .await
+    {
         Ok(session) => {
             let info = session.info().await;
 
@@ -83,6 +169,12 @@ pub async fn create_session(
             if let Some(parallel_config) = req.parallel_config {
                 let mut configs = state.parallel_configs.write().await;
                 configs.insert(session.id.clone(), parallel_config);
+            }
+
+            // Store pause config if provided
+            if let Some(pause_config) = req.pause_config {
+                let mut configs = state.pause_configs.write().await;
+                configs.insert(session.id.clone(), pause_config);
             }
 
             Json(ApiResponse::success(info))
@@ -134,6 +226,12 @@ pub async fn stop_session(
     // Clean up parallel config
     {
         let mut configs = state.parallel_configs.write().await;
+        configs.remove(&id);
+    }
+
+    // Clean up pause config
+    {
+        let mut configs = state.pause_configs.write().await;
         configs.remove(&id);
     }
 
@@ -201,6 +299,12 @@ pub async fn start_session(
         configs.get(&id).cloned()
     };
 
+    // Get pause config if any
+    let pause_config = {
+        let configs = state.pause_configs.read().await;
+        configs.get(&id).cloned()
+    };
+
     // Start transcription thread
     session.start();
     session.set_state(SessionState::Running).await;
@@ -226,6 +330,7 @@ pub async fn start_session(
             language,
             ffmpeg_pid,
             parallel_config,
+            pause_config,
         );
     });
 

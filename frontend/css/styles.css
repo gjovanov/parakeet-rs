@@ -440,3 +440,34 @@ body {
 .status.reconnecting {
   animation: pulse 1.5s infinite;
 }
+
+/* Mode Badge */
+.mode-badge {
+  background: #2d3748;
+  color: #fbd38d;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75em;
+  text-transform: lowercase;
+}
+
+/* Noise Cancellation Badge */
+.noise-badge {
+  background: #2d3748;
+  color: #68d391;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75em;
+  margin-left: 5px;
+  text-transform: uppercase;
+}
+
+/* Diarization Badge */
+.diar-badge {
+  background: #2d3748;
+  color: #63b3ed;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75em;
+  margin-left: 5px;
+}

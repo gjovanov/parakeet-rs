@@ -345,6 +345,18 @@
               <option value="mt">Maltese (Malti)</option>
             </select>
           </div>
+          <div class="form-group">
+            <label for="noise-select">Noise Cancellation</label>
+            <select id="noise-select">
+              <option value="none">None</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="diarization-select">Speaker Diarization</label>
+            <select id="diarization-select">
+              <option value="none">None</option>
+            </select>
+          </div>
 
           <!-- Parallel Mode Config (hidden by default) -->
           <div id="parallel-config" style="display: none;">
@@ -357,6 +369,30 @@
               <label for="parallel-buffer">Buffer Size: <span id="buffer-value">6</span>s</label>
               <input type="range" id="parallel-buffer" min="1" max="10" value="6" step="1">
               <small style="color: #666;">Larger buffer = better accuracy but higher latency</small>
+            </div>
+          </div>
+
+          <!-- Pause Configuration (hidden by default, shown for pause-related modes) -->
+          <div id="pause-config" style="display: none;">
+            <div class="form-group">
+              <label for="pause-threshold">Pause Threshold: <span id="pause-threshold-value">300</span>ms</label>
+              <input type="range" id="pause-threshold" min="150" max="600" value="300" step="25">
+              <small style="color: #666;">Silence duration to trigger segment boundary</small>
+            </div>
+            <div class="form-group">
+              <label for="silence-energy">Silence Sensitivity: <span id="silence-energy-value">Medium</span></label>
+              <input type="range" id="silence-energy" min="1" max="5" value="3" step="1">
+              <small style="color: #666;">1=Very sensitive, 5=Less sensitive</small>
+            </div>
+            <div class="form-group">
+              <label for="max-segment">Max Segment: <span id="max-segment-value">5</span>s</label>
+              <input type="range" id="max-segment" min="3" max="15" value="5" step="1">
+              <small style="color: #666;">Maximum duration before forced transcription</small>
+            </div>
+            <div class="form-group" id="context-buffer-group" style="display: none;">
+              <label for="context-buffer">Context Buffer: <span id="context-buffer-value">0</span>s</label>
+              <input type="range" id="context-buffer" min="0" max="12" value="0" step="0.5">
+              <small style="color: #666;">Audio overlap for accuracy (0=no overlap, higher=more accurate but may repeat text)</small>
             </div>
           </div>
 

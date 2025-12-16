@@ -42,7 +42,8 @@ mkdir -p media
 - **Multi-session support** - Run multiple concurrent transcription sessions
 - **Multiple models** - TDT (25 languages), Canary (multilingual), VAD variants
 - **12 latency modes** - From ~1.3s (extreme low latency) to highest quality (lookahead), plus parallel modes
-- **Speaker diarization** - Sortformer identifies up to 4 speakers
+- **Noise cancellation** - RNNoise (lightweight) or DeepFilterNet3 (high-quality) for cleaner audio
+- **Speaker diarization** - Sortformer identifies up to 4 speakers (toggleable per session)
 - **WebRTC audio** - Ultra-low latency audio delivery (~100-400ms)
 - **RESTful API** - Programmatic session and media management
 - **Modern web UI** - Multi-session interface with real-time subtitles

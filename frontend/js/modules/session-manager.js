@@ -10,6 +10,8 @@ export class SessionManager {
     this.models = [];
     this.mediaFiles = [];
     this.modes = [];
+    this.noiseCancellationOptions = [];
+    this.diarizationOptions = [];
     this.currentSession = null;
     this.listeners = {};
     this.pollInterval = null;
@@ -73,6 +75,36 @@ export class SessionManager {
     }
   }
 
+  async fetchNoiseCancellation() {
+    try {
+      const res = await fetch(`${API_BASE}/api/noise-cancellation`);
+      const json = await res.json();
+      if (json.success) {
+        this.noiseCancellationOptions = json.data;
+        this.emit('noiseCancellationLoaded', this.noiseCancellationOptions);
+      }
+      return this.noiseCancellationOptions;
+    } catch (e) {
+      console.error('Failed to fetch noise cancellation options:', e);
+      return [];
+    }
+  }
+
+  async fetchDiarization() {
+    try {
+      const res = await fetch(`${API_BASE}/api/diarization`);
+      const json = await res.json();
+      if (json.success) {
+        this.diarizationOptions = json.data;
+        this.emit('diarizationLoaded', this.diarizationOptions);
+      }
+      return this.diarizationOptions;
+    } catch (e) {
+      console.error('Failed to fetch diarization options:', e);
+      return [];
+    }
+  }
+
   async fetchSessions() {
     try {
       const res = await fetch(`${API_BASE}/api/sessions`);
@@ -88,13 +120,25 @@ export class SessionManager {
     }
   }
 
-  async createSession(modelId, mediaId, mode = 'speedy', language = 'de', parallelConfig = null) {
+  async createSession(modelId, mediaId, mode = 'speedy', language = 'de', parallelConfig = null, noiseCancellation = 'none', diarization = false, pauseConfig = null) {
     try {
-      const body = { model_id: modelId, media_id: mediaId, mode, language };
+      const body = {
+        model_id: modelId,
+        media_id: mediaId,
+        mode,
+        language,
+        noise_cancellation: noiseCancellation,
+        diarization: diarization
+      };
 
-      // Add parallel config if provided and mode is parallel
-      if (mode === 'parallel' && parallelConfig) {
+      // Add parallel config if provided and mode is parallel or pause_parallel
+      if ((mode === 'parallel' || mode === 'pause_parallel') && parallelConfig) {
         body.parallel_config = parallelConfig;
+      }
+
+      // Add pause config if provided
+      if (pauseConfig) {
+        body.pause_config = pauseConfig;
       }
 
       const res = await fetch(`${API_BASE}/api/sessions`, {

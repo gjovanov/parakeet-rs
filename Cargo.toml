@@ -42,6 +42,9 @@ rustfft = "6.4"
 tokio = { version = "1", features = ["fs", "process", "sync"] }
 bytes = "1.5"
 uuid = { version = "1.6", features = ["v4"] }
+# Noise cancellation
+nnnoiseless = "0.5"  # RNNoise pure Rust port
+rubato = "0.15"      # High-quality audio resampling
 
 [dev-dependencies]
 rayon = "1.10"
@@ -89,3 +92,4 @@ rocm = ["ort/rocm"]
 openvino = ["ort/openvino"]
 webgpu = ["ort/webgpu"]
 sortformer = []
+rnnoise = []  # Enable RNNoise noise cancellation

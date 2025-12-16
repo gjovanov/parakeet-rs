@@ -11,6 +11,8 @@
 | `/api/config` | GET | Runtime configuration (JSON) |
 | `/api/models` | GET | List available transcription models |
 | `/api/modes` | GET | List available latency modes |
+| `/api/noise-cancellation` | GET | List available noise cancellation options |
+| `/api/diarization` | GET | List available diarization options |
 | `/api/media` | GET | List uploaded media files |
 | `/api/media/upload` | POST | Upload media file (multipart/form-data) |
 | `/api/media/:id` | DELETE | Delete a media file |
@@ -65,7 +67,14 @@ Content-Type: application/json
   "model_id": "tdt-en",
   "media_id": "abc123-uuid",
   "mode": "speedy",
-  "language": "en"
+  "language": "en",
+  "noise_cancellation": "rnnoise",
+  "diarization": true,
+  "pause_config": {
+    "pause_threshold_ms": 300,
+    "silence_energy_threshold": 0.008,
+    "max_segment_secs": 5.0
+  }
 }
 ```
 
@@ -75,6 +84,22 @@ Content-Type: application/json
 | `media_id` | string | Yes | Uploaded media file ID |
 | `mode` | string | No | Latency mode (default: `speedy`) |
 | `language` | string | No | Language code (default: `de`) |
+| `noise_cancellation` | string | No | Noise cancellation type: `none`, `rnnoise`, `deepfilternet3` (default: `none`) |
+| `diarization` | boolean | No | Enable speaker diarization (default: `false`) |
+| `pause_config` | object | No | Pause detection configuration for pause-related modes |
+
+**Pause Config Object:**
+
+| Field | Type | Range | Default | Description |
+|-------|------|-------|---------|-------------|
+| `pause_threshold_ms` | number | 150-600 | 300 | Silence duration (ms) to trigger segment boundary |
+| `silence_energy_threshold` | number | 0.003-0.02 | 0.008 | RMS energy threshold for silence detection |
+| `max_segment_secs` | number | 3.0-15.0 | 5.0 | Maximum segment duration before forced break |
+| `context_buffer_secs` | number | 0.0-12.0 | 0.0 | Audio overlap for parallel modes (0=no overlap, higher=better accuracy but may cause text repetition) |
+
+Pause config is used by these modes: `speedy`, `pause_based`, `lookahead`, `vad_speedy`, `vad_pause_based`, `pause_parallel`.
+
+**Note:** The `context_buffer_secs` parameter is primarily for `pause_parallel` mode. Setting it to 0 eliminates text overlap between segments. Higher values improve accuracy at segment boundaries but may cause repeated text in output.
 
 **Response:**
 
@@ -89,6 +114,9 @@ Content-Type: application/json
     "media_filename": "interview.wav",
     "mode": "speedy",
     "language": "en",
+    "noise_cancellation": "rnnoise",
+    "diarization": true,
+    "diarization_model": "Sortformer v2 (4 speakers)",
     "state": "starting",
     "progress_secs": 0,
     "duration_secs": 120.0,
@@ -117,6 +145,9 @@ GET /api/sessions
       "media_filename": "interview.wav",
       "mode": "speedy",
       "language": "en",
+      "noise_cancellation": "rnnoise",
+      "diarization": true,
+      "diarization_model": "Sortformer v2 (4 speakers)",
       "state": "running",
       "progress_secs": 45.2,
       "duration_secs": 120.0,
@@ -284,6 +315,68 @@ GET /api/modes
 ```
 
 See [Latency Modes](./latency-modes.md) for complete mode documentation.
+
+### List Noise Cancellation Options
+
+```http
+GET /api/noise-cancellation
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "none",
+      "name": "None",
+      "description": "No noise cancellation",
+      "available": true
+    },
+    {
+      "id": "rnnoise",
+      "name": "RNNoise",
+      "description": "Lightweight neural network noise suppression (built-in)",
+      "available": true
+    },
+    {
+      "id": "deepfilternet3",
+      "name": "DeepFilterNet3",
+      "description": "High-quality deep filtering noise suppression",
+      "available": true
+    }
+  ]
+}
+```
+
+### List Diarization Options
+
+```http
+GET /api/diarization
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "none",
+      "name": "None",
+      "description": "No speaker diarization",
+      "available": true
+    },
+    {
+      "id": "sortformer",
+      "name": "Sortformer v2 (4 speakers)",
+      "description": "NVIDIA Sortformer streaming speaker identification",
+      "available": true
+    }
+  ]
+}
+```
 
 ---
 
