@@ -175,9 +175,10 @@ export class WebRTCClient {
    * Set up WebRTC peer connection
    */
   setupPeerConnection() {
-    // Create peer connection
+    // Create peer connection with ICE transport policy from server config
     this.pc = new RTCPeerConnection({
       iceServers: this.options.iceServers,
+      iceTransportPolicy: this.options.iceTransportPolicy || 'all',
     });
 
     // Handle incoming audio track

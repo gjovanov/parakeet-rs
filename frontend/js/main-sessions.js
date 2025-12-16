@@ -453,9 +453,10 @@ async function connect(sessionId) {
   const config = getConfig();
   const wsUrl = sessionManager.getWebSocketUrl(sessionId);
 
-  // Create WebRTC client
+  // Create WebRTC client with ICE transport policy from server config
   webrtcClient = new WebRTCClient(wsUrl, {
-    iceServers: config.iceServers
+    iceServers: config.iceServers,
+    iceTransportPolicy: config.iceTransportPolicy || 'all'
   });
 
   // WebRTC events

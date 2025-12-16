@@ -84,6 +84,9 @@ services:
       - TURN_USERNAME=${TURN_USERNAME}
       - TURN_PASSWORD=${TURN_PASSWORD}
 
+      # Force relay-only mode for VPN/Transit Gateway/complex NAT setups
+      - FORCE_RELAY=${FORCE_RELAY:-false}
+
       # Logging
       - RUST_LOG=${RUST_LOG:-info}
 

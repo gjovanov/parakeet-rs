@@ -191,9 +191,10 @@ async function connect() {
   const config = getConfig();
   const url = elements.wsUrlInput?.value || config.wsUrl;
 
-  // Create WebRTC client with ICE servers from server config
+  // Create WebRTC client with ICE servers and transport policy from server config
   webrtcClient = new WebRTCClient(url, {
-    iceServers: config.iceServers
+    iceServers: config.iceServers,
+    iceTransportPolicy: config.iceTransportPolicy || 'all'
   });
 
   // WebRTC events

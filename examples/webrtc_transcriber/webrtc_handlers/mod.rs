@@ -76,24 +76,40 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
     let turn_server = std::env::var("TURN_SERVER").unwrap_or_default();
     let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
     let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
+    let force_relay = std::env::var("FORCE_RELAY")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
-    let mut ice_servers = vec![RTCIceServer {
-        urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-        ..Default::default()
-    }];
+    // In relay-only mode, skip STUN servers (they leak Docker IPs in VPN/NAT setups)
+    let mut ice_servers = if force_relay {
+        vec![]
+    } else {
+        vec![RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            ..Default::default()
+        }]
+    };
 
     if !turn_server.is_empty() {
         ice_servers.push(RTCIceServer {
-            urls: vec![turn_server],
+            urls: vec![turn_server.clone()],
             username: turn_username,
             credential: turn_password,
             credential_type: RTCIceCredentialType::Password,
         });
     }
 
+    // Use relay-only policy for VPN/Transit Gateway/complex NAT setups
+    let ice_transport_policy = if force_relay {
+        eprintln!("[WebRTC] FORCE_RELAY enabled - using TURN relay only");
+        RTCIceTransportPolicy::Relay
+    } else {
+        RTCIceTransportPolicy::All
+    };
+
     let config = RTCConfiguration {
         ice_servers,
-        ice_transport_policy: RTCIceTransportPolicy::All,
+        ice_transport_policy,
         ..Default::default()
     };
 
