@@ -1,7 +1,8 @@
 //! Transcription logic for sessions
 
-use crate::api::sessions::ParallelConfig;
+use crate::api::sessions::{ParallelConfig, PauseConfig};
 use crate::webrtc_handlers::audio::OpusEncoder;
+use parakeet_rs::noise_cancellation::{create_noise_canceller, NoiseCancellationType};
 use parakeet_rs::{SessionState, TranscriptionSession};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -21,6 +22,7 @@ pub fn run_session_transcription(
     language: String,
     ffmpeg_pid: Arc<AtomicU32>,
     parallel_config: Option<ParallelConfig>,
+    pause_config: Option<PauseConfig>,
 ) {
     use parakeet_rs::streaming_transcriber::StreamingTranscriber;
     use std::io::Read;
@@ -81,6 +83,7 @@ pub fn run_session_transcription(
                 language,
                 transcription_running,
                 parallel_config,
+                pause_config,
             );
         }));
 
@@ -115,6 +118,7 @@ pub fn run_session_transcription(
         language: String,
         transcription_running: Arc<AtomicBool>,
         parallel_config: Option<super::api::sessions::ParallelConfig>,
+        pause_config: Option<super::api::sessions::PauseConfig>,
     ) {
         use parakeet_rs::streaming_transcriber::StreamingTranscriber;
         use std::sync::mpsc as std_mpsc;
@@ -134,19 +138,33 @@ pub fn run_session_transcription(
             if is_canary {
                 use parakeet_rs::pause_parallel_canary::{PauseParallelCanary, PauseParallelConfig};
 
+                // Get pause config values or use defaults
+                let pause_threshold_secs = pause_config.as_ref()
+                    .map(|p| p.pause_threshold_ms as f32 / 1000.0)
+                    .unwrap_or(0.3);
+                let silence_energy = pause_config.as_ref()
+                    .map(|p| p.silence_energy_threshold)
+                    .unwrap_or(0.008);
+                let max_segment_secs = pause_config.as_ref()
+                    .map(|p| p.max_segment_secs)
+                    .unwrap_or(5.0);
+                let context_buffer = pause_config.as_ref()
+                    .map(|p| p.context_buffer_secs)
+                    .unwrap_or(0.0);
+
                 let config = PauseParallelConfig {
                     num_threads,
                     language: language.clone(),
                     intra_threads: 1,
-                    pause_threshold_secs: 0.3,
-                    silence_energy_threshold: 0.008,
-                    max_segment_duration_secs: 5.0,
-                    context_buffer_secs: 3.0,
+                    pause_threshold_secs,
+                    silence_energy_threshold: silence_energy,
+                    max_segment_duration_secs: max_segment_secs,
+                    context_buffer_secs: context_buffer,
                 };
 
                 eprintln!(
-                    "[Session {}] Creating PauseParallelCanary transcriber with {} threads, {}ms pause threshold",
-                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32
+                    "[Session {}] Creating PauseParallelCanary transcriber with {} threads, {}ms pause, {}s context",
+                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32, config.context_buffer_secs
                 );
 
                 match PauseParallelCanary::new(&model_path, Some(exec_config), Some(config)) {
@@ -162,18 +180,32 @@ pub fn run_session_transcription(
             } else {
                 use parakeet_rs::pause_parallel_tdt::{PauseParallelTDT, PauseParallelTDTConfig};
 
+                // Get pause config values or use defaults
+                let pause_threshold_secs = pause_config.as_ref()
+                    .map(|p| p.pause_threshold_ms as f32 / 1000.0)
+                    .unwrap_or(0.3);
+                let silence_energy = pause_config.as_ref()
+                    .map(|p| p.silence_energy_threshold)
+                    .unwrap_or(0.008);
+                let max_segment_secs = pause_config.as_ref()
+                    .map(|p| p.max_segment_secs)
+                    .unwrap_or(5.0);
+                let context_buffer = pause_config.as_ref()
+                    .map(|p| p.context_buffer_secs)
+                    .unwrap_or(0.0);
+
                 let config = PauseParallelTDTConfig {
                     num_threads,
                     intra_threads: 2,
-                    pause_threshold_secs: 0.3,
-                    silence_energy_threshold: 0.008,
-                    max_segment_duration_secs: 5.0,
-                    context_buffer_secs: 2.0,
+                    pause_threshold_secs,
+                    silence_energy_threshold: silence_energy,
+                    max_segment_duration_secs: max_segment_secs,
+                    context_buffer_secs: context_buffer,
                 };
 
                 eprintln!(
-                    "[Session {}] Creating PauseParallelTDT transcriber with {} threads, {}ms pause threshold",
-                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32
+                    "[Session {}] Creating PauseParallelTDT transcriber with {} threads, {}ms pause, {}s context",
+                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32, config.context_buffer_secs
                 );
 
                 match PauseParallelTDT::new(&model_path, Some(exec_config), Some(config)) {
@@ -382,11 +414,12 @@ pub fn run_session_transcription(
                     }
                 };
 
-                let config = create_transcription_config(&mode);
+                let config = create_transcription_config(&mode, pause_config.as_ref());
 
                 eprintln!(
-                    "[Session {}] Creating TDT transcriber from {:?}",
-                    transcription_session.id, model_path
+                    "[Session {}] Creating TDT transcriber from {:?} (pause: {}ms)",
+                    transcription_session.id, model_path,
+                    (config.pause_threshold_secs * 1000.0) as u32
                 );
 
                 match RealtimeTDTDiarized::new(&model_path, &diar_path, Some(exec_config), Some(config))
@@ -566,6 +599,16 @@ pub fn run_session_transcription(
         }
     };
 
+    // Initialize noise canceller if enabled
+    let noise_type = NoiseCancellationType::from_str(&session.noise_cancellation);
+    let mut noise_canceller = create_noise_canceller(noise_type, None);
+    if noise_canceller.is_some() {
+        eprintln!(
+            "[Session {}] Noise cancellation enabled: {}",
+            session.id, session.noise_cancellation
+        );
+    }
+
     // Spawn ffmpeg with -re for real-time pacing
     let mut ffmpeg = match Command::new("ffmpeg")
         .args([
@@ -644,13 +687,25 @@ pub fn run_session_transcription(
         }
 
         // Convert bytes to f32 samples
-        let samples: Vec<f32> = byte_buffer
+        let raw_samples: Vec<f32> = byte_buffer
             .chunks(2)
             .map(|chunk| {
                 let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
                 sample as f32 / 32768.0
             })
             .collect();
+
+        // Apply noise cancellation if enabled
+        let samples = if let Some(ref mut nc) = noise_canceller {
+            nc.process(&raw_samples)
+        } else {
+            raw_samples
+        };
+
+        // Skip empty output (noise canceller may buffer internally)
+        if samples.is_empty() {
+            continue;
+        }
 
         total_samples += samples.len();
         let current_time = total_samples as f32 / 16000.0;
@@ -795,9 +850,24 @@ fn create_canary_config(
     }
 }
 
-/// Create RealtimeTDTConfig based on latency mode
-fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
+/// Create RealtimeTDTConfig based on latency mode with optional pause config override
+fn create_transcription_config(
+    mode: &str,
+    pause_config: Option<&super::api::sessions::PauseConfig>,
+) -> parakeet_rs::RealtimeTDTConfig {
     use parakeet_rs::RealtimeTDTConfig;
+
+    // Get pause config values or use mode defaults
+    let (pause_threshold, silence_energy) = match pause_config {
+        Some(pc) => (
+            pc.pause_threshold_ms as f32 / 1000.0,
+            pc.silence_energy_threshold,
+        ),
+        None => match mode {
+            "speedy" => (0.35, 0.008),
+            _ => (0.3, 0.008),
+        },
+    };
 
     match mode {
         "speedy" => RealtimeTDTConfig {
@@ -805,8 +875,8 @@ fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
             process_interval_secs: 0.2,
             confirm_threshold_secs: 0.4,
             pause_based_confirm: true,
-            pause_threshold_secs: 0.35,
-            silence_energy_threshold: 0.008,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
             lookahead_mode: false,
             lookahead_segments: 2,
         },
@@ -815,8 +885,8 @@ fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
             process_interval_secs: 0.3,
             confirm_threshold_secs: 0.5,
             pause_based_confirm: true,
-            pause_threshold_secs: 0.3,
-            silence_energy_threshold: 0.008,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
             lookahead_mode: false,
             lookahead_segments: 2,
         },
@@ -825,8 +895,8 @@ fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
             process_interval_secs: 1.5,
             confirm_threshold_secs: 2.0,
             pause_based_confirm: false,
-            pause_threshold_secs: 0.3,
-            silence_energy_threshold: 0.008,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
             lookahead_mode: false,
             lookahead_segments: 2,
         },
@@ -835,8 +905,8 @@ fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
             process_interval_secs: 1.0,
             confirm_threshold_secs: 1.5,
             pause_based_confirm: false,
-            pause_threshold_secs: 0.3,
-            silence_energy_threshold: 0.008,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
             lookahead_mode: false,
             lookahead_segments: 2,
         },
@@ -845,8 +915,8 @@ fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
             process_interval_secs: 0.5,
             confirm_threshold_secs: 0.8,
             pause_based_confirm: false,
-            pause_threshold_secs: 0.3,
-            silence_energy_threshold: 0.008,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
             lookahead_mode: false,
             lookahead_segments: 2,
         },
@@ -855,8 +925,8 @@ fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
             process_interval_secs: 0.3,
             confirm_threshold_secs: 0.5,
             pause_based_confirm: true,
-            pause_threshold_secs: 0.3,
-            silence_energy_threshold: 0.008,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
             lookahead_mode: true,
             lookahead_segments: 2,
         },
@@ -865,8 +935,8 @@ fn create_transcription_config(mode: &str) -> parakeet_rs::RealtimeTDTConfig {
             process_interval_secs: 0.2,
             confirm_threshold_secs: 0.4,
             pause_based_confirm: true,
-            pause_threshold_secs: 0.35,
-            silence_energy_threshold: 0.008,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
             lookahead_mode: false,
             lookahead_segments: 2,
         },

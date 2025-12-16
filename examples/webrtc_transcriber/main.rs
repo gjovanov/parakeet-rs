@@ -8,8 +8,11 @@
 //!   GET    /api/media                 - List media files
 //!   POST   /api/media/upload          - Upload media file (multipart)
 //!   DELETE /api/media/:id             - Delete media file
+//!   GET    /api/modes                 - List available transcription modes
+//!   GET    /api/noise-cancellation    - List noise cancellation options
+//!   GET    /api/diarization           - List diarization options
 //!   GET    /api/sessions              - List all sessions
-//!   POST   /api/sessions              - Create new session {model_id, media_id}
+//!   POST   /api/sessions              - Create new session {model_id, media_id, mode, language, noise_cancellation, diarization}
 //!   GET    /api/sessions/:id          - Get session info
 //!   POST   /api/sessions/:id/start    - Start transcription
 //!   DELETE /api/sessions/:id          - Stop session
@@ -293,6 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: runtime_config,
         session_audio: RwLock::new(HashMap::new()),
         parallel_configs: RwLock::new(HashMap::new()),
+        pause_configs: RwLock::new(HashMap::new()),
     });
 
     // Build router
@@ -309,6 +313,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/media/:id", delete(api::delete_media))
         // Modes
         .route("/api/modes", get(api::list_modes))
+        // Noise cancellation
+        .route("/api/noise-cancellation", get(api::list_noise_cancellation))
+        // Diarization
+        .route("/api/diarization", get(api::list_diarization))
         // Sessions
         .route("/api/sessions", get(api::list_sessions))
         .route("/api/sessions", post(api::create_session))

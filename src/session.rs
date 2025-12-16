@@ -63,6 +63,15 @@ pub struct SessionInfo {
     /// Language code for transcription (e.g., "de", "en")
     #[serde(default = "default_language")]
     pub language: String,
+    /// Noise cancellation type ("none", "rnnoise", "deepfilternet3")
+    #[serde(default)]
+    pub noise_cancellation: String,
+    /// Whether diarization is enabled
+    #[serde(default)]
+    pub diarization: bool,
+    /// Diarization model name (if enabled)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diarization_model: Option<String>,
 }
 
 fn default_language() -> String {
@@ -103,6 +112,12 @@ pub struct TranscriptionSession {
     pub mode: String,
     /// Language code for transcription (e.g., "de", "en")
     pub language: String,
+    /// Noise cancellation type ("none", "rnnoise", "deepfilternet3")
+    pub noise_cancellation: String,
+    /// Whether diarization is enabled
+    pub diarization: bool,
+    /// Diarization model name (if enabled)
+    pub diarization_model: Option<String>,
     /// Cached last subtitle for late-joining clients (uses std::sync::RwLock for sync access)
     last_subtitle: StdRwLock<Option<String>>,
 }
@@ -118,6 +133,9 @@ impl TranscriptionSession {
         duration_secs: f32,
         mode: String,
         language: String,
+        noise_cancellation: String,
+        diarization: bool,
+        diarization_model: Option<String>,
     ) -> Self {
         let (subtitle_tx, _) = broadcast::channel(1000);
         let (status_tx, _) = broadcast::channel(100);
@@ -142,6 +160,9 @@ impl TranscriptionSession {
             progress_secs: RwLock::new(0.0),
             mode,
             language,
+            noise_cancellation,
+            diarization,
+            diarization_model,
             last_subtitle: StdRwLock::new(None),
         }
     }
@@ -161,6 +182,9 @@ impl TranscriptionSession {
             created_at: self.created_at,
             mode: self.mode.clone(),
             language: self.language.clone(),
+            noise_cancellation: self.noise_cancellation.clone(),
+            diarization: self.diarization,
+            diarization_model: self.diarization_model.clone(),
         }
     }
 
@@ -285,6 +309,9 @@ impl SessionManager {
         media_id: &str,
         mode: &str,
         language: &str,
+        noise_cancellation: &str,
+        diarization: bool,
+        diarization_model: Option<String>,
     ) -> Result<Arc<TranscriptionSession>> {
         // Check session limit
         let current_count = self.sessions.read().await.len();
@@ -331,6 +358,9 @@ impl SessionManager {
             media.duration_secs.unwrap_or(0.0),
             mode.to_string(),
             lang.to_string(),
+            noise_cancellation.to_string(),
+            diarization,
+            diarization_model,
         );
 
         let session = Arc::new(session);
@@ -342,8 +372,8 @@ impl SessionManager {
         }
 
         eprintln!(
-            "[SessionManager] Created session {} (model: {}, media: {}, mode: {}, language: {})",
-            session.id, model_id, media_id, mode, lang
+            "[SessionManager] Created session {} (model: {}, media: {}, mode: {}, language: {}, noise: {}, diarization: {})",
+            session.id, model_id, media_id, mode, lang, noise_cancellation, diarization
         );
 
         Ok(session)

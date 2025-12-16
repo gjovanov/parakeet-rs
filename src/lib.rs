@@ -77,6 +77,7 @@ pub mod vad;
 pub mod realtime_canary_vad;
 #[cfg(feature = "sortformer")]
 pub mod realtime_tdt_vad;
+pub mod noise_cancellation;
 mod timestamps;
 mod transcriber;
 mod vocab;
@@ -140,4 +141,9 @@ pub use realtime_canary_vad::{CanaryVadResult, RealtimeCanaryVad, RealtimeCanary
 
 #[cfg(feature = "sortformer")]
 pub use realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig, TdtVadResult};
+
+// Noise cancellation exports
+pub use noise_cancellation::{
+    create_noise_canceller, NoiseCancellationType, NoiseCanceller, RNNoiseProcessor,
+};
 

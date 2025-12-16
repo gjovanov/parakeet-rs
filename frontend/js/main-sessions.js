@@ -15,6 +15,15 @@ const state = {
   subtitleCount: 0,  // Counter for received subtitles
 };
 
+// Pause-related modes that show pause config
+const PAUSE_MODES = ['speedy', 'pause_based', 'lookahead', 'vad_speedy', 'vad_pause_based', 'pause_parallel'];
+
+// Map slider value (1-5) to actual silence_energy_threshold
+function getSilenceEnergyThreshold(sliderValue) {
+  const values = [0.003, 0.005, 0.008, 0.012, 0.02];
+  return values[sliderValue - 1];
+}
+
 // Modules
 let webrtcClient = null;
 let subtitleRenderer = null;
@@ -57,6 +66,8 @@ async function init() {
     sessionManager.fetchModels(),
     sessionManager.fetchMedia(),
     sessionManager.fetchModes(),
+    sessionManager.fetchNoiseCancellation(),
+    sessionManager.fetchDiarization(),
     sessionManager.fetchSessions(),
   ]);
 
@@ -106,6 +117,22 @@ function cacheElements() {
   elements.parallelBuffer = document.getElementById('parallel-buffer');
   elements.threadsValue = document.getElementById('threads-value');
   elements.bufferValue = document.getElementById('buffer-value');
+
+  // Noise cancellation and diarization elements
+  elements.noiseSelect = document.getElementById('noise-select');
+  elements.diarizationSelect = document.getElementById('diarization-select');
+
+  // Pause config elements
+  elements.pauseConfig = document.getElementById('pause-config');
+  elements.pauseThreshold = document.getElementById('pause-threshold');
+  elements.silenceEnergy = document.getElementById('silence-energy');
+  elements.maxSegment = document.getElementById('max-segment');
+  elements.pauseThresholdValue = document.getElementById('pause-threshold-value');
+  elements.silenceEnergyValue = document.getElementById('silence-energy-value');
+  elements.maxSegmentValue = document.getElementById('max-segment-value');
+  elements.contextBufferGroup = document.getElementById('context-buffer-group');
+  elements.contextBuffer = document.getElementById('context-buffer');
+  elements.contextBufferValue = document.getElementById('context-buffer-value');
 }
 
 function setupSessionManagerListeners() {
@@ -115,6 +142,8 @@ function setupSessionManagerListeners() {
     renderMediaList();
   });
   sessionManager.on('modesLoaded', renderModeSelect);
+  sessionManager.on('noiseCancellationLoaded', renderNoiseSelect);
+  sessionManager.on('diarizationLoaded', renderDiarizationSelect);
   sessionManager.on('sessionsUpdated', renderSessionsList);
   sessionManager.on('sessionCreated', (session) => {
     selectSession(session.id);
@@ -133,17 +162,32 @@ function setupEventListeners() {
     });
   });
 
-  // Mode select - show/hide parallel config
+  // Mode select - show/hide parallel config and pause config
   if (elements.modeSelect) {
     elements.modeSelect.addEventListener('change', () => {
-      const isParallelMode = elements.modeSelect.value === 'parallel' || elements.modeSelect.value === 'pause_parallel';
+      const mode = elements.modeSelect.value;
+      const isParallelMode = mode === 'parallel' || mode === 'pause_parallel';
+      const isPauseMode = PAUSE_MODES.includes(mode);
+      const isPauseParallel = mode === 'pause_parallel';
+
+      // Show/hide parallel config
       if (elements.parallelConfig) {
         elements.parallelConfig.style.display = isParallelMode ? 'block' : 'none';
         // Hide buffer size for pause_parallel (not applicable)
         const bufferRow = elements.parallelBuffer?.parentElement;
         if (bufferRow) {
-          bufferRow.style.display = elements.modeSelect.value === 'parallel' ? 'flex' : 'none';
+          bufferRow.style.display = mode === 'parallel' ? 'flex' : 'none';
         }
+      }
+
+      // Show/hide pause config
+      if (elements.pauseConfig) {
+        elements.pauseConfig.style.display = isPauseMode ? 'block' : 'none';
+      }
+
+      // Show context buffer only for pause_parallel mode
+      if (elements.contextBufferGroup) {
+        elements.contextBufferGroup.style.display = isPauseParallel ? 'flex' : 'none';
       }
     });
   }
@@ -160,12 +204,37 @@ function setupEventListeners() {
     });
   }
 
+  // Pause config sliders - update displayed values
+  if (elements.pauseThreshold) {
+    elements.pauseThreshold.addEventListener('input', () => {
+      elements.pauseThresholdValue.textContent = elements.pauseThreshold.value;
+    });
+  }
+  if (elements.silenceEnergy) {
+    elements.silenceEnergy.addEventListener('input', () => {
+      const labels = ['Very High', 'High', 'Medium', 'Low', 'Very Low'];
+      elements.silenceEnergyValue.textContent = labels[elements.silenceEnergy.value - 1];
+    });
+  }
+  if (elements.maxSegment) {
+    elements.maxSegment.addEventListener('input', () => {
+      elements.maxSegmentValue.textContent = elements.maxSegment.value;
+    });
+  }
+  if (elements.contextBuffer) {
+    elements.contextBuffer.addEventListener('input', () => {
+      elements.contextBufferValue.textContent = elements.contextBuffer.value;
+    });
+  }
+
   // Create session
   elements.createSessionBtn.addEventListener('click', async () => {
     const modelId = elements.modelSelect.value;
     const mediaId = elements.mediaSelect.value;
     const mode = elements.modeSelect?.value || 'speedy';
     const language = elements.languageSelect?.value || 'de';
+    const noiseCancellation = elements.noiseSelect?.value || 'none';
+    const diarization = elements.diarizationSelect?.value !== 'none';
 
     if (!modelId || !mediaId) {
       alert('Please select a model and media file');
@@ -181,10 +250,21 @@ function setupEventListeners() {
       };
     }
 
+    // Get pause config for pause-related modes
+    let pauseConfig = null;
+    if (PAUSE_MODES.includes(mode) && elements.pauseThreshold) {
+      pauseConfig = {
+        pause_threshold_ms: parseInt(elements.pauseThreshold.value, 10),
+        silence_energy_threshold: getSilenceEnergyThreshold(parseInt(elements.silenceEnergy?.value || 3, 10)),
+        max_segment_secs: parseFloat(elements.maxSegment?.value || 5),
+        context_buffer_secs: parseFloat(elements.contextBuffer?.value || 0)
+      };
+    }
+
     try {
       elements.createSessionBtn.disabled = true;
       elements.createSessionBtn.textContent = 'Creating...';
-      const session = await sessionManager.createSession(modelId, mediaId, mode, language, parallelConfig);
+      const session = await sessionManager.createSession(modelId, mediaId, mode, language, parallelConfig, noiseCancellation, diarization, pauseConfig);
       // Auto-start the session
       await sessionManager.startSession(session.id);
     } catch (e) {
@@ -354,6 +434,26 @@ function renderModeSelect() {
     : '<option value="speedy">Speedy (~0.3-1.5s)</option>';
 }
 
+function renderNoiseSelect() {
+  if (!elements.noiseSelect) return;
+  const options = sessionManager.noiseCancellationOptions;
+  elements.noiseSelect.innerHTML = options.length
+    ? options.filter(o => o.available).map(o =>
+        `<option value="${o.id}" title="${o.description}">${o.name}</option>`
+      ).join('')
+    : '<option value="none">None</option>';
+}
+
+function renderDiarizationSelect() {
+  if (!elements.diarizationSelect) return;
+  const options = sessionManager.diarizationOptions;
+  elements.diarizationSelect.innerHTML = options.length
+    ? options.filter(o => o.available).map(o =>
+        `<option value="${o.id}" title="${o.description}">${o.name}</option>`
+      ).join('')
+    : '<option value="none">None</option>';
+}
+
 function renderMediaList() {
   const files = sessionManager.mediaFiles;
   if (files.length === 0) {
@@ -396,11 +496,19 @@ function renderSessionsList() {
     const isSelected = state.selectedSessionId === s.id;
     const modeLabel = s.mode ? s.mode.replace(/_/g, '-') : 'speedy';
 
+    // Build badges for noise cancellation and diarization
+    const noiseLabel = s.noise_cancellation && s.noise_cancellation !== 'none'
+      ? ` | <span class="noise-badge">${s.noise_cancellation}</span>`
+      : '';
+    const diarLabel = s.diarization
+      ? ` | <span class="diar-badge">${s.diarization_model || 'Diar'}</span>`
+      : '';
+
     return `
       <div class="session-card ${isSelected ? 'selected' : ''}" onclick="window.selectSession('${s.id}')">
         <div class="session-info">
           <div class="session-title">${s.media_filename}</div>
-          <div class="session-meta">${s.model_name} | <span class="mode-badge">${modeLabel}</span> | ${formatDuration(s.progress_secs)} / ${formatDuration(s.duration_secs)}</div>
+          <div class="session-meta">${s.model_name} | <span class="mode-badge">${modeLabel}</span>${noiseLabel}${diarLabel} | ${formatDuration(s.progress_secs)} / ${formatDuration(s.duration_secs)}</div>
           <div class="session-progress">
             <div class="session-progress-bar" style="width: ${progress}%"></div>
           </div>
