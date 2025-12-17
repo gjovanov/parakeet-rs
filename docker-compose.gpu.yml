@@ -87,6 +87,12 @@ services:
       # Force relay-only mode for VPN/Transit Gateway/complex NAT setups
       - FORCE_RELAY=${FORCE_RELAY:-false}
 
+      # SRT stream configuration (optional)
+      - SRT_ENCODER_IP=${SRT_ENCODER_IP:-}
+      - SRT_CHANNELS=${SRT_CHANNELS:-}
+      - SRT_LATENCY=${SRT_LATENCY:-200000}
+      - SRT_RCVBUF=${SRT_RCVBUF:-2097152}
+
       # Logging
       - RUST_LOG=${RUST_LOG:-info}
 

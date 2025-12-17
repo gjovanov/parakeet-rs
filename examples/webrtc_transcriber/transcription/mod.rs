@@ -9,10 +9,34 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use webrtc::track::track_local::{track_local_static_rtp::TrackLocalStaticRTP, TrackLocalWriter};
 
+/// Audio source for transcription
+#[derive(Debug, Clone)]
+pub enum AudioSource {
+    /// File on disk
+    File(PathBuf),
+    /// SRT stream URL
+    Srt(String),
+}
+
+impl AudioSource {
+    /// Check if this is an SRT stream
+    pub fn is_srt(&self) -> bool {
+        matches!(self, AudioSource::Srt(_))
+    }
+
+    /// Get display name for logging
+    pub fn display(&self) -> String {
+        match self {
+            AudioSource::File(path) => path.display().to_string(),
+            AudioSource::Srt(url) => url.clone(),
+        }
+    }
+}
+
 /// Run transcription for a session
 pub fn run_session_transcription(
     session: Arc<TranscriptionSession>,
-    wav_path: PathBuf,
+    audio_source: AudioSource,
     model_path: PathBuf,
     diar_path: Option<PathBuf>,
     exec_config: parakeet_rs::ExecutionConfig,
@@ -30,15 +54,26 @@ pub fn run_session_transcription(
     use std::sync::mpsc as std_mpsc;
     use std::time::Instant;
 
+    let is_srt = audio_source.is_srt();
+
     eprintln!(
-        "[Session {}] Starting transcription for {}",
+        "[Session {}] Starting transcription for {} ({})",
         session.id,
-        wav_path.display()
+        audio_source.display(),
+        if is_srt { "SRT stream" } else { "file" }
     );
 
-    // Get duration using ffprobe
-    let duration_secs = get_audio_duration(&wav_path).unwrap_or(0.0);
-    eprintln!("[Session {}] Total duration: {:.2}s", session.id, duration_secs);
+    // Get duration using ffprobe (only for files)
+    let duration_secs = match &audio_source {
+        AudioSource::File(path) => get_audio_duration(path).unwrap_or(0.0),
+        AudioSource::Srt(_) => 0.0, // Unknown for live streams
+    };
+
+    if !is_srt {
+        eprintln!("[Session {}] Total duration: {:.2}s", session.id, duration_secs);
+    } else {
+        eprintln!("[Session {}] Live stream (duration unknown)", session.id);
+    }
 
     // Check if this is Canary or TDT model
     let is_canary = model_id == "canary-1b";
@@ -609,26 +644,70 @@ pub fn run_session_transcription(
         );
     }
 
-    // Spawn ffmpeg with -re for real-time pacing
-    let mut ffmpeg = match Command::new("ffmpeg")
-        .args([
-            "-re",
-            "-i",
-            wav_path.to_str().unwrap_or(""),
-            "-f",
-            "s16le",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-loglevel",
-            "error",
-            "-",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    // Build FFmpeg command based on source type
+    let spawn_ffmpeg = |source: &AudioSource| -> Result<std::process::Child, std::io::Error> {
+        match source {
+            AudioSource::File(path) => {
+                // File playback with real-time pacing
+                Command::new("ffmpeg")
+                    .args([
+                        "-re",
+                        "-i",
+                        path.to_str().unwrap_or(""),
+                        "-f",
+                        "s16le",
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
+                        "-loglevel",
+                        "error",
+                        "-",
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+            }
+            AudioSource::Srt(url) => {
+                // SRT stream with low-latency settings
+                Command::new("ffmpeg")
+                    .args([
+                        "-hide_banner",
+                        "-nostats",
+                        "-loglevel",
+                        "error",
+                        "-analyzeduration",
+                        "1M",
+                        "-fflags",
+                        "+nobuffer+genpts+igndts+discardcorrupt",
+                        "-flags",
+                        "low_delay",
+                        "-protocol_whitelist",
+                        "file,udp,rtp,srt",
+                        "-i",
+                        url,
+                        "-map",
+                        "a:0",
+                        "-vn",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        "-acodec",
+                        "pcm_s16le",
+                        "-f",
+                        "s16le",
+                        "-",
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+            }
+        }
+    };
+
+    // Spawn initial FFmpeg process
+    let mut ffmpeg = match spawn_ffmpeg(&audio_source) {
         Ok(child) => {
             ffmpeg_pid.store(child.id(), Ordering::SeqCst);
             eprintln!(
@@ -652,8 +731,9 @@ pub fn run_session_transcription(
     };
 
     eprintln!(
-        "[Session {}] Started ffmpeg with real-time pacing",
-        session.id
+        "[Session {}] Started ffmpeg ({})",
+        session.id,
+        if is_srt { "SRT low-latency" } else { "real-time pacing" }
     );
 
     let mut stdout = ffmpeg.stdout.take().expect("Failed to get ffmpeg stdout");
@@ -671,82 +751,179 @@ pub fn run_session_transcription(
     let mut total_samples: usize = 0;
     let mut last_status_time = Instant::now();
 
-    // Audio streaming loop
-    while running.load(Ordering::SeqCst) {
-        // Read PCM from ffmpeg stdout
-        match stdout.read_exact(&mut byte_buffer) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                eprintln!("[Session {}] End of audio stream", session.id);
-                break;
-            }
-            Err(e) => {
-                eprintln!("[Session {}] Error reading from ffmpeg: {}", session.id, e);
-                break;
-            }
-        }
+    // SRT reconnection state
+    let mut reconnect_attempts = 0u32;
+    const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+    const INITIAL_RECONNECT_DELAY_MS: u64 = 1000;
+    const MAX_RECONNECT_DELAY_MS: u64 = 30000;
 
-        // Convert bytes to f32 samples
-        let raw_samples: Vec<f32> = byte_buffer
-            .chunks(2)
-            .map(|chunk| {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                sample as f32 / 32768.0
-            })
-            .collect();
+    // Outer loop for SRT reconnection
+    'outer: loop {
+        // Audio streaming loop
+        while running.load(Ordering::SeqCst) {
+            // Read PCM from ffmpeg stdout
+            match stdout.read_exact(&mut byte_buffer) {
+                Ok(_) => {
+                    // Reset reconnect counter on successful read
+                    reconnect_attempts = 0;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    if is_srt {
+                        // SRT stream disconnected - attempt reconnection
+                        eprintln!("[Session {}] SRT stream disconnected", session.id);
 
-        // Apply noise cancellation if enabled
-        let samples = if let Some(ref mut nc) = noise_canceller {
-            nc.process(&raw_samples)
-        } else {
-            raw_samples
-        };
+                        // Kill current ffmpeg process
+                        let _ = ffmpeg.kill();
+                        let _ = ffmpeg.wait();
 
-        // Skip empty output (noise canceller may buffer internally)
-        if samples.is_empty() {
-            continue;
-        }
+                        if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
+                            eprintln!(
+                                "[Session {}] Max reconnection attempts ({}) reached, stopping",
+                                session.id, MAX_RECONNECT_ATTEMPTS
+                            );
+                            break 'outer;
+                        }
 
-        total_samples += samples.len();
-        let current_time = total_samples as f32 / 16000.0;
+                        reconnect_attempts += 1;
+                        let delay_ms = std::cmp::min(
+                            INITIAL_RECONNECT_DELAY_MS * (1 << (reconnect_attempts - 1)),
+                            MAX_RECONNECT_DELAY_MS,
+                        );
 
-        // Send samples to transcription thread (non-blocking)
-        if let Err(std_mpsc::TrySendError::Full(_)) = audio_tx.try_send(samples.clone()) {
-            if total_samples % (16000 * 30) < 320 {
-                eprintln!(
-                    "[Session {}] WARNING: Transcription buffer full at {:.1}s - CPU cannot keep up.",
-                    session.id, current_time
-                );
-            }
-        }
+                        eprintln!(
+                            "[Session {}] Reconnecting in {}ms (attempt {}/{})",
+                            session.id, delay_ms, reconnect_attempts, MAX_RECONNECT_ATTEMPTS
+                        );
 
-        // Encode to Opus and send via WebRTC
-        let rtp_packets = opus_encoder.encode(&samples);
-        for packet in &rtp_packets {
-            let track = audio_track.clone();
-            let pkt = packet.clone();
-            rt.block_on(async {
-                if let Err(e) = track.write(&pkt).await {
-                    let err_str = e.to_string();
-                    if !err_str.contains("no receiver") && !err_str.contains("ErrClosedPipe") {
-                        eprintln!("[Session {}] WebRTC write error: {}", session.id, e);
+                        // Send reconnecting status to clients
+                        let status_msg = serde_json::json!({
+                            "type": "reconnecting",
+                            "attempt": reconnect_attempts,
+                            "max_attempts": MAX_RECONNECT_ATTEMPTS,
+                            "delay_ms": delay_ms
+                        });
+                        session.status_tx.send(status_msg.to_string()).ok();
+
+                        // Wait before reconnecting
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+
+                        // Check if we should still be running
+                        if !running.load(Ordering::SeqCst) {
+                            break 'outer;
+                        }
+
+                        // Spawn new ffmpeg process
+                        match spawn_ffmpeg(&audio_source) {
+                            Ok(mut child) => {
+                                ffmpeg_pid.store(child.id(), Ordering::SeqCst);
+                                eprintln!(
+                                    "[Session {}] ffmpeg reconnected with pid {}",
+                                    session.id, child.id()
+                                );
+                                ffmpeg = child;
+                                stdout = ffmpeg.stdout.take().expect("Failed to get ffmpeg stdout");
+
+                                // Send reconnected status
+                                let status_msg = serde_json::json!({
+                                    "type": "reconnected"
+                                });
+                                session.status_tx.send(status_msg.to_string()).ok();
+
+                                continue 'outer; // Restart inner loop
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[Session {}] Failed to reconnect ffmpeg: {}",
+                                    session.id, e
+                                );
+                                // Continue trying
+                                continue 'outer;
+                            }
+                        }
+                    } else {
+                        // File stream ended normally
+                        eprintln!("[Session {}] End of audio stream", session.id);
+                        break 'outer;
                     }
                 }
-            });
+                Err(e) => {
+                    eprintln!("[Session {}] Error reading from ffmpeg: {}", session.id, e);
+                    if is_srt {
+                        // Try to reconnect on errors for SRT
+                        let _ = ffmpeg.kill();
+                        let _ = ffmpeg.wait();
+                        continue 'outer;
+                    }
+                    break 'outer;
+                }
+            }
+
+            // Convert bytes to f32 samples
+            let raw_samples: Vec<f32> = byte_buffer
+                .chunks(2)
+                .map(|chunk| {
+                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                    sample as f32 / 32768.0
+                })
+                .collect();
+
+            // Apply noise cancellation if enabled
+            let samples = if let Some(ref mut nc) = noise_canceller {
+                nc.process(&raw_samples)
+            } else {
+                raw_samples
+            };
+
+            // Skip empty output (noise canceller may buffer internally)
+            if samples.is_empty() {
+                continue;
+            }
+
+            total_samples += samples.len();
+            let current_time = total_samples as f32 / 16000.0;
+
+            // Send samples to transcription thread (non-blocking)
+            if let Err(std_mpsc::TrySendError::Full(_)) = audio_tx.try_send(samples.clone()) {
+                if total_samples % (16000 * 30) < 320 {
+                    eprintln!(
+                        "[Session {}] WARNING: Transcription buffer full at {:.1}s - CPU cannot keep up.",
+                        session.id, current_time
+                    );
+                }
+            }
+
+            // Encode to Opus and send via WebRTC
+            let rtp_packets = opus_encoder.encode(&samples);
+            for packet in &rtp_packets {
+                let track = audio_track.clone();
+                let pkt = packet.clone();
+                rt.block_on(async {
+                    if let Err(e) = track.write(&pkt).await {
+                        let err_str = e.to_string();
+                        if !err_str.contains("no receiver") && !err_str.contains("ErrClosedPipe") {
+                            eprintln!("[Session {}] WebRTC write error: {}", session.id, e);
+                        }
+                    }
+                });
+            }
+
+            // Update progress every second
+            if last_status_time.elapsed().as_secs() >= 1 {
+                rt.block_on(session.set_progress(current_time));
+
+                let status_msg = serde_json::json!({
+                    "type": "status",
+                    "progress_secs": current_time,
+                    "total_duration": duration_secs,
+                    "is_live": is_srt
+                });
+                session.status_tx.send(status_msg.to_string()).ok();
+                last_status_time = Instant::now();
+            }
         }
 
-        // Update progress every second
-        if last_status_time.elapsed().as_secs() >= 1 {
-            rt.block_on(session.set_progress(current_time));
-
-            let status_msg = serde_json::json!({
-                "type": "status",
-                "progress_secs": current_time,
-                "total_duration": duration_secs
-            });
-            session.status_tx.send(status_msg.to_string()).ok();
-            last_status_time = Instant::now();
-        }
+        // If running flag is false, exit the outer loop
+        break 'outer;
     }
 
     // Cleanup
@@ -781,20 +958,33 @@ pub fn run_session_transcription(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    // Mark session as completed
-    rt.block_on(session.set_state(SessionState::Completed));
+    // Mark session as completed (file) or stopped (SRT stream)
+    let final_state = if is_srt {
+        SessionState::Stopped
+    } else {
+        SessionState::Completed
+    };
+    rt.block_on(session.set_state(final_state));
     session.stop();
 
     let end_msg = serde_json::json!({
         "type": "end",
-        "total_duration": duration_secs
+        "total_duration": duration_secs,
+        "is_live": is_srt
     });
     session.status_tx.send(end_msg.to_string()).ok();
 
-    eprintln!(
-        "[Session {}] Complete. Duration: {:.2}s",
-        session.id, duration_secs
-    );
+    if is_srt {
+        eprintln!(
+            "[Session {}] Stopped. Elapsed: {:.2}s",
+            session.id, total_samples as f32 / 16000.0
+        );
+    } else {
+        eprintln!(
+            "[Session {}] Complete. Duration: {:.2}s",
+            session.id, duration_secs
+        );
+    }
 }
 
 /// Create RealtimeCanaryConfig based on latency mode

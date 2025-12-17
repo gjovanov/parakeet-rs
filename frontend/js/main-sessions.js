@@ -13,6 +13,7 @@ const state = {
   totalDuration: 0,
   selectedSessionId: null,
   subtitleCount: 0,  // Counter for received subtitles
+  sourceType: 'media', // 'media' or 'srt'
 };
 
 // Pause-related modes that show pause config
@@ -68,6 +69,7 @@ async function init() {
     sessionManager.fetchModes(),
     sessionManager.fetchNoiseCancellation(),
     sessionManager.fetchDiarization(),
+    sessionManager.fetchSrtStreams(),
     sessionManager.fetchSessions(),
   ]);
 
@@ -133,6 +135,12 @@ function cacheElements() {
   elements.contextBufferGroup = document.getElementById('context-buffer-group');
   elements.contextBuffer = document.getElementById('context-buffer');
   elements.contextBufferValue = document.getElementById('context-buffer-value');
+
+  // Source type tabs (Media Files vs Live Streams)
+  elements.sourceTabs = document.querySelectorAll('.source-tab');
+  elements.mediaSourceContent = document.getElementById('media-source-content');
+  elements.srtSourceContent = document.getElementById('srt-source-content');
+  elements.srtSelect = document.getElementById('srt-select');
 }
 
 function setupSessionManagerListeners() {
@@ -144,6 +152,9 @@ function setupSessionManagerListeners() {
   sessionManager.on('modesLoaded', renderModeSelect);
   sessionManager.on('noiseCancellationLoaded', renderNoiseSelect);
   sessionManager.on('diarizationLoaded', renderDiarizationSelect);
+  sessionManager.on('srtStreamsLoaded', ({ streams, configured }) => {
+    renderSrtSelect(streams, configured);
+  });
   sessionManager.on('sessionsUpdated', renderSessionsList);
   sessionManager.on('sessionCreated', (session) => {
     selectSession(session.id);
@@ -161,6 +172,27 @@ function setupEventListeners() {
       showTab(tab.dataset.tab);
     });
   });
+
+  // Source type tab switching (Media Files vs Live Streams)
+  if (elements.sourceTabs) {
+    elements.sourceTabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        const sourceType = tab.dataset.source;
+        state.sourceType = sourceType;
+
+        // Update tab active state
+        elements.sourceTabs.forEach(t => t.classList.toggle('active', t.dataset.source === sourceType));
+
+        // Show/hide source content
+        if (elements.mediaSourceContent) {
+          elements.mediaSourceContent.style.display = sourceType === 'media' ? 'block' : 'none';
+        }
+        if (elements.srtSourceContent) {
+          elements.srtSourceContent.style.display = sourceType === 'srt' ? 'block' : 'none';
+        }
+      });
+    });
+  }
 
   // Mode select - show/hide parallel config and pause config
   if (elements.modeSelect) {
@@ -230,14 +262,34 @@ function setupEventListeners() {
   // Create session
   elements.createSessionBtn.addEventListener('click', async () => {
     const modelId = elements.modelSelect.value;
-    const mediaId = elements.mediaSelect.value;
     const mode = elements.modeSelect?.value || 'speedy';
     const language = elements.languageSelect?.value || 'de';
     const noiseCancellation = elements.noiseSelect?.value || 'none';
     const diarization = elements.diarizationSelect?.value !== 'none';
 
-    if (!modelId || !mediaId) {
-      alert('Please select a model and media file');
+    // Determine source based on active tab
+    let mediaId = null;
+    let srtChannelId = null;
+
+    if (state.sourceType === 'srt') {
+      // SRT stream source
+      const srtValue = elements.srtSelect?.value;
+      if (!srtValue || srtValue === '') {
+        alert('Please select an SRT stream');
+        return;
+      }
+      srtChannelId = parseInt(srtValue, 10);
+    } else {
+      // Media file source
+      mediaId = elements.mediaSelect.value;
+      if (!mediaId) {
+        alert('Please select a media file');
+        return;
+      }
+    }
+
+    if (!modelId) {
+      alert('Please select a model');
       return;
     }
 
@@ -264,7 +316,16 @@ function setupEventListeners() {
     try {
       elements.createSessionBtn.disabled = true;
       elements.createSessionBtn.textContent = 'Creating...';
-      const session = await sessionManager.createSession(modelId, mediaId, mode, language, parallelConfig, noiseCancellation, diarization, pauseConfig);
+      const session = await sessionManager.createSession(modelId, {
+        mediaId,
+        srtChannelId,
+        mode,
+        language,
+        parallelConfig,
+        noiseCancellation,
+        diarization,
+        pauseConfig
+      });
       // Auto-start the session
       await sessionManager.startSession(session.id);
     } catch (e) {
@@ -454,6 +515,38 @@ function renderDiarizationSelect() {
     : '<option value="none">None</option>';
 }
 
+function renderSrtSelect(streams, configured) {
+  if (!elements.srtSelect) return;
+
+  if (!configured || streams.length === 0) {
+    elements.srtSelect.innerHTML = '<option value="">SRT not configured</option>';
+    elements.srtSelect.disabled = true;
+    // Hide SRT tab if not configured
+    if (elements.sourceTabs) {
+      elements.sourceTabs.forEach(tab => {
+        if (tab.dataset.source === 'srt') {
+          tab.style.display = 'none';
+        }
+      });
+    }
+    return;
+  }
+
+  // Show SRT tab if configured
+  if (elements.sourceTabs) {
+    elements.sourceTabs.forEach(tab => {
+      if (tab.dataset.source === 'srt') {
+        tab.style.display = '';
+      }
+    });
+  }
+
+  elements.srtSelect.disabled = false;
+  elements.srtSelect.innerHTML = streams
+    .map(s => `<option value="${s.id}">${s.display}</option>`)
+    .join('');
+}
+
 function renderMediaList() {
   const files = sessionManager.mediaFiles;
   if (files.length === 0) {
@@ -492,7 +585,8 @@ function renderSessionsList() {
   }
 
   elements.sessionsList.innerHTML = sessions.map(s => {
-    const progress = s.duration_secs > 0 ? (s.progress_secs / s.duration_secs) * 100 : 0;
+    const isLive = s.source_type === 'srt_stream';
+    const progress = !isLive && s.duration_secs > 0 ? (s.progress_secs / s.duration_secs) * 100 : 0;
     const isSelected = state.selectedSessionId === s.id;
     const modeLabel = s.mode ? s.mode.replace(/_/g, '-') : 'speedy';
 
@@ -504,13 +598,28 @@ function renderSessionsList() {
       ? ` | <span class="diar-badge">${s.diarization_model || 'Diar'}</span>`
       : '';
 
+    // LIVE badge for SRT streams
+    const liveLabel = isLive
+      ? '<span class="live-badge">LIVE</span> '
+      : '';
+
+    // Duration display - elapsed only for live streams
+    const durationDisplay = isLive
+      ? `${formatDuration(s.progress_secs)} elapsed`
+      : `${formatDuration(s.progress_secs)} / ${formatDuration(s.duration_secs)}`;
+
+    // Progress bar - always animated for live streams
+    const progressBar = isLive
+      ? '<div class="session-progress-bar live-progress" style="width: 100%"></div>'
+      : `<div class="session-progress-bar" style="width: ${progress}%"></div>`;
+
     return `
       <div class="session-card ${isSelected ? 'selected' : ''}" onclick="window.selectSession('${s.id}')">
         <div class="session-info">
-          <div class="session-title">${s.media_filename}</div>
-          <div class="session-meta">${s.model_name} | <span class="mode-badge">${modeLabel}</span>${noiseLabel}${diarLabel} | ${formatDuration(s.progress_secs)} / ${formatDuration(s.duration_secs)}</div>
+          <div class="session-title">${liveLabel}${s.media_filename}</div>
+          <div class="session-meta">${s.model_name} | <span class="mode-badge">${modeLabel}</span>${noiseLabel}${diarLabel} | ${durationDisplay}</div>
           <div class="session-progress">
-            <div class="session-progress-bar" style="width: ${progress}%"></div>
+            ${progressBar}
           </div>
         </div>
         <div class="session-actions">
@@ -641,15 +750,34 @@ async function connect(sessionId) {
     updateProgressBar();
   });
 
-  webrtcClient.on('end', ({ totalDuration }) => {
+  webrtcClient.on('end', ({ totalDuration, is_live }) => {
     state.totalDuration = totalDuration;
     elements.totalDuration.textContent = formatTime(totalDuration);
-    console.log('Stream ended, total duration:', formatTime(totalDuration));
+    if (is_live) {
+      console.log('Live stream stopped');
+    } else {
+      console.log('Stream ended, total duration:', formatTime(totalDuration));
+    }
   });
 
   webrtcClient.on('serverError', ({ message }) => {
     console.error('Server error:', message);
     alert(`Server error: ${message}`);
+  });
+
+  // SRT stream reconnection events
+  webrtcClient.on('srtReconnecting', ({ attempt, maxAttempts, delayMs }) => {
+    elements.bufferInfo.textContent = `SRT reconnecting... (${attempt}/${maxAttempts})`;
+    elements.connectionStatus.textContent = 'Reconnecting...';
+    elements.connectionStatus.className = 'status reconnecting';
+    console.log(`SRT reconnecting in ${delayMs}ms (attempt ${attempt}/${maxAttempts})`);
+  });
+
+  webrtcClient.on('srtReconnected', () => {
+    elements.bufferInfo.textContent = 'SRT reconnected';
+    elements.connectionStatus.textContent = 'Connected';
+    elements.connectionStatus.className = 'status connected';
+    console.log('SRT stream reconnected');
   });
 
   // Reset subtitle counter

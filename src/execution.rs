@@ -225,8 +225,10 @@ impl ModelConfig {
 
             #[cfg(feature = "cuda")]
             ExecutionProvider::Cuda => builder.with_execution_providers([
-                ort::execution_providers::CUDAExecutionProvider::default().build(),
-                CPUExecutionProvider::default().build().error_on_failure(),
+                ort::execution_providers::CUDAExecutionProvider::default()
+                    .build()
+                    .error_on_failure(),
+                CPUExecutionProvider::default().build(),
             ])?,
 
             #[cfg(feature = "tensorrt")]

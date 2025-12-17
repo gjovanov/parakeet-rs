@@ -23,6 +23,7 @@
 
 mod api;
 mod config;
+mod srt_config;
 mod state;
 mod transcription;
 mod webrtc_handlers;
@@ -33,6 +34,7 @@ use axum::{
 };
 use clap::Parser;
 use config::{LatencyMode, RuntimeConfig};
+use srt_config::SrtConfig;
 use parakeet_rs::{MediaManager, MediaManagerConfig, ModelRegistry, SessionManager};
 use state::AppState;
 use std::collections::HashMap;
@@ -286,6 +288,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("Frontend config: ws_url={}", ws_url);
 
+    // Initialize SRT configuration (optional)
+    let srt_config = SrtConfig::from_env();
+    if srt_config.is_some() {
+        eprintln!("SRT streams: enabled");
+    } else {
+        eprintln!("SRT streams: not configured (set SRT_ENCODER_IP and SRT_CHANNELS to enable)");
+    }
+
     let state = Arc::new(AppState {
         session_manager,
         model_registry,
@@ -297,6 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_audio: RwLock::new(HashMap::new()),
         parallel_configs: RwLock::new(HashMap::new()),
         pause_configs: RwLock::new(HashMap::new()),
+        srt_config,
     });
 
     // Build router
@@ -317,6 +328,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/noise-cancellation", get(api::list_noise_cancellation))
         // Diarization
         .route("/api/diarization", get(api::list_diarization))
+        // SRT streams
+        .route("/api/srt-streams", get(api::list_srt_streams))
         // Sessions
         .route("/api/sessions", get(api::list_sessions))
         .route("/api/sessions", post(api::create_session))

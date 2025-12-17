@@ -12,3 +12,7 @@ DS_Store
 *.onnx.data.env
 .env
 *.data
+**/*.onnx
+**/*.onnx.data
+**/*.onnx.bak
+**/*.onnx_data

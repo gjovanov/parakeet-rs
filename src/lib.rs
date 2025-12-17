@@ -125,7 +125,8 @@ pub use media_manager::{
 };
 
 pub use session::{
-    SessionInfo, SessionManager, SessionState, SharedSessionManager, TranscriptionSession,
+    MediaSourceType, SessionInfo, SessionManager, SessionState, SharedSessionManager,
+    TranscriptionSession,
 };
 
 pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};

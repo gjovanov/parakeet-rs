@@ -12,6 +12,8 @@ export class SessionManager {
     this.modes = [];
     this.noiseCancellationOptions = [];
     this.diarizationOptions = [];
+    this.srtStreams = [];
+    this.srtConfigured = false;
     this.currentSession = null;
     this.listeners = {};
     this.pollInterval = null;
@@ -105,6 +107,22 @@ export class SessionManager {
     }
   }
 
+  async fetchSrtStreams() {
+    try {
+      const res = await fetch(`${API_BASE}/api/srt-streams`);
+      const json = await res.json();
+      if (json.success) {
+        this.srtStreams = json.streams;
+        this.srtConfigured = json.configured;
+        this.emit('srtStreamsLoaded', { streams: this.srtStreams, configured: this.srtConfigured });
+      }
+      return this.srtStreams;
+    } catch (e) {
+      console.error('Failed to fetch SRT streams:', e);
+      return [];
+    }
+  }
+
   async fetchSessions() {
     try {
       const res = await fetch(`${API_BASE}/api/sessions`);
@@ -120,16 +138,48 @@ export class SessionManager {
     }
   }
 
-  async createSession(modelId, mediaId, mode = 'speedy', language = 'de', parallelConfig = null, noiseCancellation = 'none', diarization = false, pauseConfig = null) {
+  /**
+   * Create a new session
+   * @param {string} modelId - Model ID to use
+   * @param {Object} options - Session options
+   * @param {string} [options.mediaId] - Media file ID (for file sessions)
+   * @param {number} [options.srtChannelId] - SRT channel ID (for SRT stream sessions)
+   * @param {string} [options.mode='speedy'] - Latency mode
+   * @param {string} [options.language='de'] - Language code
+   * @param {Object} [options.parallelConfig] - Parallel mode config
+   * @param {string} [options.noiseCancellation='none'] - Noise cancellation type
+   * @param {boolean} [options.diarization=false] - Enable diarization
+   * @param {Object} [options.pauseConfig] - Pause detection config
+   */
+  async createSession(modelId, options = {}) {
+    const {
+      mediaId = null,
+      srtChannelId = null,
+      mode = 'speedy',
+      language = 'de',
+      parallelConfig = null,
+      noiseCancellation = 'none',
+      diarization = false,
+      pauseConfig = null
+    } = options;
+
     try {
       const body = {
         model_id: modelId,
-        media_id: mediaId,
         mode,
         language,
         noise_cancellation: noiseCancellation,
         diarization: diarization
       };
+
+      // Add source - either media file or SRT channel (mutually exclusive)
+      if (mediaId) {
+        body.media_id = mediaId;
+      } else if (srtChannelId !== null && srtChannelId !== undefined) {
+        body.srt_channel_id = srtChannelId;
+      } else {
+        throw new Error('Must specify either mediaId or srtChannelId');
+      }
 
       // Add parallel config if provided and mode is parallel or pause_parallel
       if ((mode === 'parallel' || mode === 'pause_parallel') && parallelConfig) {

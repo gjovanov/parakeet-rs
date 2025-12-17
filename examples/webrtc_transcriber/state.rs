@@ -2,6 +2,7 @@
 
 use crate::api::sessions::{ParallelConfig, PauseConfig};
 use crate::config::RuntimeConfig;
+use crate::srt_config::SrtConfig;
 use parakeet_rs::{SharedMediaManager, SharedModelRegistry, SharedSessionManager};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
@@ -48,4 +49,6 @@ pub struct AppState {
     pub parallel_configs: RwLock<HashMap<String, ParallelConfig>>,
     /// Per-session pause configs (for pause-related modes)
     pub pause_configs: RwLock<HashMap<String, PauseConfig>>,
+    /// SRT stream configuration (optional)
+    pub srt_config: Option<SrtConfig>,
 }

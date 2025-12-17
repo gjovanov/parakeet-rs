@@ -3,7 +3,7 @@
 use super::models::ApiResponse;
 use crate::config::LatencyMode;
 use crate::state::{AppState, SessionAudioState};
-use crate::transcription::run_session_transcription;
+use crate::transcription::{run_session_transcription, AudioSource};
 use axum::{extract::{Path, State}, Json};
 use parakeet_rs::SessionState;
 use serde::{Deserialize, Serialize};
@@ -93,7 +93,12 @@ impl Default for PauseConfig {
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
     pub model_id: String,
-    pub media_id: String,
+    /// Media file ID (for file-based sessions) - mutually exclusive with srt_channel_id
+    #[serde(default)]
+    pub media_id: Option<String>,
+    /// SRT channel ID (for SRT stream sessions) - mutually exclusive with media_id
+    #[serde(default)]
+    pub srt_channel_id: Option<usize>,
     #[serde(default)]
     pub mode: LatencyMode,
     /// Language code for transcription (default: "de" for German)
@@ -119,6 +124,57 @@ fn default_language() -> String {
 
 fn default_noise_cancellation() -> String {
     "none".to_string()
+}
+
+/// Get max parallel threads based on available memory or env override
+/// Each parallel thread loads a model instance (~2GB each)
+fn get_max_parallel_threads() -> usize {
+    // Check for env override first
+    if let Some(max) = std::env::var("MAX_PARALLEL_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        return max;
+    }
+
+    // Auto-detect based on available system memory
+    // Reserve ~4GB for system + base process, allocate ~2.5GB per thread
+    let available_gb = get_available_memory_gb();
+    let usable_gb = (available_gb - 4.0).max(0.0);
+    let memory_based_threads = (usable_gb / 2.5).floor() as usize;
+
+    // Also consider CPU cores (no point having more threads than cores)
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4);
+
+    // Use the minimum of memory-based and CPU-based limits, with min 1 and max 8
+    let max_threads = memory_based_threads.min(cpu_cores).max(1).min(8);
+
+    eprintln!(
+        "[Config] Auto-detected max parallel threads: {} (available RAM: {:.1}GB, CPUs: {})",
+        max_threads, available_gb, cpu_cores
+    );
+
+    max_threads
+}
+
+/// Get available system memory in GB
+fn get_available_memory_gb() -> f64 {
+    // Try to read from /proc/meminfo
+    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+        for line in content.lines() {
+            if line.starts_with("MemAvailable:") {
+                if let Some(kb_str) = line.split_whitespace().nth(1) {
+                    if let Ok(kb) = kb_str.parse::<u64>() {
+                        return kb as f64 / 1024.0 / 1024.0;
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: assume 16GB available
+    16.0
 }
 
 /// List all sessions
@@ -149,24 +205,81 @@ pub async fn create_session(
         None
     };
 
-    match state
-        .session_manager
-        .create_session(
-            &req.model_id,
-            &req.media_id,
-            mode_str,
-            &language,
-            &noise_cancellation,
-            req.diarization,
-            diarization_model,
-        )
-        .await
-    {
+    // Validate that exactly one of media_id or srt_channel_id is provided
+    let session_result = match (&req.media_id, &req.srt_channel_id) {
+        (Some(media_id), None) => {
+            // File-based session
+            state
+                .session_manager
+                .create_session(
+                    &req.model_id,
+                    media_id,
+                    mode_str,
+                    &language,
+                    &noise_cancellation,
+                    req.diarization,
+                    diarization_model,
+                )
+                .await
+        }
+        (None, Some(srt_channel_id)) => {
+            // SRT stream session
+            let srt_config = match &state.srt_config {
+                Some(config) => config,
+                None => return Json(ApiResponse::error("SRT streams not configured")),
+            };
+
+            let channel = match srt_config.get_channel(*srt_channel_id) {
+                Some(ch) => ch,
+                None => return Json(ApiResponse::error(format!(
+                    "Invalid SRT channel ID: {}",
+                    srt_channel_id
+                ))),
+            };
+
+            let srt_url = srt_config.build_srt_url(channel);
+
+            state
+                .session_manager
+                .create_srt_session(
+                    &req.model_id,
+                    *srt_channel_id,
+                    &channel.name,
+                    &srt_url,
+                    mode_str,
+                    &language,
+                    &noise_cancellation,
+                    req.diarization,
+                    diarization_model,
+                )
+                .await
+        }
+        (Some(_), Some(_)) => {
+            return Json(ApiResponse::error(
+                "Cannot specify both media_id and srt_channel_id"
+            ));
+        }
+        (None, None) => {
+            return Json(ApiResponse::error(
+                "Must specify either media_id or srt_channel_id"
+            ));
+        }
+    };
+
+    match session_result {
         Ok(session) => {
             let info = session.info().await;
 
-            // Store parallel config if provided
-            if let Some(parallel_config) = req.parallel_config {
+            // Store parallel config if provided, with thread cap to prevent OOM
+            if let Some(mut parallel_config) = req.parallel_config {
+                let max_threads = get_max_parallel_threads();
+                if parallel_config.num_threads > max_threads {
+                    eprintln!(
+                        "[Session {}] Capping parallel threads from {} to {} (OOM protection)",
+                        session.id, parallel_config.num_threads, max_threads
+                    );
+                    parallel_config.num_threads = max_threads;
+                }
                 let mut configs = state.parallel_configs.write().await;
                 configs.insert(session.id.clone(), parallel_config);
             }
@@ -310,17 +423,23 @@ pub async fn start_session(
     session.set_state(SessionState::Running).await;
 
     let session_clone = session.clone();
-    let wav_path = session.wav_path.clone();
     let model_path = model.model_path.clone();
     let diar_path = model.diarization_path.clone();
     let exec_config = model.exec_config.clone();
     let model_id = session.model_id.clone();
     let language = session.language.clone();
 
+    // Determine audio source type
+    let audio_source = if let Some(srt_url) = &session.srt_url {
+        AudioSource::Srt(srt_url.clone())
+    } else {
+        AudioSource::File(session.wav_path.clone())
+    };
+
     std::thread::spawn(move || {
         run_session_transcription(
             session_clone,
-            wav_path,
+            audio_source,
             model_path,
             diar_path,
             exec_config,

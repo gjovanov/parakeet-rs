@@ -320,12 +320,29 @@ export class WebRTCClient {
       case 'end':
         this.emit('end', {
           totalDuration: msg.total_duration,
+          is_live: msg.is_live,
         });
         break;
 
       case 'error':
         console.error('[WebRTC] Server error:', msg.message);
         this.emit('serverError', { message: msg.message });
+        break;
+
+      case 'reconnecting':
+        // SRT stream reconnection
+        console.log('[WebRTC] SRT reconnecting:', msg);
+        this.emit('srtReconnecting', {
+          attempt: msg.attempt,
+          maxAttempts: msg.max_attempts,
+          delayMs: msg.delay_ms,
+        });
+        break;
+
+      case 'reconnected':
+        // SRT stream reconnected
+        console.log('[WebRTC] SRT reconnected');
+        this.emit('srtReconnected');
         break;
 
       default:

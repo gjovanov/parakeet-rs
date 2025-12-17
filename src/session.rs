@@ -4,6 +4,7 @@
 //! - Session types for representing transcription sessions
 //! - SessionManager for creating, listing, and managing sessions
 //! - Thread-safe session state management
+//! - Support for both media files and SRT live streams
 
 use crate::error::{Error, Result};
 use crate::media_manager::SharedMediaManager;
@@ -15,6 +16,22 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
+
+/// Media source type for sessions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaSourceType {
+    /// Media file from disk
+    File,
+    /// Live SRT stream
+    SrtStream,
+}
+
+impl Default for MediaSourceType {
+    fn default() -> Self {
+        Self::File
+    }
+}
 
 /// Session state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +89,18 @@ pub struct SessionInfo {
     /// Diarization model name (if enabled)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diarization_model: Option<String>,
+    /// Media source type (file or srt_stream)
+    #[serde(default)]
+    pub source_type: MediaSourceType,
+    /// SRT channel ID (for SRT streams)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_channel_id: Option<usize>,
+    /// SRT channel name (for SRT streams)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_channel_name: Option<String>,
+    /// SRT URL (for SRT streams)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub srt_url: Option<String>,
 }
 
 fn default_language() -> String {
@@ -86,13 +115,13 @@ pub struct TranscriptionSession {
     pub model_id: String,
     /// Model display name
     pub model_name: String,
-    /// Media file ID
+    /// Media file ID (for file sessions)
     pub media_id: String,
-    /// Media filename
+    /// Media filename (or SRT channel name for SRT sessions)
     pub media_filename: String,
-    /// Path to WAV file for transcription
+    /// Path to WAV file for transcription (empty for SRT sessions)
     pub wav_path: PathBuf,
-    /// Total duration in seconds
+    /// Total duration in seconds (0 for live SRT streams)
     pub duration_secs: f32,
     /// Current state
     state: RwLock<SessionState>,
@@ -120,10 +149,18 @@ pub struct TranscriptionSession {
     pub diarization_model: Option<String>,
     /// Cached last subtitle for late-joining clients (uses std::sync::RwLock for sync access)
     last_subtitle: StdRwLock<Option<String>>,
+    /// Media source type (file or SRT stream)
+    pub source_type: MediaSourceType,
+    /// SRT channel ID (for SRT streams)
+    pub srt_channel_id: Option<usize>,
+    /// SRT channel name (for SRT streams)
+    pub srt_channel_name: Option<String>,
+    /// SRT URL (for SRT streams)
+    pub srt_url: Option<String>,
 }
 
 impl TranscriptionSession {
-    /// Create a new session
+    /// Create a new file-based session
     pub fn new(
         model_id: String,
         model_name: String,
@@ -164,7 +201,63 @@ impl TranscriptionSession {
             diarization,
             diarization_model,
             last_subtitle: StdRwLock::new(None),
+            source_type: MediaSourceType::File,
+            srt_channel_id: None,
+            srt_channel_name: None,
+            srt_url: None,
         }
+    }
+
+    /// Create a new SRT stream session
+    pub fn new_srt(
+        model_id: String,
+        model_name: String,
+        srt_channel_id: usize,
+        srt_channel_name: String,
+        srt_url: String,
+        mode: String,
+        language: String,
+        noise_cancellation: String,
+        diarization: bool,
+        diarization_model: Option<String>,
+    ) -> Self {
+        let (subtitle_tx, _) = broadcast::channel(1000);
+        let (status_tx, _) = broadcast::channel(100);
+
+        Self {
+            id: Uuid::new_v4().to_string()[..8].to_string(),
+            model_id,
+            model_name,
+            media_id: format!("srt:{}", srt_channel_id),
+            media_filename: srt_channel_name.clone(),
+            wav_path: PathBuf::new(), // Empty for SRT streams
+            duration_secs: 0.0,       // Unknown for live streams
+            state: RwLock::new(SessionState::Starting),
+            client_count: AtomicU64::new(0),
+            subtitle_tx,
+            status_tx,
+            running: Arc::new(AtomicBool::new(false)),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            progress_secs: RwLock::new(0.0),
+            mode,
+            language,
+            noise_cancellation,
+            diarization,
+            diarization_model,
+            last_subtitle: StdRwLock::new(None),
+            source_type: MediaSourceType::SrtStream,
+            srt_channel_id: Some(srt_channel_id),
+            srt_channel_name: Some(srt_channel_name),
+            srt_url: Some(srt_url),
+        }
+    }
+
+    /// Check if this is an SRT stream session
+    pub fn is_srt_stream(&self) -> bool {
+        self.source_type == MediaSourceType::SrtStream
     }
 
     /// Get session info for API responses
@@ -185,6 +278,10 @@ impl TranscriptionSession {
             noise_cancellation: self.noise_cancellation.clone(),
             diarization: self.diarization,
             diarization_model: self.diarization_model.clone(),
+            source_type: self.source_type,
+            srt_channel_id: self.srt_channel_id,
+            srt_channel_name: self.srt_channel_name.clone(),
+            srt_url: self.srt_url.clone(),
         }
     }
 
@@ -374,6 +471,73 @@ impl SessionManager {
         eprintln!(
             "[SessionManager] Created session {} (model: {}, media: {}, mode: {}, language: {}, noise: {}, diarization: {})",
             session.id, model_id, media_id, mode, lang, noise_cancellation, diarization
+        );
+
+        Ok(session)
+    }
+
+    /// Create a new SRT stream session
+    pub async fn create_srt_session(
+        &self,
+        model_id: &str,
+        srt_channel_id: usize,
+        srt_channel_name: &str,
+        srt_url: &str,
+        mode: &str,
+        language: &str,
+        noise_cancellation: &str,
+        diarization: bool,
+        diarization_model: Option<String>,
+    ) -> Result<Arc<TranscriptionSession>> {
+        // Check session limit
+        let current_count = self.sessions.read().await.len();
+        if current_count >= self.max_sessions {
+            return Err(Error::Model(format!(
+                "Maximum sessions reached ({})",
+                self.max_sessions
+            )));
+        }
+
+        // Validate model
+        let model = self.model_registry.get_model(model_id).ok_or_else(|| {
+            Error::Model(format!("Unknown model: {}", model_id))
+        })?;
+
+        if !model.is_available {
+            return Err(Error::Model(format!(
+                "Model {} not available",
+                model_id
+            )));
+        }
+
+        // Use default language if empty
+        let lang = if language.is_empty() { "de" } else { language };
+
+        // Create SRT session
+        let session = TranscriptionSession::new_srt(
+            model_id.to_string(),
+            model.model_type.display_name().to_string(),
+            srt_channel_id,
+            srt_channel_name.to_string(),
+            srt_url.to_string(),
+            mode.to_string(),
+            lang.to_string(),
+            noise_cancellation.to_string(),
+            diarization,
+            diarization_model,
+        );
+
+        let session = Arc::new(session);
+
+        // Add to sessions
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(session.id.clone(), session.clone());
+        }
+
+        eprintln!(
+            "[SessionManager] Created SRT session {} (model: {}, channel: {} [{}], mode: {}, language: {}, noise: {}, diarization: {})",
+            session.id, model_id, srt_channel_name, srt_channel_id, mode, lang, noise_cancellation, diarization
         );
 
         Ok(session)
