@@ -16,6 +16,7 @@
 //!   GET    /api/sessions/:id          - Get session info
 //!   POST   /api/sessions/:id/start    - Start transcription
 //!   DELETE /api/sessions/:id          - Stop session
+//!   GET    /api/sessions/:id/transcript - Download transcript (VoD mode only)
 //!   WS     /ws/:session_id            - Join session for subtitles and audio
 //!
 //! Usage:
@@ -29,6 +30,7 @@ mod transcription;
 mod webrtc_handlers;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post},
     Router,
 };
@@ -211,7 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize media manager
     let media_manager = Arc::new(MediaManager::new(MediaManagerConfig {
         media_dir: args.media_dir.clone(),
-        max_upload_size: 1024 * 1024 * 1024, // 1GB
+        max_upload_size: 2 * 1024 * 1024 * 1024, // 2GB
     }));
     media_manager.init().await?;
 
@@ -240,19 +242,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|s| s.split_whitespace().next().map(String::from))
         });
 
-    let nat_ip = args
-        .public_ip
-        .clone()
-        .or(detected_ip.clone())
-        .unwrap_or_else(|| "127.0.0.1".to_owned());
-
-    eprintln!("WebRTC NAT 1:1 IP: {}", nat_ip);
+    // Check if relay-only mode (TURN) - skip NAT 1:1 mapping which causes errors
+    let force_relay = std::env::var("FORCE_RELAY")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
     let mut setting_engine = webrtc::api::setting_engine::SettingEngine::default();
-    setting_engine.set_nat_1to1_ips(
-        vec![nat_ip],
-        webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
-    );
+
+    // Only set NAT 1:1 IP when not using relay-only mode
+    // In relay mode, host candidates aren't used, and NAT mapping causes errors
+    if !force_relay {
+        let nat_ip = args
+            .public_ip
+            .clone()
+            .or(detected_ip.clone())
+            .unwrap_or_else(|| "127.0.0.1".to_owned());
+
+        eprintln!("WebRTC NAT 1:1 IP: {}", nat_ip);
+        setting_engine.set_nat_1to1_ips(
+            vec![nat_ip],
+            webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Host,
+        );
+    } else {
+        eprintln!("WebRTC: FORCE_RELAY mode - skipping NAT 1:1 IP mapping");
+    }
+
     setting_engine.set_network_types(vec![
         NetworkType::Udp4,
         NetworkType::Udp6,
@@ -336,10 +350,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/sessions/:id", get(api::get_session))
         .route("/api/sessions/:id", delete(api::stop_session))
         .route("/api/sessions/:id/start", post(api::start_session))
+        .route("/api/sessions/:id/transcript", get(api::get_transcript))
         // WebSocket
         .route("/ws/:session_id", get(webrtc_handlers::ws_handler))
         // Static frontend
         .fallback_service(ServeDir::new(&args.frontend))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)) // 2GB upload limit
         .layer(CorsLayer::permissive())
         .with_state(state);
 

@@ -207,8 +207,20 @@ body {
   box-shadow: 0 2px 4px var(--shadow);
 }
 
+#current-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+#current-header h2 {
+  font-size: 1.1rem;
+}
+
 #live-subtitle {
-  text-align: center;
   opacity: 0.3;
   transition: opacity 0.3s;
 }
@@ -223,11 +235,25 @@ body {
   margin-bottom: 8px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  text-align: left;
 }
 
 #live-subtitle .subtitle-text {
   font-size: 1.3rem;
   line-height: 1.5;
+}
+
+#live-subtitle .subtitle-text p {
+  margin: 0.3em 0;
+  text-align: left;
+}
+
+#live-subtitle .subtitle-text p:first-child {
+  margin-top: 0;
+}
+
+#live-subtitle .subtitle-text p:last-child {
+  margin-bottom: 0;
 }
 
 #live-subtitle .inference-time {
@@ -239,6 +265,7 @@ body {
   background-color: rgba(233, 69, 96, 0.15);
   border-radius: 4px;
   display: inline-block;
+  text-align: left;
 }
 
 /* Transcript Section */

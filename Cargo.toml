@@ -44,6 +44,8 @@ bytes = "1.5"
 uuid = { version = "1.6", features = ["v4"] }
 # Noise cancellation
 nnnoiseless = "0.5"  # RNNoise pure Rust port
+# Date/time handling for VoD transcripts
+chrono = { version = "0.4", features = ["serde"] }
 rubato = "0.15"      # High-quality audio resampling
 
 [dev-dependencies]

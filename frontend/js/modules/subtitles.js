@@ -97,10 +97,11 @@ export class SubtitleRenderer {
     // Current playback time
     this.currentTime = 0;
 
-    // Stale subtitle timeout (clear partial subtitles after 10 seconds of no updates)
-    this.staleTimeoutMs = 10000;
+    // Stale subtitle timeout (clear display after 5 seconds of no updates)
+    this.staleTimeoutMs = 5000;
     this.staleTimer = null;
     this.lastSubtitleTime = 0;
+    this.isStale = false;  // Track if content is stale (should not display)
 
     // Queue for segments that arrived ahead of playback time
     /** @type {Segment[]} */
@@ -240,7 +241,7 @@ export class SubtitleRenderer {
 
   /**
    * Reset the stale subtitle timer
-   * Clears partial subtitles if no new messages arrive within timeout
+   * Clears display if no new messages arrive within timeout
    */
   resetStaleTimer() {
     // Clear existing timer
@@ -249,13 +250,14 @@ export class SubtitleRenderer {
     }
 
     this.lastSubtitleTime = Date.now();
+    this.isStale = false;  // New content arrived, not stale
 
-    // Set new timer to clear stale partial subtitles
+    // Set new timer to mark content as stale and clear display
     this.staleTimer = setTimeout(() => {
-      if (this.currentSegment) {
-        console.log('[Subtitles] Clearing stale partial subtitle after timeout');
-        this.clearCurrent();
-      }
+      console.log('[Subtitles] Marking content as stale after timeout');
+      this.isStale = true;
+      this.currentSegment = null;
+      this.updateLiveDisplay();
     }, this.staleTimeoutMs);
   }
 
@@ -265,6 +267,7 @@ export class SubtitleRenderer {
    */
   clearCurrent() {
     this.currentSegment = null;
+    this.isStale = true;  // Mark as stale to hide display
     if (this.staleTimer) {
       clearTimeout(this.staleTimer);
       this.staleTimer = null;
@@ -334,13 +337,17 @@ export class SubtitleRenderer {
       return;
     }
 
-    // Priority: currentSegment (partial) > segment at playback time > most recent finalized segment
-    let segment = this.currentSegment || this.getSegmentAtTime(this.currentTime);
+    // Show current partial segment, or the most recent final segment
+    // But don't show anything if content is stale (no updates for a while)
+    let segment = null;
 
-    // If no segment from above, show the most recent finalized segment
-    if (!segment && this.segments.length > 0) {
-      segment = this.segments[this.segments.length - 1];
-      console.log('[Subtitles] Showing last finalized segment:', segment?.text?.substring(0, 50));
+    if (!this.isStale) {
+      segment = this.currentSegment;
+
+      // If no partial segment, show the most recent final segment temporarily
+      if (!segment && this.segments.length > 0) {
+        segment = this.segments[this.segments.length - 1];
+      }
     }
 
     if (segment) {
@@ -357,7 +364,31 @@ export class SubtitleRenderer {
         this.liveSpeakerEl.style.display = 'none';
       }
       this.liveSpeakerEl.dataset.speaker = segment.speaker ?? '?';
-      this.liveTextEl.textContent = segment.text;
+      // Split text by sentence-ending punctuation into separate paragraphs
+      const sentences = segment.text.split(/([.!?])/);
+      let formattedHtml = '';
+      let currentSentence = '';
+
+      for (let i = 0; i < sentences.length; i++) {
+        currentSentence += sentences[i];
+        // If this is a sentence-ending punctuation mark, end the sentence
+        if (/^[.!?]$/.test(sentences[i])) {
+          const trimmed = currentSentence.trim();
+          // Skip empty paragraphs or dot-only paragraphs
+          if (trimmed && trimmed !== '.') {
+            formattedHtml += `<p>${escapeHtml(trimmed)}</p>`;
+          }
+          currentSentence = '';
+        }
+      }
+
+      // Add any remaining text that doesn't end with punctuation
+      const remaining = currentSentence.trim();
+      if (remaining && remaining !== '.') {
+        formattedHtml += `<p>${escapeHtml(remaining)}</p>`;
+      }
+
+      this.liveTextEl.innerHTML = formattedHtml || '';
 
       // Show inference time if available
       if (this.liveInferenceTimeEl && segment.inferenceTimeMs != null) {
@@ -530,6 +561,7 @@ export class SubtitleRenderer {
     this.currentSegment = null;
     this.currentTime = 0;
     this.pendingSegments = [];
+    this.isStale = false;  // Reset stale state
 
     // Clear stale timer
     if (this.staleTimer) {

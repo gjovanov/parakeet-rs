@@ -3,7 +3,7 @@
 use crate::api::sessions::{ParallelConfig, PauseConfig};
 use crate::webrtc_handlers::audio::OpusEncoder;
 use parakeet_rs::noise_cancellation::{create_noise_canceller, NoiseCancellationType};
-use parakeet_rs::{SessionState, TranscriptionSession};
+use parakeet_rs::{SessionState, TranscriptionSession, VodConfig, VodTranscriberCanary, VodTranscriberTDT};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -47,12 +47,26 @@ pub fn run_session_transcription(
     ffmpeg_pid: Arc<AtomicU32>,
     parallel_config: Option<ParallelConfig>,
     pause_config: Option<PauseConfig>,
+    sentence_completion: String,
 ) {
     use parakeet_rs::streaming_transcriber::StreamingTranscriber;
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::sync::mpsc as std_mpsc;
     use std::time::Instant;
+
+    // Check if this is VoD mode - handle separately
+    if session.mode == "vod" {
+        run_vod_transcription(
+            session,
+            audio_source,
+            model_path,
+            exec_config,
+            model_id,
+            language,
+        );
+        return;
+    }
 
     let is_srt = audio_source.is_srt();
 
@@ -100,6 +114,7 @@ pub fn run_session_transcription(
     // Spawn transcription thread with panic catching
     let transcription_session = session.clone();
     let transcription_running = running.clone();
+    let sentence_completion_clone = sentence_completion.clone();
     let transcription_thread = std::thread::spawn(move || {
         // Wrap entire transcription in catch_unwind to prevent server crash
         let session_id = transcription_session.id.clone();
@@ -119,6 +134,7 @@ pub fn run_session_transcription(
                 transcription_running,
                 parallel_config,
                 pause_config,
+                sentence_completion_clone,
             );
         }));
 
@@ -154,8 +170,10 @@ pub fn run_session_transcription(
         transcription_running: Arc<AtomicBool>,
         parallel_config: Option<super::api::sessions::ParallelConfig>,
         pause_config: Option<super::api::sessions::PauseConfig>,
+        sentence_completion: String,
     ) {
         use parakeet_rs::streaming_transcriber::StreamingTranscriber;
+        use parakeet_rs::sentence_buffer::{SentenceBuffer, SentenceBufferMode};
         use std::sync::mpsc as std_mpsc;
 
         // Check if parallel mode
@@ -173,19 +191,19 @@ pub fn run_session_transcription(
             if is_canary {
                 use parakeet_rs::pause_parallel_canary::{PauseParallelCanary, PauseParallelConfig};
 
-                // Get pause config values or use defaults
+                // Get pause config values or use defaults (0.5s for better sentence boundaries)
                 let pause_threshold_secs = pause_config.as_ref()
                     .map(|p| p.pause_threshold_ms as f32 / 1000.0)
-                    .unwrap_or(0.3);
+                    .unwrap_or(0.5);
                 let silence_energy = pause_config.as_ref()
                     .map(|p| p.silence_energy_threshold)
                     .unwrap_or(0.008);
                 let max_segment_secs = pause_config.as_ref()
                     .map(|p| p.max_segment_secs)
-                    .unwrap_or(5.0);
+                    .unwrap_or(6.0);  // Increased for longer sentences
                 let context_buffer = pause_config.as_ref()
                     .map(|p| p.context_buffer_secs)
-                    .unwrap_or(0.0);
+                    .unwrap_or(2.0);  // Add context for better boundaries
 
                 let config = PauseParallelConfig {
                     num_threads,
@@ -198,11 +216,22 @@ pub fn run_session_transcription(
                 };
 
                 eprintln!(
-                    "[Session {}] Creating PauseParallelCanary transcriber with {} threads, {}ms pause, {}s context",
-                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32, config.context_buffer_secs
+                    "[Session {}] Creating PauseParallelCanary transcriber with {} threads, {}ms pause, {}s context (diar: {:?})",
+                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32, config.context_buffer_secs, diar_path
                 );
 
-                match PauseParallelCanary::new(&model_path, Some(exec_config), Some(config)) {
+                // Use diarization constructor if available and diar_path is provided
+                #[cfg(feature = "sortformer")]
+                let result = PauseParallelCanary::new_with_diarization(
+                    &model_path,
+                    diar_path.as_ref(),
+                    Some(exec_config),
+                    Some(config),
+                );
+                #[cfg(not(feature = "sortformer"))]
+                let result = PauseParallelCanary::new(&model_path, Some(exec_config), Some(config));
+
+                match result {
                     Ok(t) => Box::new(t),
                     Err(e) => {
                         eprintln!(
@@ -215,19 +244,19 @@ pub fn run_session_transcription(
             } else {
                 use parakeet_rs::pause_parallel_tdt::{PauseParallelTDT, PauseParallelTDTConfig};
 
-                // Get pause config values or use defaults
+                // Get pause config values or use defaults (0.5s for better sentence boundaries)
                 let pause_threshold_secs = pause_config.as_ref()
                     .map(|p| p.pause_threshold_ms as f32 / 1000.0)
-                    .unwrap_or(0.3);
+                    .unwrap_or(0.5);
                 let silence_energy = pause_config.as_ref()
                     .map(|p| p.silence_energy_threshold)
                     .unwrap_or(0.008);
                 let max_segment_secs = pause_config.as_ref()
                     .map(|p| p.max_segment_secs)
-                    .unwrap_or(5.0);
+                    .unwrap_or(6.0);  // Increased for longer sentences
                 let context_buffer = pause_config.as_ref()
                     .map(|p| p.context_buffer_secs)
-                    .unwrap_or(0.0);
+                    .unwrap_or(2.0);  // Add context for better boundaries
 
                 let config = PauseParallelTDTConfig {
                     num_threads,
@@ -239,11 +268,27 @@ pub fn run_session_transcription(
                 };
 
                 eprintln!(
-                    "[Session {}] Creating PauseParallelTDT transcriber with {} threads, {}ms pause, {}s context",
-                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32, config.context_buffer_secs
+                    "[Session {}] Creating PauseParallelTDT transcriber with {} threads, {}ms pause, {}s context (diar: {:?})",
+                    transcription_session.id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32, config.context_buffer_secs, diar_path
                 );
 
-                match PauseParallelTDT::new(&model_path, Some(exec_config), Some(config)) {
+                // Use diarization constructor if available and diar_path is provided
+                #[cfg(feature = "sortformer")]
+                let result = if diar_path.is_some() {
+                    PauseParallelTDT::new_with_diarization(
+                        &model_path,
+                        diar_path.as_ref(),
+                        Some(exec_config),
+                        Some(config),
+                    )
+                } else {
+                    PauseParallelTDT::new(&model_path, Some(exec_config), Some(config))
+                };
+
+                #[cfg(not(feature = "sortformer"))]
+                let result = PauseParallelTDT::new(&model_path, Some(exec_config), Some(config));
+
+                match result {
                     Ok(t) => Box::new(t),
                     Err(e) => {
                         eprintln!(
@@ -273,11 +318,22 @@ pub fn run_session_transcription(
                 };
 
                 eprintln!(
-                    "[Session {}] Creating ParallelCanary transcriber with {} threads, {}s buffer",
-                    transcription_session.id, config.num_threads, config.buffer_size_chunks
+                    "[Session {}] Creating ParallelCanary transcriber with {} threads, {}s buffer (diar: {:?})",
+                    transcription_session.id, config.num_threads, config.buffer_size_chunks, diar_path
                 );
 
-                match ParallelCanary::new(&model_path, Some(exec_config), Some(config)) {
+                // Use diarization constructor if available and diar_path is provided
+                #[cfg(feature = "sortformer")]
+                let result = ParallelCanary::new_with_diarization(
+                    &model_path,
+                    diar_path.as_ref(),
+                    Some(exec_config),
+                    Some(config),
+                );
+                #[cfg(not(feature = "sortformer"))]
+                let result = ParallelCanary::new(&model_path, Some(exec_config), Some(config));
+
+                match result {
                     Ok(t) => Box::new(t),
                     Err(e) => {
                         eprintln!(
@@ -298,11 +354,27 @@ pub fn run_session_transcription(
                 };
 
                 eprintln!(
-                    "[Session {}] Creating ParallelTDT transcriber with {} threads, {}s buffer",
-                    transcription_session.id, config.num_threads, config.buffer_size_chunks
+                    "[Session {}] Creating ParallelTDT transcriber with {} threads, {}s buffer (diar: {:?})",
+                    transcription_session.id, config.num_threads, config.buffer_size_chunks, diar_path
                 );
 
-                match ParallelTDT::new(&model_path, Some(exec_config), Some(config)) {
+                // Use diarization constructor if available and diar_path is provided
+                #[cfg(feature = "sortformer")]
+                let result = if diar_path.is_some() {
+                    ParallelTDT::new_with_diarization(
+                        &model_path,
+                        diar_path.as_ref(),
+                        Some(exec_config),
+                        Some(config),
+                    )
+                } else {
+                    ParallelTDT::new(&model_path, Some(exec_config), Some(config))
+                };
+
+                #[cfg(not(feature = "sortformer"))]
+                let result = ParallelTDT::new(&model_path, Some(exec_config), Some(config));
+
+                match result {
                     Ok(t) => Box::new(t),
                     Err(e) => {
                         eprintln!(
@@ -418,11 +490,27 @@ pub fn run_session_transcription(
             let canary_config = create_canary_config(&mode, language.clone());
 
             eprintln!(
-                "[Session {}] Creating Canary transcriber from {:?} (language: {}, mode: {})",
-                transcription_session.id, model_path, language, mode
+                "[Session {}] Creating Canary transcriber from {:?} (language: {}, mode: {}, diar: {:?})",
+                transcription_session.id, model_path, language, mode, diar_path
             );
 
-            match RealtimeCanary::new(&model_path, Some(exec_config), Some(canary_config)) {
+            // Use diarization constructor if available and diar_path is provided
+            #[cfg(feature = "sortformer")]
+            let result = if diar_path.is_some() {
+                RealtimeCanary::new_with_diarization(
+                    &model_path,
+                    diar_path.as_ref(),
+                    Some(exec_config),
+                    Some(canary_config),
+                )
+            } else {
+                RealtimeCanary::new(&model_path, Some(exec_config), Some(canary_config))
+            };
+
+            #[cfg(not(feature = "sortformer"))]
+            let result = RealtimeCanary::new(&model_path, Some(exec_config), Some(canary_config));
+
+            match result {
                 Ok(t) => Box::new(t),
                 Err(e) => {
                     eprintln!(
@@ -517,6 +605,14 @@ pub fn run_session_transcription(
             transcription_session.id, model_type
         );
 
+        // Create sentence buffer based on completion mode
+        let buffer_mode = SentenceBufferMode::from_str(&sentence_completion);
+        let mut sentence_buffer = SentenceBuffer::with_mode(buffer_mode);
+        eprintln!(
+            "[Session {}] Sentence buffer mode: {}",
+            transcription_session.id, buffer_mode.as_str()
+        );
+
         // Process audio samples as they arrive
         let mut chunks_processed = 0u64;
         while transcription_running.load(Ordering::SeqCst) {
@@ -561,7 +657,13 @@ pub fn run_session_transcription(
                             all_samples.len()
                         );
                     }
-                    emit_streaming_segments(&transcription_session, &result.segments);
+
+                    // Process segments through sentence buffer
+                    for segment in result.segments {
+                        if let Some(merged) = sentence_buffer.push(segment) {
+                            emit_streaming_segments(&transcription_session, &[merged]);
+                        }
+                    }
                 }
                 Err(e) => {
                     if chunks_processed % 100 == 0 {
@@ -600,13 +702,26 @@ pub fn run_session_transcription(
             );
             match transcriber.finalize() {
                 Ok(result) => {
-                    emit_streaming_segments(&transcription_session, &result.segments);
+                    // Process final segments through buffer
+                    for segment in result.segments {
+                        if let Some(merged) = sentence_buffer.push(segment) {
+                            emit_streaming_segments(&transcription_session, &[merged]);
+                        }
+                    }
+                    // Flush any remaining buffered content
+                    if let Some(flushed) = sentence_buffer.flush() {
+                        emit_streaming_segments(&transcription_session, &[flushed]);
+                    }
                 }
                 Err(e) => {
                     eprintln!(
                         "[Session {}] Finalization error: {}",
                         transcription_session.id, e
                     );
+                    // Still flush buffer on error
+                    if let Some(flushed) = sentence_buffer.flush() {
+                        emit_streaming_segments(&transcription_session, &[flushed]);
+                    }
                 }
             }
         } else {
@@ -614,6 +729,10 @@ pub fn run_session_transcription(
                 "[Session {}] Skipping finalization (session stopped)",
                 transcription_session.id
             );
+            // Flush buffer even when stopped to emit any pending content
+            if let Some(flushed) = sentence_buffer.flush() {
+                emit_streaming_segments(&transcription_session, &[flushed]);
+            }
         }
 
         eprintln!(
@@ -1047,15 +1166,15 @@ fn create_transcription_config(
 ) -> parakeet_rs::RealtimeTDTConfig {
     use parakeet_rs::RealtimeTDTConfig;
 
-    // Get pause config values or use mode defaults
+    // Get pause config values or use mode defaults (0.6s for better sentence boundaries)
     let (pause_threshold, silence_energy) = match pause_config {
         Some(pc) => (
             pc.pause_threshold_ms as f32 / 1000.0,
             pc.silence_energy_threshold,
         ),
         None => match mode {
-            "speedy" => (0.35, 0.008),
-            _ => (0.3, 0.008),
+            "speedy" => (0.6, 0.008),  // 600ms for complete sentences
+            _ => (0.5, 0.008),
         },
     };
 
@@ -1063,7 +1182,7 @@ fn create_transcription_config(
         "speedy" => RealtimeTDTConfig {
             buffer_size_secs: 8.0,
             process_interval_secs: 0.2,
-            confirm_threshold_secs: 0.4,
+            confirm_threshold_secs: 0.5,  // Increased for stability
             pause_based_confirm: true,
             pause_threshold_secs: pause_threshold,
             silence_energy_threshold: silence_energy,
@@ -1181,6 +1300,165 @@ fn emit_streaming_segments(
             segment.inference_time_ms.unwrap_or(0),
             receiver_count
         );
+    }
+}
+
+/// Run VoD batch transcription
+fn run_vod_transcription(
+    session: Arc<TranscriptionSession>,
+    audio_source: AudioSource,
+    model_path: PathBuf,
+    exec_config: parakeet_rs::ExecutionConfig,
+    model_id: String,
+    language: String,
+) {
+    use std::fs;
+
+    // VoD only supports file sources
+    let wav_path = match &audio_source {
+        AudioSource::File(path) => path.clone(),
+        AudioSource::Srt(_) => {
+            eprintln!("[Session {}] VoD mode does not support SRT streams", session.id);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(session.set_state(SessionState::Stopped));
+            return;
+        }
+    };
+
+    eprintln!(
+        "[Session {}] Starting VoD transcription for {}",
+        session.id,
+        wav_path.display()
+    );
+
+    // Set state to running
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(session.set_state(SessionState::Running));
+
+    // Check if Canary or TDT model
+    let is_canary = model_id == "canary-1b";
+
+    // Determine config based on model type:
+    // - Use 1 worker to avoid GPU OOM when processing concurrently
+    // - 3-min chunks fit comfortably in GPU VRAM
+    let (num_workers, chunk_duration, overlap_duration) = if is_canary {
+        (1, 180.0, 15.0)  // 3 min chunks, 15s overlap, 1 worker (GPU sequential)
+    } else {
+        (1, 180.0, 15.0)  // 3 min chunks, 15s overlap (TDT encoder limit ~2500 frames ≈ 3.3 min)
+    };
+
+    // Create VoD config
+    let vod_config = VodConfig {
+        chunk_duration_secs: chunk_duration,
+        overlap_duration_secs: overlap_duration,
+        num_workers,
+        dedup_threshold: 0.8,
+        language: language.clone(),
+    };
+
+    // Progress callback
+    let session_for_progress = session.clone();
+    let progress_callback = Box::new(move |progress: parakeet_rs::VodProgress| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(session_for_progress.set_vod_progress(
+            progress.total_chunks,
+            progress.completed_chunks,
+        ));
+
+        // Send progress via status channel
+        let progress_msg = serde_json::json!({
+            "type": "vod_progress",
+            "total_chunks": progress.total_chunks,
+            "completed_chunks": progress.completed_chunks,
+            "current_chunk": progress.current_chunk,
+            "percent": progress.percent,
+        });
+        let _ = session_for_progress.status_tx.send(progress_msg.to_string());
+    });
+
+    // Run transcription
+    let result = if is_canary {
+        eprintln!("[Session {}] Using Canary model for VoD", session.id);
+        match VodTranscriberCanary::new(&model_path, vod_config, Some(exec_config)) {
+            Ok(transcriber) => transcriber.transcribe_file(&wav_path, &session.id, Some(progress_callback)),
+            Err(e) => {
+                eprintln!("[Session {}] Failed to create Canary VoD transcriber: {}", session.id, e);
+                rt.block_on(session.set_state(SessionState::Stopped));
+                return;
+            }
+        }
+    } else {
+        eprintln!("[Session {}] Using TDT model for VoD", session.id);
+        match VodTranscriberTDT::new(&model_path, vod_config, Some(exec_config)) {
+            Ok(transcriber) => transcriber.transcribe_file(&wav_path, &session.id, Some(progress_callback)),
+            Err(e) => {
+                eprintln!("[Session {}] Failed to create TDT VoD transcriber: {}", session.id, e);
+                rt.block_on(session.set_state(SessionState::Stopped));
+                return;
+            }
+        }
+    };
+
+    match result {
+        Ok(transcript) => {
+            // Generate transcript file path: same as wav file with .transcript.json suffix
+            // e.g., broadcast.wav => broadcast.transcript.json
+            let transcript_path = {
+                let stem = wav_path.file_stem().and_then(|s| s.to_str()).unwrap_or("transcript");
+                wav_path.with_file_name(format!("{}.transcript.json", stem))
+            };
+
+            // Save transcript
+            match serde_json::to_string_pretty(&transcript) {
+                Ok(json) => {
+                    if let Err(e) = fs::write(&transcript_path, &json) {
+                        eprintln!("[Session {}] Failed to write transcript: {}", session.id, e);
+                    } else {
+                        eprintln!(
+                            "[Session {}] Transcript saved to {}",
+                            session.id,
+                            transcript_path.display()
+                        );
+
+                        // Set transcript path in session
+                        rt.block_on(session.set_transcript_path(transcript_path.clone()));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[Session {}] Failed to serialize transcript: {}", session.id, e);
+                }
+            }
+
+            // Send completion message
+            let complete_msg = serde_json::json!({
+                "type": "vod_complete",
+                "transcript_available": true,
+                "duration_secs": transcript.duration_secs,
+                "segment_count": transcript.segments.len(),
+            });
+            let _ = session.status_tx.send(complete_msg.to_string());
+
+            eprintln!(
+                "[Session {}] VoD transcription completed: {} segments, {:.1}s duration",
+                session.id,
+                transcript.segments.len(),
+                transcript.duration_secs
+            );
+
+            // Set state to completed
+            rt.block_on(session.set_state(SessionState::Completed));
+        }
+        Err(e) => {
+            eprintln!("[Session {}] VoD transcription failed: {}", session.id, e);
+
+            let error_msg = serde_json::json!({
+                "type": "error",
+                "message": format!("Transcription failed: {}", e),
+            });
+            let _ = session.status_tx.send(error_msg.to_string());
+
+            rt.block_on(session.set_state(SessionState::Stopped));
+        }
     }
 }
 

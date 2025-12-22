@@ -20,6 +20,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[cfg(feature = "sortformer")]
+use crate::sortformer_stream::SortformerStream;
+
 const SAMPLE_RATE: usize = 16000;
 
 /// Configuration for parallel TDT transcription
@@ -211,6 +214,9 @@ pub struct ParallelTDT {
     pending_results: BTreeMap<u64, TranscriptionResult>,
     merger: ResultMerger,
     total_samples: usize,
+    /// Optional speaker diarizer (requires sortformer feature)
+    #[cfg(feature = "sortformer")]
+    diarizer: Option<SortformerStream>,
 }
 
 impl ParallelTDT {
@@ -329,7 +335,56 @@ impl ParallelTDT {
             pending_results: BTreeMap::new(),
             merger: ResultMerger::new(config.buffer_size_chunks),
             total_samples: 0,
+            #[cfg(feature = "sortformer")]
+            diarizer: None,
         })
+    }
+
+    /// Create a new parallel TDT transcriber with optional diarization
+    #[cfg(feature = "sortformer")]
+    pub fn new_with_diarization<P1: AsRef<Path>, P2: AsRef<Path>>(
+        model_dir: P1,
+        diar_path: Option<P2>,
+        exec_config: Option<ModelConfig>,
+        config: Option<ParallelTDTConfig>,
+    ) -> Result<Self> {
+        let mut transcriber = Self::new(model_dir.as_ref(), exec_config, config)?;
+
+        // Create diarizer if path provided
+        if let Some(diar_path) = diar_path {
+            eprintln!("[ParallelTDT] Creating diarizer from {:?}", diar_path.as_ref());
+            transcriber.diarizer = Some(SortformerStream::new(diar_path)?);
+        }
+
+        Ok(transcriber)
+    }
+
+    /// Check if diarization is available
+    #[cfg(feature = "sortformer")]
+    pub fn has_diarization(&self) -> bool {
+        self.diarizer.is_some()
+    }
+
+    /// Check if diarization is available (always false without sortformer feature)
+    #[cfg(not(feature = "sortformer"))]
+    pub fn has_diarization(&self) -> bool {
+        false
+    }
+
+    /// Get speaker at a given time
+    #[cfg(feature = "sortformer")]
+    fn get_speaker_at(&self, time: f32) -> Option<usize> {
+        if let Some(diarizer) = &self.diarizer {
+            diarizer.get_speaker_at(time)
+        } else {
+            None
+        }
+    }
+
+    /// Get speaker at a given time (always None without sortformer feature)
+    #[cfg(not(feature = "sortformer"))]
+    fn get_speaker_at(&self, _time: f32) -> Option<usize> {
+        None
     }
 
     fn dispatch_job(&mut self) {
@@ -373,7 +428,7 @@ impl StreamingTranscriber for ParallelTDT {
                 "Parallel sliding window with {} threads, {} chunk buffer",
                 self.config.num_threads, self.config.buffer_size_chunks
             ),
-            supports_diarization: false,
+            supports_diarization: self.has_diarization(),
             languages: vec!["en".to_string()],
             is_loaded: true,
         }
@@ -388,6 +443,12 @@ impl StreamingTranscriber for ParallelTDT {
     }
 
     fn push_audio(&mut self, samples: &[f32]) -> Result<StreamingChunkResult> {
+        // Push audio to diarizer for speaker tracking (if available)
+        #[cfg(feature = "sortformer")]
+        if let Some(diarizer) = &mut self.diarizer {
+            let _ = diarizer.push_audio(samples);
+        }
+
         self.total_samples += samples.len();
         self.current_chunk.extend_from_slice(samples);
 
@@ -406,9 +467,15 @@ impl StreamingTranscriber for ParallelTDT {
         }
 
         self.collect_results();
-        let segments = self
+        let mut segments = self
             .merger
             .process(&mut self.pending_results, self.config.chunk_duration_secs);
+
+        // Add speaker info to segments
+        for segment in &mut segments {
+            let mid_time = (segment.start_time + segment.end_time) / 2.0;
+            segment.speaker = self.get_speaker_at(mid_time);
+        }
 
         Ok(StreamingChunkResult {
             segments,
@@ -443,15 +510,26 @@ impl StreamingTranscriber for ParallelTDT {
             if !text.is_empty() {
                 let start_time = result.start_chunk_idx as f32 * self.config.chunk_duration_secs;
                 let end_time = result.end_chunk_idx as f32 * self.config.chunk_duration_secs;
+                let mid_time = (start_time + end_time) / 2.0;
+                let speaker = self.get_speaker_at(mid_time);
+
                 segments.push(TranscriptionSegment {
                     text,
                     start_time,
                     end_time,
-                    speaker: None,
+                    speaker,
                     confidence: Some(1.0),
                     is_final: true,
                     inference_time_ms: Some(result.inference_time_ms),
                 });
+            }
+        }
+
+        // Add speaker info to segments from merger
+        for segment in &mut segments {
+            if segment.speaker.is_none() {
+                let mid_time = (segment.start_time + segment.end_time) / 2.0;
+                segment.speaker = self.get_speaker_at(mid_time);
             }
         }
 

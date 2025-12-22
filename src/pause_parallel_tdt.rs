@@ -20,6 +20,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[cfg(feature = "sortformer")]
+use crate::sortformer_stream::SortformerStream;
+
 const SAMPLE_RATE: usize = 16000;
 
 /// Configuration for pause-based parallel TDT transcription
@@ -180,6 +183,9 @@ pub struct PauseParallelTDT {
     merger: OrderedMerger,
     total_samples: usize,
     jobs_in_flight: Arc<AtomicU64>,
+    /// Optional speaker diarizer (requires sortformer feature)
+    #[cfg(feature = "sortformer")]
+    diarizer: Option<SortformerStream>,
 }
 
 impl PauseParallelTDT {
@@ -309,7 +315,56 @@ impl PauseParallelTDT {
             merger: OrderedMerger::new(),
             total_samples: 0,
             jobs_in_flight,
+            #[cfg(feature = "sortformer")]
+            diarizer: None,
         })
+    }
+
+    /// Create a new pause-based parallel TDT transcriber with optional diarization
+    #[cfg(feature = "sortformer")]
+    pub fn new_with_diarization<P1: AsRef<Path>, P2: AsRef<Path>>(
+        model_dir: P1,
+        diar_path: Option<P2>,
+        exec_config: Option<ModelConfig>,
+        config: Option<PauseParallelTDTConfig>,
+    ) -> Result<Self> {
+        let mut transcriber = Self::new(model_dir.as_ref(), exec_config, config)?;
+
+        // Create diarizer if path provided
+        if let Some(diar_path) = diar_path {
+            eprintln!("[PauseParallelTDT] Creating diarizer from {:?}", diar_path.as_ref());
+            transcriber.diarizer = Some(SortformerStream::new(diar_path)?);
+        }
+
+        Ok(transcriber)
+    }
+
+    /// Check if diarization is available
+    #[cfg(feature = "sortformer")]
+    pub fn has_diarization(&self) -> bool {
+        self.diarizer.is_some()
+    }
+
+    /// Check if diarization is available (always false without sortformer feature)
+    #[cfg(not(feature = "sortformer"))]
+    pub fn has_diarization(&self) -> bool {
+        false
+    }
+
+    /// Get speaker at a given time
+    #[cfg(feature = "sortformer")]
+    fn get_speaker_at(&self, time: f32) -> Option<usize> {
+        if let Some(diarizer) = &self.diarizer {
+            diarizer.get_speaker_at(time)
+        } else {
+            None
+        }
+    }
+
+    /// Get speaker at a given time (always None without sortformer feature)
+    #[cfg(not(feature = "sortformer"))]
+    fn get_speaker_at(&self, _time: f32) -> Option<usize> {
+        None
     }
 
     fn dispatch_segment(&mut self, segment_audio: Vec<f32>, start_time: f32, end_time: f32) {
@@ -372,7 +427,7 @@ impl StreamingTranscriber for PauseParallelTDT {
                 self.config.num_threads,
                 (self.config.pause_threshold_secs * 1000.0) as u32
             ),
-            supports_diarization: false,
+            supports_diarization: self.has_diarization(),
             languages: vec!["en".to_string()],
             is_loaded: true,
         }
@@ -387,6 +442,12 @@ impl StreamingTranscriber for PauseParallelTDT {
     }
 
     fn push_audio(&mut self, samples: &[f32]) -> Result<StreamingChunkResult> {
+        // Push audio to diarizer for speaker tracking (if available)
+        #[cfg(feature = "sortformer")]
+        if let Some(diarizer) = &mut self.diarizer {
+            let _ = diarizer.push_audio(samples);
+        }
+
         let current_time = self.total_samples as f32 / SAMPLE_RATE as f32;
         let chunk_duration = samples.len() as f32 / SAMPLE_RATE as f32;
         let chunk_end_time = current_time + chunk_duration;
@@ -440,7 +501,13 @@ impl StreamingTranscriber for PauseParallelTDT {
         }
 
         self.collect_results();
-        let segments = self.merger.process(&mut self.pending_results);
+        let mut segments = self.merger.process(&mut self.pending_results);
+
+        // Add speaker info to segments
+        for segment in &mut segments {
+            let mid_time = (segment.start_time + segment.end_time) / 2.0;
+            segment.speaker = self.get_speaker_at(mid_time);
+        }
 
         Ok(StreamingChunkResult {
             segments,
@@ -478,15 +545,26 @@ impl StreamingTranscriber for PauseParallelTDT {
         for (_, result) in remaining {
             let text = truncate_hallucination(&result.text);
             if !text.is_empty() {
+                let mid_time = (result.start_time + result.end_time) / 2.0;
+                let speaker = self.get_speaker_at(mid_time);
+
                 segments.push(TranscriptionSegment {
                     text,
                     start_time: result.start_time,
                     end_time: result.end_time,
-                    speaker: None,
+                    speaker,
                     confidence: Some(1.0),
                     is_final: true,
                     inference_time_ms: Some(result.inference_time_ms),
                 });
+            }
+        }
+
+        // Add speaker info to segments from merger
+        for segment in &mut segments {
+            if segment.speaker.is_none() {
+                let mid_time = (segment.start_time + segment.end_time) / 2.0;
+                segment.speaker = self.get_speaker_at(mid_time);
             }
         }
 

@@ -16,3 +16,5 @@ DS_Store
 **/*.onnx.data
 **/*.onnx.bak
 **/*.onnx_data
+start.sh
+**.wav

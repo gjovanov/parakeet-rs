@@ -91,12 +91,15 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
     };
 
     if !turn_server.is_empty() {
+        eprintln!("[WebRTC] Configuring TURN: {} (user: {})", turn_server, turn_username);
         ice_servers.push(RTCIceServer {
             urls: vec![turn_server.clone()],
             username: turn_username,
             credential: turn_password,
             credential_type: RTCIceCredentialType::Password,
         });
+    } else {
+        eprintln!("[WebRTC] No TURN server configured");
     }
 
     // Use relay-only policy for VPN/Transit Gateway/complex NAT setups
@@ -173,6 +176,17 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
                 }
             }
         })
+    }));
+
+    // Handle ICE gathering state changes
+    let client_id_gather = client_id.clone();
+    peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
+        eprintln!(
+            "[WebRTC] {} ICE gathering state: {:?}",
+            &client_id_gather[..8],
+            state
+        );
+        Box::pin(async {})
     }));
 
     // Handle connection state changes

@@ -288,6 +288,15 @@ export class WebRTCClient {
 
       case 'ice-candidate':
         if (msg.candidate) {
+          // Filter out Docker network ICE candidates (172.17.x.x, 172.18.x.x, etc.)
+          const candidateStr = msg.candidate.candidate || '';
+          const dockerNetworkPattern = /\s172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+\s/;
+
+          if (dockerNetworkPattern.test(candidateStr)) {
+            console.log('[WebRTC] Skipping Docker network ICE candidate:', candidateStr);
+            break;
+          }
+
           console.log('[WebRTC] Received ICE candidate from server:', msg.candidate);
           try {
             await this.pc.addIceCandidate(msg.candidate);
@@ -343,6 +352,27 @@ export class WebRTCClient {
         // SRT stream reconnected
         console.log('[WebRTC] SRT reconnected');
         this.emit('srtReconnected');
+        break;
+
+      case 'vod_progress':
+        // VoD chunk processing progress
+        console.log('[WebRTC] VoD progress:', msg);
+        this.emit('vodProgress', {
+          totalChunks: msg.total_chunks,
+          completedChunks: msg.completed_chunks,
+          currentChunk: msg.current_chunk,
+          percent: msg.percent,
+        });
+        break;
+
+      case 'vod_complete':
+        // VoD processing complete
+        console.log('[WebRTC] VoD complete:', msg);
+        this.emit('vodComplete', {
+          transcriptAvailable: msg.transcript_available,
+          durationSecs: msg.duration_secs,
+          segmentCount: msg.segment_count,
+        });
         break;
 
       default:

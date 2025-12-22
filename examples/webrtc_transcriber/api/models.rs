@@ -110,6 +110,11 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
             name: "Pause-Parallel (ordered)",
             description: "Pause-triggered parallel inference. Dispatches on speech pauses for natural boundaries. Ordered output. Works with both models.",
         },
+        ModeInfo {
+            id: "vod",
+            name: "VoD Batch (10-min chunks)",
+            description: "Batch transcription for pre-recorded files. Processes in 10-minute chunks with overlap and deduplication. Generates downloadable transcript.json.",
+        },
     ];
     Json(ApiResponse::success(modes))
 }

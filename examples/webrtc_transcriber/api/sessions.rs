@@ -116,6 +116,13 @@ pub struct CreateSessionRequest {
     /// Pause detection configuration (only used for pause-related modes)
     #[serde(default)]
     pub pause_config: Option<PauseConfig>,
+    /// Sentence completion mode ("off", "minimal", "balanced", "complete")
+    #[serde(default = "default_sentence_completion")]
+    pub sentence_completion: String,
+}
+
+fn default_sentence_completion() -> String {
+    "minimal".to_string()
 }
 
 fn default_language() -> String {
@@ -218,7 +225,8 @@ pub async fn create_session(
                     &language,
                     &noise_cancellation,
                     req.diarization,
-                    diarization_model,
+                    diarization_model.clone(),
+                    &req.sentence_completion,
                 )
                 .await
         }
@@ -251,6 +259,7 @@ pub async fn create_session(
                     &noise_cancellation,
                     req.diarization,
                     diarization_model,
+                    &req.sentence_completion,
                 )
                 .await
         }
@@ -354,6 +363,75 @@ pub async fn stop_session(
     Json(ApiResponse::success(()))
 }
 
+/// Get transcript for a completed VoD session
+pub async fn get_transcript(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    // Get the session
+    let session = match state.session_manager.get_session(&id).await {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::<()>::error("Session not found")),
+            )
+                .into_response();
+        }
+    };
+
+    // Check if transcript is available
+    let transcript_path = match session.transcript_path().await {
+        Some(path) => path,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::<()>::error("Transcript not available")),
+            )
+                .into_response();
+        }
+    };
+
+    // Read the transcript file
+    match tokio::fs::read_to_string(&transcript_path).await {
+        Ok(content) => {
+            // Get filename for Content-Disposition
+            let filename = transcript_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("transcript.json");
+
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        &format!("attachment; filename=\"{}\"", filename),
+                    ),
+                ],
+                content,
+            )
+                .into_response()
+        }
+        Err(e) => {
+            eprintln!(
+                "[Session {}] Failed to read transcript: {}",
+                id, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<()>::error("Failed to read transcript")),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Start a session
 pub async fn start_session(
     State(state): State<Arc<AppState>>,
@@ -428,6 +506,7 @@ pub async fn start_session(
     let exec_config = model.exec_config.clone();
     let model_id = session.model_id.clone();
     let language = session.language.clone();
+    let sentence_completion = session.sentence_completion.clone();
 
     // Determine audio source type
     let audio_source = if let Some(srt_url) = &session.srt_url {
@@ -450,6 +529,7 @@ pub async fn start_session(
             ffmpeg_pid,
             parallel_config,
             pause_config,
+            sentence_completion,
         );
     });
 

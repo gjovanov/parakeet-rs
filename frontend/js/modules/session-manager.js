@@ -150,6 +150,7 @@ export class SessionManager {
    * @param {string} [options.noiseCancellation='none'] - Noise cancellation type
    * @param {boolean} [options.diarization=false] - Enable diarization
    * @param {Object} [options.pauseConfig] - Pause detection config
+   * @param {string} [options.sentenceCompletion='minimal'] - Sentence completion mode
    */
   async createSession(modelId, options = {}) {
     const {
@@ -160,7 +161,8 @@ export class SessionManager {
       parallelConfig = null,
       noiseCancellation = 'none',
       diarization = false,
-      pauseConfig = null
+      pauseConfig = null,
+      sentenceCompletion = 'minimal'
     } = options;
 
     try {
@@ -169,7 +171,8 @@ export class SessionManager {
         mode,
         language,
         noise_cancellation: noiseCancellation,
-        diarization: diarization
+        diarization: diarization,
+        sentence_completion: sentenceCompletion
       };
 
       // Add source - either media file or SRT channel (mutually exclusive)
@@ -319,6 +322,47 @@ export class SessionManager {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     return `${protocol}//${host}/ws/${sessionId}`;
+  }
+
+  /**
+   * Download transcript for a completed VoD session
+   * @param {string} sessionId - Session ID
+   * @returns {Promise<void>}
+   */
+  async downloadTranscript(sessionId) {
+    try {
+      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/transcript`);
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({ error: 'Download failed' }));
+        throw new Error(json.error || 'Failed to download transcript');
+      }
+
+      // Get filename from Content-Disposition header or use default
+      const disposition = res.headers.get('Content-Disposition');
+      let filename = 'transcript.json';
+      if (disposition) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match) {
+          filename = match[1];
+        }
+      }
+
+      // Download the file
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      this.emit('transcriptDownloaded', { sessionId, filename });
+    } catch (e) {
+      console.error('Failed to download transcript:', e);
+      throw e;
+    }
   }
 }
 

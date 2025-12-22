@@ -22,6 +22,9 @@ use crate::streaming_transcriber::{ModelInfo, StreamingChunkResult, StreamingTra
 use std::collections::VecDeque;
 use std::path::Path;
 
+#[cfg(feature = "sortformer")]
+use crate::sortformer_stream::SortformerStream;
+
 const SAMPLE_RATE: usize = 16000;
 
 /// Minimum number of consecutive matches before confirming text as final
@@ -86,6 +89,10 @@ pub struct RealtimeCanary {
 
     /// Segments pending to be emitted as final
     pending_final_segments: Vec<(String, f32, f32)>, // (text, start_time, end_time)
+
+    /// Optional speaker diarizer (requires sortformer feature)
+    #[cfg(feature = "sortformer")]
+    diarizer: Option<SortformerStream>,
 }
 
 impl RealtimeCanary {
@@ -124,11 +131,100 @@ impl RealtimeCanary {
             pending_text: String::new(),
             pending_stable_count: 0,
             pending_final_segments: Vec::new(),
+            #[cfg(feature = "sortformer")]
+            diarizer: None,
         })
+    }
+
+    /// Create a new streaming Canary transcriber with optional diarization
+    #[cfg(feature = "sortformer")]
+    pub fn new_with_diarization<P1: AsRef<Path>, P2: AsRef<Path>>(
+        model_path: P1,
+        diar_path: Option<P2>,
+        exec_config: Option<ExecutionConfig>,
+        config: Option<RealtimeCanaryConfig>,
+    ) -> Result<Self> {
+        let config = config.unwrap_or_default();
+
+        let canary_config = CanaryConfig {
+            language: config.language.clone(),
+            ..Default::default()
+        };
+
+        let model = CanaryModel::from_pretrained(&model_path, exec_config.clone(), Some(canary_config))?;
+
+        let buffer_size_samples = (config.buffer_size_secs * SAMPLE_RATE as f32) as usize;
+        let process_interval_samples = (config.process_interval_secs * SAMPLE_RATE as f32) as usize;
+        let min_audio_samples = (config.min_audio_secs * SAMPLE_RATE as f32) as usize;
+
+        // Create diarizer if path provided
+        let diarizer = if let Some(diar_path) = diar_path {
+            eprintln!("[RealtimeCanary] Creating diarizer from {:?}", diar_path.as_ref());
+            Some(SortformerStream::with_config(
+                diar_path,
+                exec_config,
+                Default::default(),
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            model,
+            config,
+            audio_buffer: VecDeque::with_capacity(buffer_size_samples),
+            buffer_size_samples,
+            total_samples_received: 0,
+            samples_since_last_process: 0,
+            process_interval_samples,
+            min_audio_samples,
+            last_transcription: String::new(),
+            confirmed_text: String::new(),
+            confirmed_word_count: 0,
+            confirmed_end_time: 0.0,
+            pending_text: String::new(),
+            pending_stable_count: 0,
+            pending_final_segments: Vec::new(),
+            diarizer,
+        })
+    }
+
+    /// Check if diarization is available
+    #[cfg(feature = "sortformer")]
+    pub fn has_diarization(&self) -> bool {
+        self.diarizer.is_some()
+    }
+
+    /// Check if diarization is available (always false without sortformer feature)
+    #[cfg(not(feature = "sortformer"))]
+    pub fn has_diarization(&self) -> bool {
+        false
+    }
+
+    /// Get speaker at a given time
+    #[cfg(feature = "sortformer")]
+    fn get_speaker_at(&self, time: f32) -> Option<usize> {
+        if let Some(diarizer) = &self.diarizer {
+            diarizer.get_speaker_at(time)
+        } else {
+            None
+        }
+    }
+
+    /// Get speaker at a given time (always None without sortformer feature)
+    #[cfg(not(feature = "sortformer"))]
+    fn get_speaker_at(&self, _time: f32) -> Option<usize> {
+        None
     }
 
     /// Push audio samples and get transcription results
     pub fn push_audio(&mut self, samples: &[f32]) -> Result<CanaryChunkResult> {
+        // Push audio to diarizer for speaker tracking (if available)
+        #[cfg(feature = "sortformer")]
+        if let Some(diarizer) = &mut self.diarizer {
+            let _ = diarizer.push_audio(samples);
+        }
+
         // Add to buffer
         self.audio_buffer.extend(samples.iter().copied());
         self.total_samples_received += samples.len();
@@ -344,7 +440,7 @@ impl StreamingTranscriber for RealtimeCanary {
             id: "canary-1b".to_string(),
             display_name: "Canary 1B v2".to_string(),
             description: "NVIDIA's Canary 1B encoder-decoder model for multilingual ASR".to_string(),
-            supports_diarization: false,
+            supports_diarization: self.has_diarization(),
             languages: vec![
                 "en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string(),
                 "it".to_string(), "pt".to_string(), "nl".to_string(), "pl".to_string(),
@@ -361,11 +457,15 @@ impl StreamingTranscriber for RealtimeCanary {
         // First, emit any confirmed (final) segments
         let final_segs = self.take_final_segments();
         for (text, start, end) in final_segs {
+            // Get speaker from diarizer at the midpoint of this segment
+            let mid_time = (start + end) / 2.0;
+            let speaker = self.get_speaker_at(mid_time);
+
             segments.push(TranscriptionSegment {
                 text,
                 start_time: start,
                 end_time: end,
-                speaker: None, // Canary doesn't support diarization
+                speaker,
                 confidence: None,
                 is_final: true,
                 inference_time_ms: None,
@@ -374,11 +474,16 @@ impl StreamingTranscriber for RealtimeCanary {
 
         // Then, emit the partial segment if there's new text
         if !result.text.is_empty() {
+            let start_time = self.confirmed_end_time;
+            let end_time = self.total_duration();
+            let mid_time = (start_time + end_time) / 2.0;
+            let speaker = self.get_speaker_at(mid_time);
+
             segments.push(TranscriptionSegment {
                 text: result.text,
-                start_time: self.confirmed_end_time,
-                end_time: self.total_duration(),
-                speaker: None,
+                start_time,
+                end_time,
+                speaker,
                 confidence: None,
                 is_final: false,
                 inference_time_ms: None,
@@ -403,11 +508,15 @@ impl StreamingTranscriber for RealtimeCanary {
         let result = RealtimeCanary::finalize(self)?;
 
         let segments = if !result.text.is_empty() {
+            let end_time = self.total_duration();
+            let mid_time = end_time / 2.0;
+            let speaker = self.get_speaker_at(mid_time);
+
             vec![TranscriptionSegment {
                 text: result.text,
                 start_time: 0.0,
-                end_time: self.total_duration(),
-                speaker: None,
+                end_time,
+                speaker,
                 confidence: None,
                 is_final: true,
                 inference_time_ms: None,

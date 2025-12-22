@@ -130,15 +130,15 @@ impl RealtimeTDTConfig {
     }
 
     /// Speedy pause-based mode: optimized for lower latency while maintaining quality
-    /// Uses shorter pause detection and faster processing
+    /// Uses pause detection with balanced threshold for complete sentences
     pub fn speedy() -> Self {
         Self {
             buffer_size_secs: 8.0,       // Slightly smaller buffer
             process_interval_secs: 0.2,  // Process very frequently
-            confirm_threshold_secs: 0.4, // Shorter fallback threshold
+            confirm_threshold_secs: 0.5, // Fallback threshold
             pause_based_confirm: true,   // Enable pause detection
-            pause_threshold_secs: 0.25,  // 250ms pause triggers confirmation (faster)
-            silence_energy_threshold: 0.01, // Slightly higher threshold (less sensitive)
+            pause_threshold_secs: 0.6,   // 600ms pause for better sentence boundaries
+            silence_energy_threshold: 0.008, // Balanced sensitivity
             lookahead_mode: false,
             lookahead_segments: 2,
         }

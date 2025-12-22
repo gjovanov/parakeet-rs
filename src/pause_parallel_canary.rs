@@ -27,6 +27,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[cfg(feature = "sortformer")]
+use crate::sortformer_stream::SortformerStream;
+
 const SAMPLE_RATE: usize = 16000;
 
 /// Configuration for pause-based parallel transcription
@@ -286,6 +289,10 @@ pub struct PauseParallelCanary {
 
     /// Jobs in flight counter
     jobs_in_flight: Arc<AtomicU64>,
+
+    /// Diarizer for speaker identification
+    #[cfg(feature = "sortformer")]
+    diarizer: Option<SortformerStream>,
 }
 
 impl PauseParallelCanary {
@@ -426,7 +433,44 @@ impl PauseParallelCanary {
             merger: OrderedMerger::new(),
             total_samples: 0,
             jobs_in_flight,
+            #[cfg(feature = "sortformer")]
+            diarizer: None,
         })
+    }
+
+    /// Create a new pause-based parallel transcriber with optional diarization
+    #[cfg(feature = "sortformer")]
+    pub fn new_with_diarization<P1: AsRef<Path>, P2: AsRef<Path>>(
+        model_dir: P1,
+        diar_model_path: Option<P2>,
+        exec_config: Option<ModelConfig>,
+        config: Option<PauseParallelConfig>,
+    ) -> Result<Self> {
+        let mut transcriber = Self::new(model_dir.as_ref(), exec_config.clone(), config)?;
+
+        if let Some(diar_path) = diar_model_path {
+            eprintln!("[PauseParallelCanary] Creating diarizer from {:?}", diar_path.as_ref());
+            transcriber.diarizer = Some(SortformerStream::new(diar_path)?);
+        }
+
+        Ok(transcriber)
+    }
+
+    /// Check if diarization is available
+    pub fn has_diarization(&self) -> bool {
+        #[cfg(feature = "sortformer")]
+        return self.diarizer.is_some();
+        #[cfg(not(feature = "sortformer"))]
+        return false;
+    }
+
+    /// Get speaker at a given time
+    fn get_speaker_at(&self, time: f32) -> Option<usize> {
+        #[cfg(feature = "sortformer")]
+        if let Some(diarizer) = &self.diarizer {
+            return diarizer.get_speaker_at(time);
+        }
+        None
     }
 
     /// Dispatch a segment as a job to workers
@@ -493,7 +537,7 @@ impl StreamingTranscriber for PauseParallelCanary {
                 self.config.num_threads,
                 format!("{}ms", (self.config.pause_threshold_secs * 1000.0) as u32)
             ),
-            supports_diarization: false,
+            supports_diarization: self.has_diarization(),
             languages: vec![self.config.language.clone()],
             is_loaded: true,
         }
@@ -508,6 +552,12 @@ impl StreamingTranscriber for PauseParallelCanary {
     }
 
     fn push_audio(&mut self, samples: &[f32]) -> Result<StreamingChunkResult> {
+        // Push audio to diarizer if available
+        #[cfg(feature = "sortformer")]
+        if let Some(diarizer) = &mut self.diarizer {
+            let _ = diarizer.push_audio(samples);
+        }
+
         let current_time = self.total_samples as f32 / SAMPLE_RATE as f32;
         let chunk_duration = samples.len() as f32 / SAMPLE_RATE as f32;
         let chunk_end_time = current_time + chunk_duration;
@@ -574,7 +624,13 @@ impl StreamingTranscriber for PauseParallelCanary {
         self.collect_results();
 
         // Process and emit ordered segments
-        let segments = self.merger.process(&mut self.pending_results);
+        let mut segments = self.merger.process(&mut self.pending_results);
+
+        // Add speaker info to segments if diarization is available
+        for segment in &mut segments {
+            let mid_time = (segment.start_time + segment.end_time) / 2.0;
+            segment.speaker = self.get_speaker_at(mid_time);
+        }
 
         Ok(StreamingChunkResult {
             segments,
@@ -622,11 +678,12 @@ impl StreamingTranscriber for PauseParallelCanary {
         for (_, result) in remaining {
             let text = truncate_hallucination(&result.text);
             if !text.is_empty() {
+                let mid_time = (result.start_time + result.end_time) / 2.0;
                 segments.push(TranscriptionSegment {
                     text,
                     start_time: result.start_time,
                     end_time: result.end_time,
-                    speaker: None,
+                    speaker: self.get_speaker_at(mid_time),
                     confidence: Some(1.0),
                     is_final: true,
                     inference_time_ms: Some(result.inference_time_ms),
@@ -636,6 +693,14 @@ impl StreamingTranscriber for PauseParallelCanary {
 
         // Sort by start time
         segments.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
+
+        // Add speaker info to all segments if diarization is available
+        for segment in &mut segments {
+            if segment.speaker.is_none() {
+                let mid_time = (segment.start_time + segment.end_time) / 2.0;
+                segment.speaker = self.get_speaker_at(mid_time);
+            }
+        }
 
         eprintln!("[PauseParallelCanary] Finalized with {} segments", segments.len());
 

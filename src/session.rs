@@ -101,6 +101,27 @@ pub struct SessionInfo {
     /// SRT URL (for SRT streams)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub srt_url: Option<String>,
+    /// Sentence completion mode ("off", "minimal", "balanced", "complete")
+    #[serde(default = "default_sentence_completion")]
+    pub sentence_completion: String,
+    /// Whether transcript is available for download (VoD mode)
+    #[serde(default)]
+    pub transcript_available: bool,
+    /// VoD progress information (only for VoD mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vod_progress: Option<VodProgressInfo>,
+}
+
+/// VoD progress information for API responses
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VodProgressInfo {
+    pub total_chunks: usize,
+    pub completed_chunks: usize,
+    pub percent: f32,
+}
+
+fn default_sentence_completion() -> String {
+    "minimal".to_string()
 }
 
 fn default_language() -> String {
@@ -157,6 +178,12 @@ pub struct TranscriptionSession {
     pub srt_channel_name: Option<String>,
     /// SRT URL (for SRT streams)
     pub srt_url: Option<String>,
+    /// Sentence completion mode ("off", "minimal", "balanced", "complete")
+    pub sentence_completion: String,
+    /// Path to transcript.json (VoD mode)
+    transcript_path: RwLock<Option<PathBuf>>,
+    /// VoD progress (VoD mode)
+    vod_progress: RwLock<Option<VodProgressInfo>>,
 }
 
 impl TranscriptionSession {
@@ -173,6 +200,7 @@ impl TranscriptionSession {
         noise_cancellation: String,
         diarization: bool,
         diarization_model: Option<String>,
+        sentence_completion: String,
     ) -> Self {
         let (subtitle_tx, _) = broadcast::channel(1000);
         let (status_tx, _) = broadcast::channel(100);
@@ -205,6 +233,9 @@ impl TranscriptionSession {
             srt_channel_id: None,
             srt_channel_name: None,
             srt_url: None,
+            sentence_completion,
+            transcript_path: RwLock::new(None),
+            vod_progress: RwLock::new(None),
         }
     }
 
@@ -220,6 +251,7 @@ impl TranscriptionSession {
         noise_cancellation: String,
         diarization: bool,
         diarization_model: Option<String>,
+        sentence_completion: String,
     ) -> Self {
         let (subtitle_tx, _) = broadcast::channel(1000);
         let (status_tx, _) = broadcast::channel(100);
@@ -252,6 +284,9 @@ impl TranscriptionSession {
             srt_channel_id: Some(srt_channel_id),
             srt_channel_name: Some(srt_channel_name),
             srt_url: Some(srt_url),
+            sentence_completion,
+            transcript_path: RwLock::new(None),
+            vod_progress: RwLock::new(None),
         }
     }
 
@@ -282,6 +317,9 @@ impl TranscriptionSession {
             srt_channel_id: self.srt_channel_id,
             srt_channel_name: self.srt_channel_name.clone(),
             srt_url: self.srt_url.clone(),
+            sentence_completion: self.sentence_completion.clone(),
+            transcript_available: self.transcript_path.read().await.is_some(),
+            vod_progress: self.vod_progress.read().await.clone(),
         }
     }
 
@@ -357,6 +395,35 @@ impl TranscriptionSession {
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
+
+    /// Set transcript path (VoD mode)
+    pub async fn set_transcript_path(&self, path: PathBuf) {
+        *self.transcript_path.write().await = Some(path);
+    }
+
+    /// Get transcript path (VoD mode)
+    pub async fn transcript_path(&self) -> Option<PathBuf> {
+        self.transcript_path.read().await.clone()
+    }
+
+    /// Set VoD progress
+    pub async fn set_vod_progress(&self, total: usize, completed: usize) {
+        let percent = if total > 0 {
+            (completed as f32 / total as f32) * 100.0
+        } else {
+            0.0
+        };
+        *self.vod_progress.write().await = Some(VodProgressInfo {
+            total_chunks: total,
+            completed_chunks: completed,
+            percent,
+        });
+    }
+
+    /// Clear VoD progress
+    pub async fn clear_vod_progress(&self) {
+        *self.vod_progress.write().await = None;
+    }
 }
 
 /// Manager for transcription sessions
@@ -409,6 +476,7 @@ impl SessionManager {
         noise_cancellation: &str,
         diarization: bool,
         diarization_model: Option<String>,
+        sentence_completion: &str,
     ) -> Result<Arc<TranscriptionSession>> {
         // Check session limit
         let current_count = self.sessions.read().await.len();
@@ -458,6 +526,7 @@ impl SessionManager {
             noise_cancellation.to_string(),
             diarization,
             diarization_model,
+            sentence_completion.to_string(),
         );
 
         let session = Arc::new(session);
@@ -488,6 +557,7 @@ impl SessionManager {
         noise_cancellation: &str,
         diarization: bool,
         diarization_model: Option<String>,
+        sentence_completion: &str,
     ) -> Result<Arc<TranscriptionSession>> {
         // Check session limit
         let current_count = self.sessions.read().await.len();
@@ -525,6 +595,7 @@ impl SessionManager {
             noise_cancellation.to_string(),
             diarization,
             diarization_model,
+            sentence_completion.to_string(),
         );
 
         let session = Arc::new(session);

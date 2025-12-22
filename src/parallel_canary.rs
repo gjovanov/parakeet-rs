@@ -29,6 +29,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+#[cfg(feature = "sortformer")]
+use crate::sortformer_stream::SortformerStream;
+
 /// Configuration for parallel transcription
 #[derive(Debug, Clone)]
 pub struct ParallelCanaryConfig {
@@ -342,6 +345,10 @@ pub struct ParallelCanary {
 
     /// Total samples received
     total_samples: usize,
+
+    /// Diarizer for speaker identification
+    #[cfg(feature = "sortformer")]
+    diarizer: Option<SortformerStream>,
 }
 
 impl ParallelCanary {
@@ -483,7 +490,44 @@ impl ParallelCanary {
             pending_results: BTreeMap::new(),
             merger: ResultMerger::new(config.buffer_size_chunks),
             total_samples: 0,
+            #[cfg(feature = "sortformer")]
+            diarizer: None,
         })
+    }
+
+    /// Create a new parallel transcriber with optional diarization
+    #[cfg(feature = "sortformer")]
+    pub fn new_with_diarization<P1: AsRef<Path>, P2: AsRef<Path>>(
+        model_dir: P1,
+        diar_model_path: Option<P2>,
+        exec_config: Option<ModelConfig>,
+        config: Option<ParallelCanaryConfig>,
+    ) -> Result<Self> {
+        let mut transcriber = Self::new(model_dir.as_ref(), exec_config.clone(), config)?;
+
+        if let Some(diar_path) = diar_model_path {
+            eprintln!("[ParallelCanary] Creating diarizer from {:?}", diar_path.as_ref());
+            transcriber.diarizer = Some(SortformerStream::new(diar_path)?);
+        }
+
+        Ok(transcriber)
+    }
+
+    /// Check if diarization is available
+    pub fn has_diarization(&self) -> bool {
+        #[cfg(feature = "sortformer")]
+        return self.diarizer.is_some();
+        #[cfg(not(feature = "sortformer"))]
+        return false;
+    }
+
+    /// Get speaker at a given time
+    fn get_speaker_at(&self, time: f32) -> Option<usize> {
+        #[cfg(feature = "sortformer")]
+        if let Some(diarizer) = &self.diarizer {
+            return diarizer.get_speaker_at(time);
+        }
+        None
     }
 
     /// Dispatch a job to the next worker
@@ -568,7 +612,7 @@ impl StreamingTranscriber for ParallelCanary {
                 "Parallel sliding window transcription with {} threads and {} second buffer",
                 self.config.num_threads, self.config.buffer_size_chunks
             ),
-            supports_diarization: false,
+            supports_diarization: self.has_diarization(),
             languages: vec![self.config.language.clone()],
             is_loaded: true,
         }
@@ -583,6 +627,12 @@ impl StreamingTranscriber for ParallelCanary {
     }
 
     fn push_audio(&mut self, samples: &[f32]) -> Result<StreamingChunkResult> {
+        // Push audio to diarizer if available
+        #[cfg(feature = "sortformer")]
+        if let Some(diarizer) = &mut self.diarizer {
+            let _ = diarizer.push_audio(samples);
+        }
+
         self.total_samples += samples.len();
 
         // Accumulate samples into current chunk
@@ -621,6 +671,12 @@ impl StreamingTranscriber for ParallelCanary {
             self.config.buffer_size_chunks,
         );
         segments.extend(merged);
+
+        // Add speaker info to segments if diarization is available
+        for segment in &mut segments {
+            let mid_time = (segment.start_time + segment.end_time) / 2.0;
+            segment.speaker = self.get_speaker_at(mid_time);
+        }
 
         Ok(StreamingChunkResult {
             segments,
@@ -668,11 +724,12 @@ impl StreamingTranscriber for ParallelCanary {
         for (_, result) in pending {
             let text = truncate_hallucination(&result.text);
             if !text.is_empty() {
+                let mid_time = (result.start_time + result.end_time) / 2.0;
                 segments.push(TranscriptionSegment {
                     text,
                     start_time: result.start_time,
                     end_time: result.end_time,
-                    speaker: None,
+                    speaker: self.get_speaker_at(mid_time),
                     confidence: Some(1.0),
                     is_final: true,
                     inference_time_ms: Some(result.inference_time_ms),
@@ -682,6 +739,14 @@ impl StreamingTranscriber for ParallelCanary {
 
         // Sort by start time
         segments.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap());
+
+        // Add speaker info to any segments that don't have it
+        for segment in &mut segments {
+            if segment.speaker.is_none() {
+                let mid_time = (segment.start_time + segment.end_time) / 2.0;
+                segment.speaker = self.get_speaker_at(mid_time);
+            }
+        }
 
         eprintln!("[ParallelCanary] Finalized with {} segments", segments.len());
 

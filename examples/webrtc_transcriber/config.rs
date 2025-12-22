@@ -24,6 +24,10 @@ pub enum LatencyMode {
     Parallel,
     /// Pause-based parallel: dispatch on pause detection, ordered output
     PauseParallel,
+    /// Confidence mode: AWS Transcribe-like streaming with confidence filtering
+    Confidence,
+    /// VoD batch mode: process entire file in 10-min chunks with deduplication
+    Vod,
 }
 
 impl LatencyMode {
@@ -41,6 +45,8 @@ impl LatencyMode {
             LatencyMode::Asr => "asr",
             LatencyMode::Parallel => "parallel",
             LatencyMode::PauseParallel => "pause_parallel",
+            LatencyMode::Confidence => "confidence",
+            LatencyMode::Vod => "vod",
         }
     }
 
@@ -58,6 +64,8 @@ impl LatencyMode {
             LatencyMode::Asr => "ASR (Pure streaming)",
             LatencyMode::Parallel => "Parallel Sliding Window (8 threads)",
             LatencyMode::PauseParallel => "Pause-Parallel (8 threads, ordered)",
+            LatencyMode::Confidence => "Confidence (AWS-style streaming)",
+            LatencyMode::Vod => "VoD Batch (10-min chunks)",
         }
     }
 
@@ -90,7 +98,19 @@ impl LatencyMode {
             LatencyMode::Asr,
             LatencyMode::Parallel,
             LatencyMode::PauseParallel,
+            LatencyMode::Confidence,
+            LatencyMode::Vod,
         ]
+    }
+
+    /// Check if this mode is confidence-based
+    pub fn is_confidence_mode(&self) -> bool {
+        matches!(self, LatencyMode::Confidence)
+    }
+
+    /// Check if this mode is VoD batch mode
+    pub fn is_vod_mode(&self) -> bool {
+        matches!(self, LatencyMode::Vod)
     }
 }
 

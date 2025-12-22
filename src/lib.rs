@@ -78,6 +78,8 @@ pub mod realtime_canary_vad;
 #[cfg(feature = "sortformer")]
 pub mod realtime_tdt_vad;
 pub mod noise_cancellation;
+pub mod sentence_buffer;
+pub mod vod_transcriber;
 mod timestamps;
 mod transcriber;
 mod vocab;
@@ -126,7 +128,7 @@ pub use media_manager::{
 
 pub use session::{
     MediaSourceType, SessionInfo, SessionManager, SessionState, SharedSessionManager,
-    TranscriptionSession,
+    TranscriptionSession, VodProgressInfo,
 };
 
 pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};
@@ -142,6 +144,15 @@ pub use realtime_canary_vad::{CanaryVadResult, RealtimeCanaryVad, RealtimeCanary
 
 #[cfg(feature = "sortformer")]
 pub use realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig, TdtVadResult};
+
+// Sentence buffer exports
+pub use sentence_buffer::{SentenceBuffer, SentenceBufferConfig, SentenceBufferMode};
+
+// VoD transcriber exports
+pub use vod_transcriber::{
+    VodConfig, VodProgress, VodSegment, VodTranscript, VodTranscriberCanary, VodTranscriberTDT,
+    VodWord,
+};
 
 // Noise cancellation exports
 pub use noise_cancellation::{
