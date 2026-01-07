@@ -139,6 +139,9 @@ export class WebSocketClient {
         case 'subtitle':
           this.emit('subtitle', {
             text: message.text,
+            growingText: message.growing_text,
+            delta: message.delta,
+            tailChanged: message.tail_changed,
             speaker: message.speaker,
             start: message.start,
             end: message.end,

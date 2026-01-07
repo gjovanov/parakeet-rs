@@ -79,6 +79,7 @@ pub mod realtime_canary_vad;
 pub mod realtime_tdt_vad;
 pub mod noise_cancellation;
 pub mod sentence_buffer;
+pub mod growing_text;
 pub mod vod_transcriber;
 mod timestamps;
 mod transcriber;
@@ -148,10 +149,15 @@ pub use realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig, TdtVadResult};
 // Sentence buffer exports
 pub use sentence_buffer::{SentenceBuffer, SentenceBufferConfig, SentenceBufferMode};
 
+// Growing text merger exports
+pub use growing_text::{
+    FinalizedSentence, GrowingTextConfig, GrowingTextMerger, GrowingTextResult,
+};
+
 // VoD transcriber exports
 pub use vod_transcriber::{
-    VodConfig, VodProgress, VodSegment, VodTranscript, VodTranscriberCanary, VodTranscriberTDT,
-    VodWord,
+    SegmentCallback, VodConfig, VodProgress, VodSegment, VodTranscript, VodTranscriberCanary,
+    VodTranscriberTDT, VodWord,
 };
 
 // Noise cancellation exports

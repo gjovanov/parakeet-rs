@@ -72,6 +72,9 @@ export class WebRTCClient {
    * @param {HTMLAudioElement} audioElement - Audio element for playback
    */
   async connect(audioElement) {
+    console.log('[WebRTC] connect() called with audioElement:', audioElement);
+    console.log('[WebRTC] Connecting to:', this.wsUrl);
+
     if (audioElement) {
       this.audioElement = audioElement;
     }
@@ -80,6 +83,7 @@ export class WebRTCClient {
 
     return new Promise((resolve, reject) => {
       // Create WebSocket for signaling
+      console.log('[WebRTC] Creating WebSocket...');
       this.ws = new WebSocket(this.wsUrl);
 
       this.ws.onopen = () => {
@@ -311,6 +315,9 @@ export class WebRTCClient {
         console.log('[WebRTC] Received subtitle message:', msg);
         this.emit('subtitle', {
           text: msg.text,
+          growingText: msg.growing_text,
+          delta: msg.delta,
+          tailChanged: msg.tail_changed,
           speaker: msg.speaker,
           start: msg.start,
           end: msg.end,

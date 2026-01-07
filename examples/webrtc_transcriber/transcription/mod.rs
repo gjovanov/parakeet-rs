@@ -3,7 +3,8 @@
 use crate::api::sessions::{ParallelConfig, PauseConfig};
 use crate::webrtc_handlers::audio::OpusEncoder;
 use parakeet_rs::noise_cancellation::{create_noise_canceller, NoiseCancellationType};
-use parakeet_rs::{SessionState, TranscriptionSession, VodConfig, VodTranscriberCanary, VodTranscriberTDT};
+use parakeet_rs::growing_text::GrowingTextMerger;
+use parakeet_rs::{SessionState, TranscriptionSession, VodConfig, VodSegment, VodTranscriberCanary, VodTranscriberTDT};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -613,6 +614,13 @@ pub fn run_session_transcription(
             transcription_session.id, buffer_mode.as_str()
         );
 
+        // Create growing text merger for incremental transcript display
+        let mut growing_merger = GrowingTextMerger::new();
+        eprintln!(
+            "[Session {}] Growing text merger enabled",
+            transcription_session.id
+        );
+
         // Process audio samples as they arrive
         let mut chunks_processed = 0u64;
         while transcription_running.load(Ordering::SeqCst) {
@@ -661,7 +669,7 @@ pub fn run_session_transcription(
                     // Process segments through sentence buffer
                     for segment in result.segments {
                         if let Some(merged) = sentence_buffer.push(segment) {
-                            emit_streaming_segments(&transcription_session, &[merged]);
+                            emit_streaming_segments(&transcription_session, &[merged], &mut growing_merger);
                         }
                     }
                 }
@@ -705,12 +713,12 @@ pub fn run_session_transcription(
                     // Process final segments through buffer
                     for segment in result.segments {
                         if let Some(merged) = sentence_buffer.push(segment) {
-                            emit_streaming_segments(&transcription_session, &[merged]);
+                            emit_streaming_segments(&transcription_session, &[merged], &mut growing_merger);
                         }
                     }
                     // Flush any remaining buffered content
                     if let Some(flushed) = sentence_buffer.flush() {
-                        emit_streaming_segments(&transcription_session, &[flushed]);
+                        emit_streaming_segments(&transcription_session, &[flushed], &mut growing_merger);
                     }
                 }
                 Err(e) => {
@@ -720,7 +728,7 @@ pub fn run_session_transcription(
                     );
                     // Still flush buffer on error
                     if let Some(flushed) = sentence_buffer.flush() {
-                        emit_streaming_segments(&transcription_session, &[flushed]);
+                        emit_streaming_segments(&transcription_session, &[flushed], &mut growing_merger);
                     }
                 }
             }
@@ -731,7 +739,7 @@ pub fn run_session_transcription(
             );
             // Flush buffer even when stopped to emit any pending content
             if let Some(flushed) = sentence_buffer.flush() {
-                emit_streaming_segments(&transcription_session, &[flushed]);
+                emit_streaming_segments(&transcription_session, &[flushed], &mut growing_merger);
             }
         }
 
@@ -1252,10 +1260,11 @@ fn create_transcription_config(
     }
 }
 
-/// Helper to emit transcript segments from StreamingTranscriber
+/// Helper to emit transcript segments from StreamingTranscriber with growing text support
 fn emit_streaming_segments(
     session: &TranscriptionSession,
     segments: &[parakeet_rs::streaming_transcriber::TranscriptionSegment],
+    growing_merger: &mut GrowingTextMerger,
 ) {
     if !segments.is_empty() {
         eprintln!(
@@ -1266,9 +1275,16 @@ fn emit_streaming_segments(
     }
 
     for segment in segments {
+        // Process through growing text merger for incremental display
+        let growing_result = growing_merger.push(&segment.text, segment.is_final);
+
         let subtitle_msg = serde_json::json!({
             "type": "subtitle",
             "text": segment.text,
+            "growing_text": growing_result.current_sentence,
+            "full_transcript": growing_result.buffer,
+            "delta": growing_result.delta,
+            "tail_changed": growing_result.tail_changed,
             "speaker": segment.speaker,
             "start": segment.start_time,
             "end": segment.end_time,
@@ -1284,10 +1300,11 @@ fn emit_streaming_segments(
 
         let _ = session.subtitle_tx.send(subtitle_str);
 
-        // Log all segments
+        // Log with growing text info
         let partial_marker = if segment.is_final { "FINAL" } else { "partial" };
+        let tail_marker = if growing_result.tail_changed { " [TAIL CHANGED]" } else { "" };
         eprintln!(
-            "[Session {} | {} | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (inference: {}ms, receivers: {})",
+            "[Session {} | {} | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (inference: {}ms, receivers: {}){}",
             session.id,
             partial_marker,
             segment
@@ -1298,7 +1315,8 @@ fn emit_streaming_segments(
             segment.start_time,
             segment.end_time,
             segment.inference_time_ms.unwrap_or(0),
-            receiver_count
+            receiver_count,
+            tail_marker
         );
     }
 }
@@ -1376,11 +1394,59 @@ fn run_vod_transcription(
         let _ = session_for_progress.status_tx.send(progress_msg.to_string());
     });
 
-    // Run transcription
+    // Segment callback for real-time subtitle emission with growing text
+    let session_for_segments = session.clone();
+    let growing_merger = std::sync::Arc::new(std::sync::Mutex::new(GrowingTextMerger::new()));
+    let segment_callback: parakeet_rs::SegmentCallback = Box::new(move |segments: &[VodSegment], chunk_index: usize, is_final_chunk: bool| {
+        let mut merger = growing_merger.lock().unwrap();
+
+        for (seg_idx, segment) in segments.iter().enumerate() {
+            // Determine if this segment should be treated as final
+            // In VoD, each sentence-level segment is essentially final
+            let is_final = true;
+
+            // Process through growing text merger
+            let growing_result = merger.push(&segment.text, is_final);
+
+            // Create subtitle message matching streaming format
+            let subtitle_msg = serde_json::json!({
+                "type": "subtitle",
+                "text": segment.text,
+                "growing_text": growing_result.current_sentence,
+                "full_transcript": growing_result.buffer,
+                "delta": growing_result.delta,
+                "tail_changed": growing_result.tail_changed,
+                "speaker": segment.speaker,
+                "start": segment.start,
+                "end": segment.end,
+                "is_final": is_final,
+                "vod_chunk": chunk_index,
+                "vod_segment": seg_idx,
+            });
+
+            let subtitle_str = subtitle_msg.to_string();
+
+            // Cache the last subtitle for late-joining clients
+            session_for_segments.set_last_subtitle(subtitle_str.clone());
+
+            // Send to subtitle channel
+            let _ = session_for_segments.subtitle_tx.send(subtitle_str);
+        }
+
+        eprintln!(
+            "[Session {}] VoD chunk {} emitted {} segments via subtitle channel{}",
+            session_for_segments.id,
+            chunk_index,
+            segments.len(),
+            if is_final_chunk { " (final)" } else { "" }
+        );
+    });
+
+    // Run transcription with segment callback
     let result = if is_canary {
         eprintln!("[Session {}] Using Canary model for VoD", session.id);
         match VodTranscriberCanary::new(&model_path, vod_config, Some(exec_config)) {
-            Ok(transcriber) => transcriber.transcribe_file(&wav_path, &session.id, Some(progress_callback)),
+            Ok(transcriber) => transcriber.transcribe_file_with_segments(&wav_path, &session.id, Some(progress_callback), Some(segment_callback)),
             Err(e) => {
                 eprintln!("[Session {}] Failed to create Canary VoD transcriber: {}", session.id, e);
                 rt.block_on(session.set_state(SessionState::Stopped));
@@ -1390,7 +1456,7 @@ fn run_vod_transcription(
     } else {
         eprintln!("[Session {}] Using TDT model for VoD", session.id);
         match VodTranscriberTDT::new(&model_path, vod_config, Some(exec_config)) {
-            Ok(transcriber) => transcriber.transcribe_file(&wav_path, &session.id, Some(progress_callback)),
+            Ok(transcriber) => transcriber.transcribe_file_with_segments(&wav_path, &session.id, Some(progress_callback), Some(segment_callback)),
             Err(e) => {
                 eprintln!("[Session {}] Failed to create TDT VoD transcriber: {}", session.id, e);
                 rt.block_on(session.set_state(SessionState::Stopped));

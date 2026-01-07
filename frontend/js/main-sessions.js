@@ -368,10 +368,13 @@ function setupEventListeners() {
 
   // Connect button
   elements.connectBtn.addEventListener('click', () => {
+    console.log('[Click] Connect button clicked, connected:', state.connected, 'selectedSessionId:', state.selectedSessionId);
     if (state.connected) {
       disconnect();
     } else if (state.selectedSessionId) {
       connect(state.selectedSessionId);
+    } else {
+      console.log('[Click] No session selected!');
     }
   });
 
@@ -668,6 +671,7 @@ function renderSessionsList() {
 }
 
 function selectSession(sessionId) {
+  console.log('[SelectSession] Selecting session:', sessionId);
   state.selectedSessionId = sessionId;
   elements.connectBtn.disabled = !sessionId;
   elements.bufferInfo.textContent = sessionId ? 'Ready to join' : 'Select a session';
@@ -711,8 +715,11 @@ async function uploadFile(file) {
 }
 
 async function connect(sessionId) {
+  console.log('[Connect] Starting connection to session:', sessionId);
   const config = getConfig();
+  console.log('[Connect] Config:', config);
   const wsUrl = sessionManager.getWebSocketUrl(sessionId);
+  console.log('[Connect] WebSocket URL:', wsUrl);
 
   // Create WebRTC client with ICE transport policy from server config
   webrtcClient = new WebRTCClient(wsUrl, {

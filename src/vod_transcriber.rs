@@ -93,6 +93,10 @@ pub struct VodTranscript {
 /// Progress callback type
 pub type ProgressCallback = Box<dyn Fn(VodProgress) + Send + Sync>;
 
+/// Segment callback type - called when segments are ready from a chunk
+/// Receives: (segments, chunk_index, is_final_chunk)
+pub type SegmentCallback = Box<dyn Fn(&[VodSegment], usize, bool) + Send + Sync>;
+
 /// Progress information for VoD transcription
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VodProgress {
@@ -187,6 +191,17 @@ impl VodTranscriberTDT {
         session_id: &str,
         progress_callback: Option<ProgressCallback>,
     ) -> Result<VodTranscript> {
+        self.transcribe_file_with_segments(wav_path, session_id, progress_callback, None)
+    }
+
+    /// Transcribe an audio file with optional segment callback for real-time updates
+    pub fn transcribe_file_with_segments<P: AsRef<Path>>(
+        &self,
+        wav_path: P,
+        session_id: &str,
+        progress_callback: Option<ProgressCallback>,
+        segment_callback: Option<SegmentCallback>,
+    ) -> Result<VodTranscript> {
         let created_at = Utc::now();
         let wav_path = wav_path.as_ref();
 
@@ -220,7 +235,7 @@ impl VodTranscriberTDT {
         );
 
         // Process chunks in parallel
-        let chunk_results = self.process_chunks_parallel(chunks, progress_callback)?;
+        let chunk_results = self.process_chunks_parallel(chunks, progress_callback, segment_callback, total_chunks)?;
 
         // Merge and deduplicate results
         let segments = self.merge_and_deduplicate(chunk_results);
@@ -295,8 +310,9 @@ impl VodTranscriberTDT {
         &self,
         chunks: Vec<AudioChunk>,
         progress_callback: Option<ProgressCallback>,
+        segment_callback: Option<SegmentCallback>,
+        total_chunks: usize,
     ) -> Result<Vec<ChunkResult>> {
-        let total_chunks = chunks.len();
         let num_workers = self.config.num_workers.min(total_chunks);
 
         if total_chunks == 0 {
@@ -399,6 +415,12 @@ impl VodTranscriberTDT {
                             current_chunk: chunk_result.index,
                             percent: (completed as f32 / total_chunks as f32) * 100.0,
                         });
+                    }
+
+                    // Emit segments as they become available
+                    if let Some(ref callback) = segment_callback {
+                        let is_final_chunk = completed == total_chunks;
+                        callback(&chunk_result.segments, chunk_result.index, is_final_chunk);
                     }
 
                     eprintln!(
@@ -658,6 +680,17 @@ impl VodTranscriberCanary {
         session_id: &str,
         progress_callback: Option<ProgressCallback>,
     ) -> Result<VodTranscript> {
+        self.transcribe_file_with_segments(wav_path, session_id, progress_callback, None)
+    }
+
+    /// Transcribe an audio file with optional segment callback for real-time updates
+    pub fn transcribe_file_with_segments<P: AsRef<Path>>(
+        &self,
+        wav_path: P,
+        session_id: &str,
+        progress_callback: Option<ProgressCallback>,
+        segment_callback: Option<SegmentCallback>,
+    ) -> Result<VodTranscript> {
         let created_at = Utc::now();
         let wav_path = wav_path.as_ref();
 
@@ -689,7 +722,7 @@ impl VodTranscriberCanary {
         );
 
         // Process chunks in parallel
-        let chunk_results = self.process_chunks_parallel(chunks, progress_callback)?;
+        let chunk_results = self.process_chunks_parallel(chunks, progress_callback, segment_callback, total_chunks)?;
 
         // Merge and deduplicate results
         let segments = self.merge_and_deduplicate(chunk_results);
@@ -743,8 +776,9 @@ impl VodTranscriberCanary {
         &self,
         chunks: Vec<AudioChunk>,
         progress_callback: Option<ProgressCallback>,
+        segment_callback: Option<SegmentCallback>,
+        total_chunks: usize,
     ) -> Result<Vec<ChunkResult>> {
-        let total_chunks = chunks.len();
         let num_workers = self.config.num_workers.min(total_chunks);
 
         if total_chunks == 0 {
@@ -832,6 +866,12 @@ impl VodTranscriberCanary {
                             current_chunk: chunk_result.index,
                             percent: (completed as f32 / total_chunks as f32) * 100.0,
                         });
+                    }
+
+                    // Emit segments as they become available
+                    if let Some(ref callback) = segment_callback {
+                        let is_final_chunk = completed == total_chunks;
+                        callback(&chunk_result.segments, chunk_result.index, is_final_chunk);
                     }
 
                     eprintln!(

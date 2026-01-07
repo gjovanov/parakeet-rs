@@ -60,6 +60,9 @@ function isHallucinated(text, threshold = 3) {
  * Subtitle segment
  * @typedef {Object} Segment
  * @property {string} text - Segment text
+ * @property {string|null} growingText - Full growing transcript (incrementally built text)
+ * @property {string|null} delta - New text added since last update
+ * @property {boolean|null} tailChanged - Whether the tail was modified (vs pure append)
  * @property {number|null} speaker - Speaker ID (null for unknown)
  * @property {number} start - Start time in seconds
  * @property {number} end - End time in seconds
@@ -364,8 +367,10 @@ export class SubtitleRenderer {
         this.liveSpeakerEl.style.display = 'none';
       }
       this.liveSpeakerEl.dataset.speaker = segment.speaker ?? '?';
+      // Use growingText if available (incrementally built transcript), otherwise fallback to text
+      const displayText = segment.growingText || segment.text;
       // Split text by sentence-ending punctuation into separate paragraphs
-      const sentences = segment.text.split(/([.!?])/);
+      const sentences = displayText.split(/([.!?])/);
       let formattedHtml = '';
       let currentSentence = '';
 
@@ -403,7 +408,7 @@ export class SubtitleRenderer {
       }
 
       this.liveElement.classList.add('active');
-      console.log('[Subtitles] Live display updated, added .active class, text:', segment.text?.substring(0, 50));
+      console.log('[Subtitles] Live display updated, added .active class, text:', displayText?.substring(0, 50), 'tailChanged:', segment.tailChanged);
     } else {
       this.liveSpeakerEl.textContent = '';
       this.liveSpeakerEl.style.display = 'none';
