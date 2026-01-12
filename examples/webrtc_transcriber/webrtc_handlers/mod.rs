@@ -189,11 +189,22 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
         Box::pin(async {})
     }));
 
+    // Handle ICE connection state changes
+    let client_id_ice_conn = client_id.clone();
+    peer_connection.on_ice_connection_state_change(Box::new(move |state| {
+        eprintln!(
+            "[WebRTC] Client {} ICE connection state: {:?}",
+            &client_id_ice_conn[..8],
+            state
+        );
+        Box::pin(async {})
+    }));
+
     // Handle connection state changes
     let client_id_clone = client_id.clone();
     peer_connection.on_peer_connection_state_change(Box::new(move |state| {
         eprintln!(
-            "[WebRTC] Client {} state: {:?}",
+            "[WebRTC] Client {} peer connection state: {:?}",
             &client_id_clone[..8],
             state
         );
@@ -336,6 +347,11 @@ async fn handle_client_message(
         Some("ready") => {
             let offer = peer_connection.create_offer(None).await?;
             peer_connection.set_local_description(offer.clone()).await?;
+
+            // Log the SDP to see negotiated codec details
+            if let Some(audio_line) = offer.sdp.lines().find(|l| l.starts_with("a=rtpmap:") && l.contains("opus")) {
+                eprintln!("[WebRTC] SDP audio codec: {}", audio_line);
+            }
 
             let offer_msg = serde_json::json!({
                 "type": "offer",

@@ -45,6 +45,7 @@
 
 mod audio;
 pub mod canary;
+pub mod canary_flash;
 mod config;
 mod decoder;
 mod decoder_tdt;
@@ -64,6 +65,7 @@ pub mod sortformer_stream;
 #[cfg(feature = "sortformer")]
 pub mod realtime;
 pub mod realtime_canary;
+pub mod realtime_canary_flash;
 pub mod realtime_tdt;
 pub mod parallel_canary;
 pub mod pause_parallel_canary;
@@ -87,6 +89,33 @@ mod vocab;
 
 pub use error::{Error, Result};
 pub use execution::{ExecutionProvider, ModelConfig as ExecutionConfig};
+
+/// Initialize ONNX Runtime. Required when using the `load-dynamic` feature.
+/// This must be called before any model loading operations.
+/// Safe to call multiple times - subsequent calls are no-ops.
+pub fn init_ort() -> Result<()> {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    static mut INIT_RESULT: Option<String> = None;
+
+    INIT.call_once(|| {
+        match ort::init().commit() {
+            Ok(_) => {
+                eprintln!("[ORT] ONNX Runtime initialized successfully");
+            }
+            Err(e) => {
+                unsafe { INIT_RESULT = Some(e.to_string()); }
+            }
+        }
+    });
+
+    unsafe {
+        if let Some(ref err) = INIT_RESULT {
+            return Err(Error::Model(format!("Failed to initialize ONNX Runtime: {}", err)));
+        }
+    }
+    Ok(())
+}
 pub use parakeet::Parakeet;
 pub use parakeet_tdt::ParakeetTDT;
 pub use timestamps::TimestampMode;
@@ -133,7 +162,9 @@ pub use session::{
 };
 
 pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};
+pub use canary_flash::{CanaryFlashConfig, CanaryFlashModel, DecoderKVCache};
 pub use realtime_canary::{CanaryChunkResult, RealtimeCanary, RealtimeCanaryConfig};
+pub use realtime_canary_flash::{CanaryFlashChunkResult, RealtimeCanaryFlash, RealtimeCanaryFlashConfig};
 pub use parallel_canary::{ParallelCanary, ParallelCanaryConfig};
 pub use pause_parallel_canary::{PauseParallelCanary, PauseParallelConfig};
 pub use parallel_tdt::{ParallelTDT, ParallelTDTConfig};

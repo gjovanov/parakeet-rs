@@ -745,9 +745,14 @@ async function connect(sessionId) {
     console.log('WebRTC connected');
   });
 
-  webrtcClient.on('trackReceived', () => {
+  webrtcClient.on('trackReceived', async () => {
     console.log('Audio track received');
     elements.bufferInfo.textContent = 'Audio streaming';
+    // Start stats logging and run debug after short delay
+    webrtcClient.startStatsLogging(3000);
+    setTimeout(async () => {
+      await webrtcClient.debugStatus();
+    }, 2000);
   });
 
   webrtcClient.on('autoplayBlocked', () => {
@@ -853,6 +858,8 @@ async function connect(sessionId) {
   updateConnectionStatus('connecting');
   try {
     await webrtcClient.connect(elements.audioPlayer);
+    // Expose for debugging (call window._webrtcClient.debugStatus() in console)
+    window._webrtcClient = webrtcClient;
   } catch (error) {
     console.error('Failed to connect:', error);
     updateConnectionStatus('disconnected');
@@ -862,8 +869,10 @@ async function connect(sessionId) {
 
 function disconnect() {
   if (webrtcClient) {
+    webrtcClient.stopStatsLogging();
     webrtcClient.disconnect();
     webrtcClient = null;
+    window._webrtcClient = null;
   }
   state.connected = false;
   updateConnectionStatus('disconnected');

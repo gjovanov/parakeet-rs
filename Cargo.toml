@@ -30,7 +30,7 @@ name = "streaming"
 path = "examples/streaming.rs"
 
 [dependencies]
-ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
 hound = "3.5"
 eyre = "0.6"
 ndarray = "0.16"
@@ -86,12 +86,14 @@ path = "examples/webrtc_transcriber/main.rs"
 [features]
 default = ["cpu"]
 cpu = []
-cuda = ["ort/cuda"]
-tensorrt = ["ort/tensorrt"]
-coreml = ["ort/coreml"]
-directml = ["ort/directml"]
-rocm = ["ort/rocm"]
-openvino = ["ort/openvino"]
-webgpu = ["ort/webgpu"]
+# With load-dynamic, execution providers are loaded at runtime from libonnxruntime.so
+# These features just enable the code paths, not ort's provider downloads
+cuda = []
+tensorrt = []
+coreml = []
+directml = []
+rocm = []
+openvino = []
+webgpu = []
 sortformer = []
 rnnoise = []  # Enable RNNoise noise cancellation

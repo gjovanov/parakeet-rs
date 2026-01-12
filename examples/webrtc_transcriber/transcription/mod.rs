@@ -91,7 +91,8 @@ pub fn run_session_transcription(
     }
 
     // Check if this is Canary or TDT model
-    let is_canary = model_id == "canary-1b";
+    let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash";
+    let is_canary_flash = model_id == "canary-180m-flash";
 
     // Channel to send audio samples to transcription thread
     let (audio_tx, audio_rx) = std_mpsc::sync_channel::<Vec<f32>>(50000);
@@ -127,6 +128,7 @@ pub fn run_session_transcription(
                 diar_path,
                 exec_config,
                 is_canary,
+                is_canary_flash,
                 is_vad_mode,
                 mode,
                 vad_base_mode,
@@ -163,6 +165,7 @@ pub fn run_session_transcription(
         diar_path: Option<PathBuf>,
         exec_config: parakeet_rs::ExecutionConfig,
         is_canary: bool,
+        is_canary_flash: bool,
         is_vad_mode: bool,
         mode: String,
         vad_base_mode: String,
@@ -484,6 +487,48 @@ pub fn run_session_transcription(
                     return;
                 }
             }
+        } else if is_canary_flash {
+            // Use Canary Flash for fast multilingual transcription with KV cache
+            use parakeet_rs::realtime_canary_flash::{RealtimeCanaryFlash, RealtimeCanaryFlashConfig};
+
+            let flash_config = RealtimeCanaryFlashConfig {
+                buffer_size_secs: 8.0,
+                min_audio_secs: 1.0,
+                process_interval_secs: 0.5,
+                language: language.clone(),
+            };
+
+            eprintln!(
+                "[Session {}] Creating Canary Flash transcriber from {:?} (language: {}, mode: {}, diar: {:?})",
+                transcription_session.id, model_path, language, mode, diar_path
+            );
+
+            // Use diarization constructor if available and diar_path is provided
+            #[cfg(feature = "sortformer")]
+            let result = if diar_path.is_some() {
+                RealtimeCanaryFlash::new_with_diarization(
+                    &model_path,
+                    diar_path.as_ref(),
+                    Some(exec_config),
+                    Some(flash_config),
+                )
+            } else {
+                RealtimeCanaryFlash::new(&model_path, Some(exec_config), Some(flash_config))
+            };
+
+            #[cfg(not(feature = "sortformer"))]
+            let result = RealtimeCanaryFlash::new(&model_path, Some(exec_config), Some(flash_config));
+
+            match result {
+                Ok(t) => Box::new(t),
+                Err(e) => {
+                    eprintln!(
+                        "[Session {}] Failed to create Canary Flash transcriber: {}",
+                        transcription_session.id, e
+                    );
+                    return;
+                }
+            }
         } else if is_canary {
             // Use Canary for multilingual transcription (non-VAD)
             use parakeet_rs::realtime_canary::RealtimeCanary;
@@ -594,11 +639,12 @@ pub fn run_session_transcription(
         } else if is_parallel_mode {
             if is_canary { "ParallelCanary" } else { "ParallelTDT" }
         } else {
-            match (is_vad_mode, is_canary) {
-                (true, true) => "VAD+Canary",
-                (true, false) => "VAD+TDT",
-                (false, true) => "Canary",
-                (false, false) => "TDT",
+            match (is_vad_mode, is_canary_flash, is_canary) {
+                (true, _, true) => "VAD+Canary",
+                (true, _, false) => "VAD+TDT",
+                (false, true, _) => "CanaryFlash",
+                (false, false, true) => "Canary",
+                (false, false, false) => "TDT",
             }
         };
         eprintln!(
@@ -628,7 +674,10 @@ pub fn run_session_transcription(
             let first_batch = match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(batch) => batch,
                 Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                    eprintln!("[Session {}] Audio channel disconnected", transcription_session.id);
+                    break;
+                }
             };
 
             // Collect the first batch
@@ -674,12 +723,11 @@ pub fn run_session_transcription(
                     }
                 }
                 Err(e) => {
-                    if chunks_processed % 100 == 0 {
-                        eprintln!(
-                            "[Session {}] push_audio error (batch {}): {}",
-                            transcription_session.id, chunks_processed, e
-                        );
-                    }
+                    // Always log errors
+                    eprintln!(
+                        "[Session {}] push_audio error (batch {}): {}",
+                        transcription_session.id, chunks_processed, e
+                    );
                 }
             }
 
@@ -1021,17 +1069,32 @@ pub fn run_session_transcription(
 
             // Encode to Opus and send via WebRTC
             let rtp_packets = opus_encoder.encode(&samples);
+            static RTP_PACKETS_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static RTP_NO_RECEIVER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             for packet in &rtp_packets {
                 let track = audio_track.clone();
                 let pkt = packet.clone();
                 rt.block_on(async {
-                    if let Err(e) = track.write(&pkt).await {
-                        let err_str = e.to_string();
-                        if !err_str.contains("no receiver") && !err_str.contains("ErrClosedPipe") {
-                            eprintln!("[Session {}] WebRTC write error: {}", session.id, e);
+                    match track.write(&pkt).await {
+                        Ok(_) => {
+                            RTP_PACKETS_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("no receiver") || err_str.contains("ErrClosedPipe") {
+                                RTP_NO_RECEIVER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                eprintln!("[Session {}] WebRTC write error: {}", session.id, e);
+                            }
                         }
                     }
                 });
+            }
+            // Log RTP stats every 5 seconds
+            if last_status_time.elapsed().as_secs() >= 1 && total_samples % (16000 * 5) < 320 {
+                let sent = RTP_PACKETS_SENT.load(std::sync::atomic::Ordering::Relaxed);
+                let no_recv = RTP_NO_RECEIVER.load(std::sync::atomic::Ordering::Relaxed);
+                eprintln!("[Session {}] RTP stats: {} packets sent, {} no-receiver errors", session.id, sent, no_recv);
             }
 
             // Update progress every second
@@ -1354,7 +1417,7 @@ fn run_vod_transcription(
     rt.block_on(session.set_state(SessionState::Running));
 
     // Check if Canary or TDT model
-    let is_canary = model_id == "canary-1b";
+    let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash";
 
     // Determine config based on model type:
     // - Use 1 worker to avoid GPU OOM when processing concurrently

@@ -324,6 +324,13 @@ impl RealtimeTDT {
         // Need: minimum buffer AND enough new audio since last process
         let min_buffer_samples = (self.config.confirm_threshold_secs * 2.0 * SAMPLE_RATE as f32) as usize;
 
+        // Debug: log buffer state occasionally
+        if self.total_samples_received % (SAMPLE_RATE * 5) < samples.len() {
+            eprintln!("[RealtimeTDT] buffer: {} samples ({:.1}s), min: {}, since_process: {}, interval: {}",
+                self.audio_buffer.len(), buffer_secs, min_buffer_samples,
+                self.samples_since_last_process, self.process_interval_samples);
+        }
+
         if self.audio_buffer.len() < min_buffer_samples {
             return Ok(ChunkResult {
                 segments: Vec::new(),
@@ -611,13 +618,19 @@ impl RealtimeTDT {
             );
 
             if !tokens_to_use.is_empty() && has_real_content {
-                // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
-                let segment_text: String = tokens_to_use
-                    .iter()
-                    .map(|t| t.text.as_str())
-                    .collect::<String>()
-                    .trim()
-                    .to_string();
+                // Join words with spaces, handling punctuation properly
+                let segment_text: String = {
+                    let mut output = String::new();
+                    for (i, token) in tokens_to_use.iter().enumerate() {
+                        let is_standalone_punct = token.text.len() == 1
+                            && token.text.chars().all(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | ')'));
+                        if i > 0 && !is_standalone_punct {
+                            output.push(' ');
+                        }
+                        output.push_str(token.text.trim());
+                    }
+                    output.trim().to_string()
+                };
 
                 let segment = Segment {
                     text: segment_text,
@@ -815,13 +828,19 @@ impl RealtimeTDT {
                 );
 
                 if !tokens_to_use.is_empty() && has_real_content {
-                    // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
-                    let segment_text: String = tokens_to_use
-                        .iter()
-                        .map(|t| t.text.as_str())
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
+                    // Join words with spaces, handling punctuation properly
+                    let segment_text: String = {
+                        let mut output = String::new();
+                        for (i, token) in tokens_to_use.iter().enumerate() {
+                            let is_standalone_punct = token.text.len() == 1
+                                && token.text.chars().all(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | ')'));
+                            if i > 0 && !is_standalone_punct {
+                                output.push(' ');
+                            }
+                            output.push_str(token.text.trim());
+                        }
+                        output.trim().to_string()
+                    };
 
                     let segment = Segment {
                         text: segment_text,
@@ -882,13 +901,19 @@ impl RealtimeTDT {
             // Just emit pending tokens
             let mut new_segments = Vec::new();
             if !self.pending_tokens.is_empty() {
-                // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
-                let segment_text: String = self.pending_tokens
-                    .iter()
-                    .map(|t| t.text.as_str())
-                    .collect::<String>()
-                    .trim()
-                    .to_string();
+                // Join words with spaces, handling punctuation properly
+                let segment_text: String = {
+                    let mut output = String::new();
+                    for (i, token) in self.pending_tokens.iter().enumerate() {
+                        let is_standalone_punct = token.text.len() == 1
+                            && token.text.chars().all(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | ')'));
+                        if i > 0 && !is_standalone_punct {
+                            output.push(' ');
+                        }
+                        output.push_str(token.text.trim());
+                    }
+                    output.trim().to_string()
+                };
 
                 let segment = Segment {
                     text: segment_text,
@@ -933,13 +958,19 @@ impl RealtimeTDT {
         let mut new_segments = Vec::new();
 
         if !final_tokens.is_empty() {
-            // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
-            let segment_text: String = final_tokens
-                .iter()
-                .map(|t| t.text.as_str())
-                .collect::<String>()
-                .trim()
-                .to_string();
+            // Join words with spaces, handling punctuation properly
+            let segment_text: String = {
+                let mut output = String::new();
+                for (i, token) in final_tokens.iter().enumerate() {
+                    let is_standalone_punct = token.text.len() == 1
+                        && token.text.chars().all(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | ')'));
+                    if i > 0 && !is_standalone_punct {
+                        output.push(' ');
+                    }
+                    output.push_str(token.text.trim());
+                }
+                output.trim().to_string()
+            };
 
             let segment = Segment {
                 text: segment_text,
@@ -976,11 +1007,19 @@ impl RealtimeTDT {
             .join(" ");
 
         if !self.pending_tokens.is_empty() {
-            // Concatenate directly - tokens already have proper spacing from SentencePiece (▁ -> " ")
-            let pending: String = self.pending_tokens
-                .iter()
-                .map(|t| t.text.as_str())
-                .collect::<String>();
+            // Join words with spaces, handling punctuation properly
+            let pending: String = {
+                let mut output = String::new();
+                for (i, token) in self.pending_tokens.iter().enumerate() {
+                    let is_standalone_punct = token.text.len() == 1
+                        && token.text.chars().all(|c| matches!(c, '.' | ',' | '!' | '?' | ';' | ':' | ')'));
+                    if i > 0 && !is_standalone_punct {
+                        output.push(' ');
+                    }
+                    output.push_str(token.text.trim());
+                }
+                output
+            };
 
             if !text.is_empty() && !pending.trim().is_empty() {
                 text.push(' ');

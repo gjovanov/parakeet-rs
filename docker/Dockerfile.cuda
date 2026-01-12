@@ -1,17 +1,57 @@
-# Multi-stage Dockerfile for parakeet-rs WebRTC transcriber with CUDA support
+# Multi-stage Dockerfile for parakeet-rs WebRTC transcriber with CUDA 13 + Blackwell (sm_120) support
 # Build: docker build -f docker/Dockerfile.cuda -t parakeet-transcriber-gpu .
 #
 # Requires: NVIDIA Docker runtime (nvidia-docker2)
-# Run: docker run --gpus all -e USE_GPU=true parakeet-transcriber-gpu
+# Run: docker run --gpus all -p 8090:8090 -v ./tdt:/app/models/tdt -v ./diar:/app/models/diarization parakeet-transcriber-gpu
+#
+# NOTE: This build takes 1-2 hours as it compiles ONNX Runtime from source with Blackwell (sm_120) support
 
 # ==============================================================================
-# Stage 1: Build environment with CUDA
+# Stage 1: Build ONNX Runtime with Blackwell (sm_120) support
 # ==============================================================================
-FROM nvidia/cuda:12.2.2-cudnn8-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:13.0.0-cudnn-devel-ubuntu22.04 AS ort-builder
+
+WORKDIR /build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install ONNX Runtime build dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    cmake \
+    python3 \
+    python3-pip \
+    python3-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fix libcu++ headers location (CUDA 13 puts them in cccl subdirectory)
+RUN mkdir -p /usr/local/cuda/include/cuda && \
+    ln -sf /usr/local/cuda/include/cccl/cuda/std /usr/local/cuda/include/cuda/std && \
+    ln -sf /usr/local/cuda/include/cccl/cuda/__cccl_config /usr/local/cuda/include/cuda/__cccl_config
+
+# Clone ONNX Runtime
+RUN git clone --recursive --depth 1 https://github.com/microsoft/onnxruntime.git
+
+# Build ONNX Runtime with CUDA and Blackwell (sm_120) support
+# This takes a long time (~1-2 hours)
+WORKDIR /build/onnxruntime
+RUN ./build.sh --config Release \
+    --use_cuda \
+    --cuda_home /usr/local/cuda \
+    --cudnn_home /usr/local/cuda \
+    --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES="89;90;120" \
+    --build_shared_lib \
+    --skip_tests \
+    --parallel $(nproc)
+
+# ==============================================================================
+# Stage 2: Build parakeet-rs application
+# ==============================================================================
+FROM nvidia/cuda:13.0.0-cudnn-devel-ubuntu22.04 AS builder
 
 WORKDIR /app
 
-# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Rust and build dependencies
@@ -30,35 +70,45 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Copy ONNX Runtime libraries from ort-builder stage
+COPY --from=ort-builder /build/onnxruntime/build/Linux/Release/libonnxruntime*.so* /usr/local/lib/
+RUN ldconfig
+
+# Set ORT_DYLIB_PATH for load-dynamic feature
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+
 # Copy Cargo files first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source for dependency compilation
-RUN mkdir -p src examples && \
+RUN mkdir -p src examples/webrtc_transcriber && \
     echo "fn main() {}" > src/lib.rs && \
-    echo "fn main() {}" > examples/webrtc_transcriber.rs
+    echo "fn main() {}" > examples/webrtc_transcriber/main.rs
 
-# Build dependencies only with CUDA feature (cache layer)
+# Build dependencies only (cache layer)
 RUN cargo build --release --example webrtc_transcriber --features "cuda,sortformer" 2>/dev/null || true
 
-# Remove dummy source and clear cached compilation to force rebuild
-RUN rm -rf src examples && rm -rf target/release/.fingerprint/parakeet* target/release/deps/parakeet* target/release/deps/libparakeet* target/release/examples/webrtc_transcriber
+# Remove dummy source and clear cached compilation
+RUN rm -rf src examples && \
+    rm -rf target/release/.fingerprint/parakeet* \
+           target/release/deps/parakeet* \
+           target/release/deps/libparakeet* \
+           target/release/examples/webrtc_transcriber
 
 # Copy actual source code
 COPY src/ ./src/
 COPY examples/ ./examples/
 
-# Build release binary with CUDA and sortformer features
+# Build release binary with cuda and sortformer features
 RUN touch src/lib.rs && cargo build --release --example webrtc_transcriber --features "cuda,sortformer"
 
 # ==============================================================================
-# Stage 2: Runtime environment with CUDA
+# Stage 3: Runtime environment with CUDA
 # ==============================================================================
-FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:13.0.0-cudnn-runtime-ubuntu22.04
 
 WORKDIR /app
 
-# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
@@ -70,6 +120,10 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy ONNX Runtime libraries
+COPY --from=ort-builder /build/onnxruntime/build/Linux/Release/libonnxruntime*.so* /usr/local/lib/
+RUN ldconfig
+
 # Copy binary from builder
 COPY --from=builder /app/target/release/examples/webrtc_transcriber /app/
 
@@ -79,12 +133,16 @@ COPY frontend/ /app/frontend/
 # Create directories for model volumes
 RUN mkdir -p /app/models/tdt /app/models/diarization
 
-# Expose HTTP/WebSocket port (GPU version uses 8090)
+# Expose HTTP/WebSocket port
 EXPOSE 8090
 
 # ==============================================================================
 # Environment variables (all configurable at runtime)
 # ==============================================================================
+
+# ONNX Runtime load-dynamic path
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
 
 # Server configuration
 ENV PORT=8090
@@ -97,13 +155,13 @@ ENV TDT_MODEL_PATH=/app/models/tdt
 ENV DIAR_MODEL_PATH=/app/models/diarization/model.onnx
 
 # GPU configuration - enabled by default for this image
-ENV USE_GPU=true
+ENV USE_GPU=cuda
 
 # Thread configuration (can be lower with GPU since inference is on GPU)
 ENV INTRA_THREADS=2
 ENV INTER_THREADS=1
 
-# Transcription mode (set to "1" to enable speedy mode)
+# Transcription mode
 ENV SPEEDY_MODE=""
 
 # TURN server configuration for NAT traversal

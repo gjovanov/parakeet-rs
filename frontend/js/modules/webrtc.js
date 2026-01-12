@@ -237,10 +237,16 @@ export class WebRTCClient {
 
     // Handle ICE connection state
     this.pc.oniceconnectionstatechange = () => {
-      console.log('[WebRTC] ICE state:', this.pc.iceConnectionState);
+      console.log('[WebRTC] ICE connection state:', this.pc.iceConnectionState);
       if (this.pc.iceConnectionState === 'failed') {
         console.error('[WebRTC] ICE connection failed');
         this.emit('connectionFailed');
+      } else if (this.pc.iceConnectionState === 'connected' || this.pc.iceConnectionState === 'completed') {
+        console.log('[WebRTC] ICE connected! Media should flow now.');
+      } else if (this.pc.iceConnectionState === 'checking') {
+        console.log('[WebRTC] ICE checking connectivity...');
+      } else if (this.pc.iceConnectionState === 'disconnected') {
+        console.warn('[WebRTC] ICE disconnected - connection may recover');
       }
     };
 
@@ -509,5 +515,100 @@ export class WebRTCClient {
     });
 
     return result;
+  }
+
+  /**
+   * Debug function to log comprehensive connection status
+   */
+  async debugStatus() {
+    console.log('=== WebRTC Debug Status ===');
+
+    // Connection states
+    if (this.pc) {
+      console.log('ICE Connection State:', this.pc.iceConnectionState);
+      console.log('ICE Gathering State:', this.pc.iceGatheringState);
+      console.log('Connection State:', this.pc.connectionState);
+      console.log('Signaling State:', this.pc.signalingState);
+    } else {
+      console.log('PeerConnection: null');
+    }
+
+    // Audio element status
+    if (this.audioElement) {
+      console.log('Audio Element:');
+      console.log('  - srcObject:', this.audioElement.srcObject ? 'set' : 'null');
+      console.log('  - paused:', this.audioElement.paused);
+      console.log('  - muted:', this.audioElement.muted);
+      console.log('  - volume:', this.audioElement.volume);
+      console.log('  - readyState:', this.audioElement.readyState);
+      console.log('  - networkState:', this.audioElement.networkState);
+      console.log('  - error:', this.audioElement.error);
+    } else {
+      console.log('Audio Element: null');
+    }
+
+    // Remote stream status
+    if (this.remoteStream) {
+      console.log('Remote Stream:');
+      console.log('  - active:', this.remoteStream.active);
+      const tracks = this.remoteStream.getTracks();
+      console.log('  - tracks:', tracks.length);
+      tracks.forEach((track, i) => {
+        console.log(`  - track[${i}]: kind=${track.kind}, enabled=${track.enabled}, muted=${track.muted}, readyState=${track.readyState}`);
+      });
+    } else {
+      console.log('Remote Stream: null');
+    }
+
+    // WebRTC stats
+    const stats = await this.getStats();
+    if (stats) {
+      console.log('WebRTC Stats:');
+      console.log('  - packetsReceived:', stats.packetsReceived);
+      console.log('  - bytesReceived:', stats.bytesReceived);
+      console.log('  - packetsLost:', stats.packetsLost);
+      console.log('  - jitter:', stats.jitter);
+      console.log('  - roundTripTime:', stats.roundTripTime);
+    }
+
+    console.log('=== End Debug Status ===');
+    return {
+      iceConnectionState: this.pc?.iceConnectionState,
+      connectionState: this.pc?.connectionState,
+      audioElementSrcObject: !!this.audioElement?.srcObject,
+      audioPaused: this.audioElement?.paused,
+      remoteStreamActive: this.remoteStream?.active,
+      stats
+    };
+  }
+
+  /**
+   * Start periodic stats logging (for debugging)
+   * @param {number} intervalMs - Interval in milliseconds (default 5000)
+   */
+  startStatsLogging(intervalMs = 5000) {
+    if (this._statsInterval) {
+      clearInterval(this._statsInterval);
+    }
+    this._statsInterval = setInterval(async () => {
+      const stats = await this.getStats();
+      if (stats && stats.packetsReceived > 0) {
+        console.log(`[WebRTC Stats] packets=${stats.packetsReceived}, bytes=${stats.bytesReceived}, lost=${stats.packetsLost}`);
+      } else if (this.pc) {
+        console.log(`[WebRTC Stats] No packets received. ICE: ${this.pc.iceConnectionState}, Conn: ${this.pc.connectionState}`);
+      }
+    }, intervalMs);
+    console.log(`[WebRTC] Stats logging started (every ${intervalMs}ms)`);
+  }
+
+  /**
+   * Stop periodic stats logging
+   */
+  stopStatsLogging() {
+    if (this._statsInterval) {
+      clearInterval(this._statsInterval);
+      this._statsInterval = null;
+      console.log('[WebRTC] Stats logging stopped');
+    }
   }
 }

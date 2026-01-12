@@ -21,6 +21,8 @@ pub enum ModelType {
     ParakeetTdt,
     /// Canary 1B model
     Canary1B,
+    /// Canary 180M Flash model (faster, smaller variant with KV cache)
+    Canary180MFlash,
 }
 
 impl ModelType {
@@ -29,6 +31,7 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "parakeet-tdt",
             ModelType::Canary1B => "canary-1b",
+            ModelType::Canary180MFlash => "canary-180m-flash",
         }
     }
 
@@ -37,6 +40,7 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "Parakeet TDT 0.6B",
             ModelType::Canary1B => "Canary 1B",
+            ModelType::Canary180MFlash => "Canary 180M Flash",
         }
     }
 
@@ -45,6 +49,7 @@ impl ModelType {
         match s {
             "parakeet-tdt" => Some(ModelType::ParakeetTdt),
             "canary-1b" => Some(ModelType::Canary1B),
+            "canary-180m-flash" => Some(ModelType::Canary180MFlash),
             _ => None,
         }
     }
@@ -54,6 +59,7 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => vec!["en"],
             ModelType::Canary1B => vec!["en", "de", "fr", "es"],
+            ModelType::Canary180MFlash => vec!["en", "de", "fr", "es"],
         }
     }
 }
@@ -149,6 +155,24 @@ impl ModelRegistry {
                 exec_config: registry.default_exec_config.clone(),
                 is_available: canary_available,
                 description: "NVIDIA's Canary 1B encoder-decoder model for multilingual ASR and translation".to_string(),
+                languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
+            });
+        }
+
+        // Register Canary 180M Flash if path is configured
+        let canary_flash_path = std::env::var("CANARY_FLASH_MODEL_PATH")
+            .ok()
+            .map(PathBuf::from);
+
+        if let Some(path) = canary_flash_path {
+            let canary_flash_available = path.exists();
+            registry.register(RegisteredModel {
+                model_type: ModelType::Canary180MFlash,
+                model_path: path,
+                diarization_path: diar_path.clone(),
+                exec_config: registry.default_exec_config.clone(),
+                is_available: canary_flash_available,
+                description: "NVIDIA's Canary 180M Flash - fast multilingual ASR with KV cache".to_string(),
                 languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
             });
         }
@@ -264,6 +288,24 @@ impl ModelRegistry {
 
                 Ok(Box::new(transcriber))
             }
+            ModelType::Canary180MFlash => {
+                use crate::realtime_canary_flash::{RealtimeCanaryFlash, RealtimeCanaryFlashConfig};
+
+                let flash_config = RealtimeCanaryFlashConfig {
+                    buffer_size_secs: 8.0,
+                    min_audio_secs: 1.0,
+                    process_interval_secs: 0.5,
+                    language: "en".to_string(),
+                };
+
+                let transcriber = RealtimeCanaryFlash::new(
+                    &model.model_path,
+                    Some(model.exec_config.clone()),
+                    Some(flash_config),
+                )?;
+
+                Ok(Box::new(transcriber))
+            }
         }
     }
 
@@ -293,10 +335,12 @@ mod tests {
     fn test_model_type_roundtrip() {
         assert_eq!(ModelType::from_str("parakeet-tdt"), Some(ModelType::ParakeetTdt));
         assert_eq!(ModelType::from_str("canary-1b"), Some(ModelType::Canary1B));
+        assert_eq!(ModelType::from_str("canary-180m-flash"), Some(ModelType::Canary180MFlash));
         assert_eq!(ModelType::from_str("unknown"), None);
 
         assert_eq!(ModelType::ParakeetTdt.as_str(), "parakeet-tdt");
         assert_eq!(ModelType::Canary1B.as_str(), "canary-1b");
+        assert_eq!(ModelType::Canary180MFlash.as_str(), "canary-180m-flash");
     }
 
     #[test]

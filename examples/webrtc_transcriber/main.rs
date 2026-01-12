@@ -64,6 +64,14 @@ struct Args {
     #[arg(long, env = "TDT_MODEL_PATH", default_value = "./tdt")]
     tdt_model: String,
 
+    /// Path to Canary model directory
+    #[arg(long, env = "CANARY_MODEL_PATH", default_value = "./canary")]
+    canary_model: String,
+
+    /// Path to Canary 180M Flash model directory (faster, smaller variant)
+    #[arg(long, env = "CANARY_FLASH_MODEL_PATH")]
+    canary_flash_model: Option<String>,
+
     /// Path to diarization model (ONNX)
     #[arg(long, env = "DIAR_MODEL_PATH", default_value = "diar_streaming_sortformer_4spk-v2.onnx")]
     diar_model: String,
@@ -192,6 +200,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("===========================================");
     eprintln!("Port: {}", args.port);
     eprintln!("TDT Model: {}", args.tdt_model);
+    eprintln!("Canary Model: {}", args.canary_model);
+    if let Some(ref path) = args.canary_flash_model {
+        eprintln!("Canary Flash Model: {}", path);
+    }
     eprintln!("Diarization Model: {}", args.diar_model);
     eprintln!("VAD Model: {}", args.vad_model);
     eprintln!("Media Directory: {}", args.media_dir.display());
@@ -200,8 +212,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("===========================================");
     eprintln!();
 
+    // Initialize ONNX Runtime (required for load-dynamic feature)
+    parakeet_rs::init_ort()?;
+
     // Set environment variables for model registry
     std::env::set_var("TDT_MODEL_PATH", &args.tdt_model);
+    std::env::set_var("CANARY_MODEL_PATH", &args.canary_model);
+    if let Some(ref path) = args.canary_flash_model {
+        std::env::set_var("CANARY_FLASH_MODEL_PATH", path);
+    }
     std::env::set_var("DIAR_MODEL_PATH", &args.diar_model);
     std::env::set_var("VAD_MODEL_PATH", &args.vad_model);
     std::env::set_var("MEDIA_DIR", &args.media_dir);
