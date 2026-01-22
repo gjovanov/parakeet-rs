@@ -741,6 +741,7 @@ impl RealtimeTDT {
         )?;
 
         // Adjust timestamps to global time
+        let raw_token_count = result.tokens.len();
         let adjusted_tokens: Vec<TimedToken> = result.tokens
             .into_iter()
             .map(|mut t| {
@@ -749,6 +750,12 @@ impl RealtimeTDT {
                 t
             })
             .collect();
+
+        // Debug: log model output every 5 seconds
+        if self.total_samples_received % (SAMPLE_RATE * 5) < (self.config.process_interval_secs * SAMPLE_RATE as f32) as usize {
+            eprintln!("[RealtimeTDT] process_buffer: raw_tokens={}, buffer_start={:.2}s, last_emitted_end={:.2}s",
+                raw_token_count, buffer_start_time, self.last_emitted_token_end);
+        }
 
         // Determine confirmed zone
         // In pause-based mode: use detected pause boundary if available
@@ -798,6 +805,13 @@ impl RealtimeTDT {
                 // In pending zone (might change with more context)
                 new_pending.push(token);
             }
+        }
+
+        // Debug: log token filtering results
+        if self.total_samples_received % (SAMPLE_RATE * 5) < (self.config.process_interval_secs * SAMPLE_RATE as f32) as usize {
+            let dedup_filter = self.last_emitted_token_end + dedup_margin;
+            eprintln!("[RealtimeTDT] filtering: confirm_until={:.2}s, dedup_filter={:.2}s, confirmed={}, pending={}",
+                confirm_until, dedup_filter, confirmed_tokens.len(), new_pending.len());
         }
 
         let mut new_segments = Vec::new();
@@ -865,8 +879,14 @@ impl RealtimeTDT {
                         }
                     }
 
+                    eprintln!("[RealtimeTDT] EMIT segment: \"{}\" [{:.2}s-{:.2}s]",
+                        segment.text.chars().take(60).collect::<String>(),
+                        segment.start_time, segment.end_time);
                     self.finalized_segments.push(segment.clone());
                     new_segments.push(segment);
+                } else {
+                    eprintln!("[RealtimeTDT] SKIP segment: tokens_to_use={}, has_real_content={}",
+                        tokens_to_use.len(), has_real_content);
                 }
             }
 

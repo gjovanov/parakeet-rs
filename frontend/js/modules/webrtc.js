@@ -180,10 +180,12 @@ export class WebRTCClient {
    */
   setupPeerConnection() {
     // Create peer connection with ICE transport policy from server config
-    this.pc = new RTCPeerConnection({
+    const rtcConfig = {
       iceServers: this.options.iceServers,
       iceTransportPolicy: this.options.iceTransportPolicy || 'all',
-    });
+    };
+    console.log('[WebRTC] RTCPeerConnection config:', JSON.stringify(rtcConfig, null, 2));
+    this.pc = new RTCPeerConnection(rtcConfig);
 
     // Handle incoming audio track
     this.pc.ontrack = (event) => {
@@ -298,21 +300,35 @@ export class WebRTCClient {
 
       case 'ice-candidate':
         if (msg.candidate) {
-          // Filter out Docker network ICE candidates (172.17.x.x, 172.18.x.x, etc.)
           const candidateStr = msg.candidate.candidate || '';
-          const dockerNetworkPattern = /\s172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+\s/;
 
-          if (dockerNetworkPattern.test(candidateStr)) {
-            console.log('[WebRTC] Skipping Docker network ICE candidate:', candidateStr);
+          // Only filter Docker network IPs for HOST candidates (not relay/srflx)
+          // Docker bridge typically uses 172.17.x.x
+          // WSL2 uses 172.x.x.x which should NOT be filtered
+          const isHostCandidate = candidateStr.includes('typ host');
+          const dockerBridgePattern = /\s172\.17\.\d+\.\d+\s/;
+
+          if (isHostCandidate && dockerBridgePattern.test(candidateStr)) {
+            console.log('[WebRTC] Skipping Docker bridge host candidate:', candidateStr);
             break;
           }
 
           console.log('[WebRTC] Received ICE candidate from server:', msg.candidate);
+          console.log('[WebRTC] Current signaling state:', this.pc.signalingState);
+          console.log('[WebRTC] Current ICE gathering state:', this.pc.iceGatheringState);
           try {
-            await this.pc.addIceCandidate(msg.candidate);
+            // Construct RTCIceCandidate properly
+            const iceCandidate = new RTCIceCandidate({
+              candidate: msg.candidate.candidate,
+              sdpMid: msg.candidate.sdpMid?.toString() || '0',
+              sdpMLineIndex: msg.candidate.sdpMLineIndex ?? 0,
+            });
+            console.log('[WebRTC] Constructed RTCIceCandidate:', iceCandidate);
+            await this.pc.addIceCandidate(iceCandidate);
             console.log('[WebRTC] Added ICE candidate successfully');
           } catch (e) {
             console.error('[WebRTC] Error adding ICE candidate:', e);
+            console.error('[WebRTC] Candidate details:', JSON.stringify(msg.candidate));
           }
         }
         break;

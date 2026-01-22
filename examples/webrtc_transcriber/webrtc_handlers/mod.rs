@@ -111,10 +111,17 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
     };
 
     let config = RTCConfiguration {
-        ice_servers,
+        ice_servers: ice_servers.clone(),
         ice_transport_policy,
         ..Default::default()
     };
+
+    eprintln!(
+        "[WebRTC] {} RTCConfiguration: ice_servers={:?}, transport_policy={:?}",
+        &client_id[..8],
+        ice_servers.iter().map(|s| &s.urls).collect::<Vec<_>>(),
+        ice_transport_policy
+    );
 
     let peer_connection = match state.api.new_peer_connection(config).await {
         Ok(pc) => Arc::new(pc),
@@ -161,18 +168,31 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
         let ice_tx = ice_tx_clone.clone();
         let cid = client_id_ice.clone();
         Box::pin(async move {
-            if let Some(candidate) = candidate {
-                eprintln!(
-                    "[WebRTC] {} ICE candidate: {:?}",
-                    &cid[..8],
-                    candidate.to_json()
-                );
-                if let Ok(json) = candidate.to_json() {
-                    let msg = serde_json::json!({
-                        "type": "ice-candidate",
-                        "candidate": json
-                    });
-                    ice_tx.send(msg.to_string()).await.ok();
+            match candidate {
+                Some(candidate) => {
+                    eprintln!(
+                        "[WebRTC] {} ICE candidate generated: {:?}",
+                        &cid[..8],
+                        candidate.to_json()
+                    );
+                    if let Ok(mut json) = candidate.to_json() {
+                        // Ensure sdpMid is set for browser compatibility
+                        // "0" corresponds to the first media section (audio)
+                        if json.sdp_mid.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                            json.sdp_mid = Some("0".to_string());
+                        }
+                        let msg = serde_json::json!({
+                            "type": "ice-candidate",
+                            "candidate": json
+                        });
+                        ice_tx.send(msg.to_string()).await.ok();
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "[WebRTC] {} ICE gathering complete (no more candidates)",
+                        &cid[..8]
+                    );
                 }
             }
         })

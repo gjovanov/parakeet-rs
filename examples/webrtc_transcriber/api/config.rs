@@ -20,8 +20,18 @@ pub async fn config_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     };
 
     if !config.turn_server.is_empty() {
+        // Provide both UDP and TCP TURN URLs for maximum compatibility
+        // Server (webrtc-rs) uses UDP, Windows browsers may need TCP
+        let turn_url = &config.turn_server;
+        let mut turn_urls = vec![turn_url.clone()];
+
+        // If no transport specified, add TCP variant for browsers behind strict firewalls
+        if !turn_url.contains("?transport=") {
+            turn_urls.push(format!("{}?transport=tcp", turn_url));
+        }
+
         ice_servers.push(serde_json::json!({
-            "urls": config.turn_server,
+            "urls": turn_urls,
             "username": config.turn_username,
             "credential": config.turn_password
         }));

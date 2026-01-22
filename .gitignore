@@ -19,3 +19,4 @@ DS_Store
 start.sh
 **.wav
 onnxruntime/
+node_modules
