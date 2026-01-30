@@ -764,11 +764,15 @@ impl RealtimeTDT {
         let confirm_until = if self.config.pause_based_confirm {
             if let Some(pause_time) = self.pause_boundary_time {
                 // Use pause boundary - confirm tokens ending before the pause
-                // Only if it's ahead of what we've already confirmed
-                if pause_time > self.confirmed_until {
+                // Only if it's ahead of what we've already confirmed AND still
+                // within the current buffer. If the pause boundary is before
+                // the buffer start, it's stale (inference was too slow and the
+                // buffer scrolled past the pause) - fall back to time-based.
+                if pause_time > self.confirmed_until && pause_time >= buffer_start_time {
                     pause_time
                 } else {
-                    // Pause is before confirmed point, use fallback threshold
+                    // Pause is stale or before confirmed point, clear it and use fallback
+                    self.pause_boundary_time = None;
                     buffer_end_time - self.config.confirm_threshold_secs
                 }
             } else {

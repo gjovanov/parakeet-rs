@@ -30,6 +30,89 @@ const SAMPLE_RATE: usize = 16000;
 /// Minimum number of consecutive matches before confirming text as final
 const MIN_STABLE_COUNT: u32 = 2;
 
+/// Maximum expected words per second of audio (for hallucination length guard)
+const MAX_WORDS_PER_SEC: f32 = 5.0;
+
+/// Calculate RMS (root mean square) energy of audio samples
+fn calculate_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
+/// Multiplier for inference time anomaly detection
+const INFERENCE_TIME_ANOMALY_MULTIPLIER: f32 = 5.0;
+
+/// Truncate text at first detected hallucination (3+ consecutive repeated words
+/// or 3+ repeated 2-3 word phrases)
+fn truncate_hallucination(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 4 {
+        return text.to_string();
+    }
+
+    // Check for 3+ consecutive identical words
+    let mut consecutive_count = 1;
+    for i in 1..words.len() {
+        if words[i].to_lowercase() == words[i - 1].to_lowercase() && words[i].len() > 1 {
+            consecutive_count += 1;
+            if consecutive_count >= 3 {
+                let truncate_at = i - consecutive_count + 1;
+                if truncate_at > 0 {
+                    eprintln!(
+                        "[RealtimeCanary] Truncating hallucination at word {}: '{}'",
+                        truncate_at, words[i]
+                    );
+                    return words[..truncate_at].join(" ");
+                }
+                return String::new();
+            }
+        } else {
+            consecutive_count = 1;
+        }
+    }
+
+    // Check for repeated phrases (2-3 word patterns)
+    for pattern_len in 2..=3 {
+        if words.len() < pattern_len * 3 {
+            continue;
+        }
+        for i in 0..=(words.len() - pattern_len * 3) {
+            let pattern: Vec<&str> = words[i..i + pattern_len].to_vec();
+            let mut pattern_count = 1;
+
+            let mut j = i + pattern_len;
+            while j + pattern_len <= words.len() {
+                let candidate: Vec<&str> = words[j..j + pattern_len].to_vec();
+                if candidate
+                    .iter()
+                    .zip(pattern.iter())
+                    .all(|(a, b)| a.to_lowercase() == b.to_lowercase())
+                {
+                    pattern_count += 1;
+                    if pattern_count >= 3 {
+                        eprintln!(
+                            "[RealtimeCanary] Truncating repeated phrase at {}: '{}'",
+                            i, pattern.join(" ")
+                        );
+                        if i > 0 {
+                            return words[..i].join(" ");
+                        }
+                        return String::new();
+                    }
+                    j += pattern_len;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    text.to_string()
+}
+
 /// Configuration for streaming Canary processing
 #[derive(Debug, Clone)]
 pub struct RealtimeCanaryConfig {
@@ -41,6 +124,13 @@ pub struct RealtimeCanaryConfig {
     pub process_interval_secs: f32,
     /// Target language code
     pub language: String,
+    /// Enable pause-based confirmation (default: true for speedy mode)
+    /// When true, detected pauses force-confirm text, bypassing MIN_STABLE_COUNT
+    pub pause_based_confirm: bool,
+    /// Minimum pause duration in seconds to trigger confirmation (default: 0.6)
+    pub pause_threshold_secs: f32,
+    /// Audio RMS below this is considered silence (default: 0.008)
+    pub silence_energy_threshold: f32,
 }
 
 impl Default for RealtimeCanaryConfig {
@@ -50,6 +140,9 @@ impl Default for RealtimeCanaryConfig {
             min_audio_secs: 2.0,
             process_interval_secs: 2.0,
             language: "en".to_string(),
+            pause_based_confirm: false,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
         }
     }
 }
@@ -89,6 +182,18 @@ pub struct RealtimeCanary {
 
     /// Segments pending to be emitted as final
     pending_final_segments: Vec<(String, f32, f32)>, // (text, start_time, end_time)
+
+    /// Rolling inference time tracker for anomaly detection
+    inference_times_ms: Vec<u32>,
+    /// Median inference time (updated after each inference)
+    median_inference_time_ms: u32,
+
+    /// Pause detection state: when current silence started (global time)
+    silence_start_time: Option<f32>,
+    /// Time boundary where a pause was detected (force-confirm text before this)
+    pause_boundary_time: Option<f32>,
+    /// When the last detected pause ended
+    last_pause_end_time: f32,
 
     /// Optional speaker diarizer (requires sortformer feature)
     #[cfg(feature = "sortformer")]
@@ -131,6 +236,11 @@ impl RealtimeCanary {
             pending_text: String::new(),
             pending_stable_count: 0,
             pending_final_segments: Vec::new(),
+            inference_times_ms: Vec::new(),
+            median_inference_time_ms: 0,
+            silence_start_time: None,
+            pause_boundary_time: None,
+            last_pause_end_time: 0.0,
             #[cfg(feature = "sortformer")]
             diarizer: None,
         })
@@ -185,6 +295,11 @@ impl RealtimeCanary {
             pending_text: String::new(),
             pending_stable_count: 0,
             pending_final_segments: Vec::new(),
+            inference_times_ms: Vec::new(),
+            median_inference_time_ms: 0,
+            silence_start_time: None,
+            pause_boundary_time: None,
+            last_pause_end_time: 0.0,
             diarizer,
         })
     }
@@ -217,12 +332,58 @@ impl RealtimeCanary {
         None
     }
 
+    /// Detect pause/silence in audio for smarter confirmation.
+    /// Tracks transitions between speech and silence. When silence exceeds
+    /// the threshold duration, marks a pause boundary for confirmation.
+    fn detect_pause(&mut self, samples: &[f32], current_time: f32) {
+        let rms = calculate_rms(samples);
+        let is_silence = rms < self.config.silence_energy_threshold;
+
+        let chunk_duration = samples.len() as f32 / SAMPLE_RATE as f32;
+        let chunk_end_time = current_time + chunk_duration;
+
+        if is_silence {
+            if self.silence_start_time.is_none() {
+                self.silence_start_time = Some(current_time);
+            } else {
+                let silence_start = self.silence_start_time.unwrap();
+                let silence_duration = chunk_end_time - silence_start;
+
+                if silence_duration >= self.config.pause_threshold_secs {
+                    let pause_buffer = 0.1;
+                    let boundary = (silence_start - pause_buffer).max(self.last_pause_end_time);
+
+                    if self.pause_boundary_time.is_none()
+                        || boundary > self.pause_boundary_time.unwrap()
+                    {
+                        self.pause_boundary_time = Some(boundary);
+                        self.last_pause_end_time = chunk_end_time;
+                        eprintln!(
+                            "[RealtimeCanary] Pause detected at {:.2}s (boundary: {:.2}s)",
+                            chunk_end_time, boundary
+                        );
+                    }
+                }
+            }
+        } else {
+            if self.silence_start_time.is_some() {
+                self.silence_start_time = None;
+            }
+        }
+    }
+
     /// Push audio samples and get transcription results
     pub fn push_audio(&mut self, samples: &[f32]) -> Result<CanaryChunkResult> {
         // Push audio to diarizer for speaker tracking (if available)
         #[cfg(feature = "sortformer")]
         if let Some(diarizer) = &mut self.diarizer {
             let _ = diarizer.push_audio(samples);
+        }
+
+        // Pause detection (before buffering to get accurate timing)
+        let current_time = self.total_samples_received as f32 / SAMPLE_RATE as f32;
+        if self.config.pause_based_confirm {
+            self.detect_pause(samples, current_time);
         }
 
         // Add to buffer
@@ -259,18 +420,66 @@ impl RealtimeCanary {
         self.process_buffer()
     }
 
+    /// Update rolling inference time tracker and return the median
+    fn update_inference_stats(&mut self, time_ms: u32) -> u32 {
+        self.inference_times_ms.push(time_ms);
+        // Keep last 20 measurements
+        if self.inference_times_ms.len() > 20 {
+            self.inference_times_ms.remove(0);
+        }
+        let mut sorted = self.inference_times_ms.clone();
+        sorted.sort();
+        let median = sorted[sorted.len() / 2];
+        self.median_inference_time_ms = median;
+        median
+    }
+
     fn process_buffer(&mut self) -> Result<CanaryChunkResult> {
         let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
 
         // Convert buffer to vec
         let audio: Vec<f32> = self.audio_buffer.iter().copied().collect();
 
-        // Transcribe
+        // Transcribe with timing
+        let inference_start = std::time::Instant::now();
         let text = self.model.transcribe(&audio)?;
+        let inference_ms = inference_start.elapsed().as_millis() as u32;
         let text = text.trim().to_string();
 
-        // Calculate timing
-        let current_time = self.total_samples_received as f32 / SAMPLE_RATE as f32;
+        // Update inference stats
+        let median = self.update_inference_stats(inference_ms);
+
+        // Anomaly detection: if inference time > 5x the rolling median, skip result
+        if median > 0 && inference_ms > (median as f32 * INFERENCE_TIME_ANOMALY_MULTIPLIER) as u32 {
+            eprintln!(
+                "[RealtimeCanary] WARNING: Inference anomaly detected ({}ms vs {}ms median), skipping result",
+                inference_ms, median
+            );
+            return Ok(CanaryChunkResult {
+                text: String::new(),
+                is_partial: true,
+                buffer_time: buffer_secs,
+            });
+        }
+
+        // Apply hallucination truncation
+        let text = truncate_hallucination(&text);
+
+        // Length guard: if output is too long for the buffer duration, truncate
+        let max_expected_words = (buffer_secs * MAX_WORDS_PER_SEC * 3.0) as usize;
+        let word_count = text.split_whitespace().count();
+        let text = if word_count > max_expected_words && max_expected_words > 0 {
+            eprintln!(
+                "[RealtimeCanary] WARNING: Output too long ({} words for {:.1}s buffer), truncating to {}",
+                word_count, buffer_secs, max_expected_words
+            );
+            text.split_whitespace()
+                .take(max_expected_words)
+                .collect::<Vec<&str>>()
+                .join(" ")
+        } else {
+            text
+        };
 
         // Split into words for comparison
         let current_words: Vec<&str> = text.split_whitespace().collect();
@@ -289,15 +498,59 @@ impl RealtimeCanary {
         // New/unstable words at the end
         let unstable_words: Vec<&str> = current_words[common_prefix_len..].to_vec();
 
-        // Check if we should confirm more words
-        // Confirm words that have been stable and are old enough (buffer is moving past them)
-        let words_to_confirm = if common_prefix_len > self.confirmed_word_count {
-            // We have more stable words than confirmed - confirm the difference
+        // Calculate buffer start time for accurate partial segment timing
+        let buffer_start_time = (self.total_samples_received - self.audio_buffer.len()) as f32 / SAMPLE_RATE as f32;
+
+        // Always advance confirmed_end_time when the common prefix grows,
+        // even before stability count is met. This prevents start_time from freezing.
+        if common_prefix_len > self.confirmed_word_count {
+            // Estimate end time proportionally based on word position in the buffer
+            let total_words = current_words.len().max(1) as f32;
+            let stable_fraction = common_prefix_len as f32 / total_words;
+            let estimated_end = buffer_start_time + (buffer_secs * stable_fraction);
+            // Always keep confirmed_end_time moving forward
+            if estimated_end > self.confirmed_end_time {
+                self.confirmed_end_time = estimated_end;
+            }
+        }
+
+        // Check for pause-based force confirmation
+        // When a pause boundary is detected, force-confirm all stable text, bypassing MIN_STABLE_COUNT
+        let pause_force_confirm = if self.config.pause_based_confirm {
+            if let Some(_pause_time) = self.pause_boundary_time {
+                // Force confirm all stable words up to this point
+                if common_prefix_len > self.confirmed_word_count {
+                    let new_confirmed: Vec<&str> = stable_words[self.confirmed_word_count..].to_vec();
+                    if !new_confirmed.is_empty() {
+                        eprintln!(
+                            "[RealtimeCanary] Pause-based force confirm: {} words",
+                            new_confirmed.len()
+                        );
+                        self.pause_boundary_time = None; // Consume the pause
+                        Some(new_confirmed.join(" "))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Check if we should confirm more words (emit as final segment)
+        // Pause-based confirmation takes priority
+        let words_to_confirm = if pause_force_confirm.is_some() {
+            pause_force_confirm
+        } else if common_prefix_len > self.confirmed_word_count {
             let new_confirmed: Vec<&str> = stable_words[self.confirmed_word_count..].to_vec();
             if !new_confirmed.is_empty() {
                 let new_text = new_confirmed.join(" ");
 
-                // Only confirm if the text has been seen before (stability check)
+                // Only emit as final if the text has been seen before (stability check)
                 if self.pending_text == new_text {
                     self.pending_stable_count += 1;
                     if self.pending_stable_count >= MIN_STABLE_COUNT {
@@ -314,18 +567,20 @@ impl RealtimeCanary {
                 None
             }
         } else {
-            // Stable prefix shrunk or same - reset pending
-            if common_prefix_len < self.confirmed_word_count {
-                // This shouldn't happen often - the model changed its mind about confirmed text
-                // For now, just continue with partial output
-            }
+            // Stable prefix shrunk or same
             None
         };
 
         // Process any confirmed words
         if let Some(new_confirmed_text) = words_to_confirm {
-            let start_time = self.confirmed_end_time;
-            self.confirmed_end_time = current_time - (unstable_words.len() as f32 * 0.15); // Estimate
+            let start_time = self.confirmed_end_time
+                - (new_confirmed_text.split_whitespace().count() as f32 * 0.15);
+            let start_time = start_time.max(
+                self.pending_final_segments
+                    .last()
+                    .map(|(_, _, end)| *end)
+                    .unwrap_or(0.0),
+            );
 
             // Update confirmed state
             if !self.confirmed_text.is_empty() {
@@ -352,6 +607,7 @@ impl RealtimeCanary {
         self.last_transcription = text.clone();
 
         // Return the unstable portion as partial (what's still being refined)
+        // Use buffer_start_time for partial segment start rather than confirmed_end_time
         let partial_text = unstable_words.join(" ");
         Ok(CanaryChunkResult {
             text: partial_text,
@@ -395,6 +651,11 @@ impl RealtimeCanary {
         self.pending_text.clear();
         self.pending_stable_count = 0;
         self.pending_final_segments.clear();
+        self.inference_times_ms.clear();
+        self.median_inference_time_ms = 0;
+        self.silence_start_time = None;
+        self.pause_boundary_time = None;
+        self.last_pause_end_time = 0.0;
     }
 
     /// Take any pending final segments (drains them)

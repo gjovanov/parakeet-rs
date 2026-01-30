@@ -278,6 +278,9 @@ impl ModelRegistry {
                     min_audio_secs: 2.0,
                     process_interval_secs: 2.0,
                     language: "en".to_string(),
+                    pause_based_confirm: false,
+                    pause_threshold_secs: 0.6,
+                    silence_energy_threshold: 0.008,
                 };
 
                 let transcriber = RealtimeCanary::new(

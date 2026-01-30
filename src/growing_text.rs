@@ -115,7 +115,27 @@ impl GrowingTextMerger {
         let tail_changed;
 
         if anchor_idx == self.working_tokens.len() || match_len == 0 {
-            // No anchor found - pure append
+            // No anchor found - check for divergence (complete restart detection)
+            // If the new text's first 5 tokens share < 30% similarity with the
+            // last 5 working tokens, this looks like a complete restart
+            if self.working_tokens.len() >= 5 && new_tokens.len() >= 5 {
+                let tail_start = self.working_tokens.len() - 5;
+                let tail_slice = &self.working_tokens[tail_start..];
+                let new_head: Vec<String> = new_tokens[..5].iter().map(|s| s.to_string()).collect();
+                let matching = tail_slice.iter().zip(new_head.iter())
+                    .filter(|(a, b)| Self::token_similarity(a, b) > 0.7)
+                    .count();
+                let similarity = matching as f32 / 5.0;
+                if similarity < 0.3 {
+                    eprintln!(
+                        "[GrowingTextMerger] Divergence detected (similarity {:.0}%), finalizing and restarting",
+                        similarity * 100.0
+                    );
+                    self.finalize_current_sentence();
+                }
+            }
+
+            // Pure append
             if !self.working_buffer.is_empty() {
                 self.working_buffer.push(' ');
             }
@@ -144,6 +164,29 @@ impl GrowingTextMerger {
             tail_changed = true;
         }
 
+        // Detect and clean up any repetition corruption in working tokens
+        self.detect_repetition();
+
+        // Max working buffer check: if too large, force-finalize oldest sentences
+        if self.working_tokens.len() > 300 {
+            eprintln!(
+                "[GrowingTextMerger] Working buffer too large ({} tokens), force-finalizing oldest sentences",
+                self.working_tokens.len()
+            );
+            // Keep only the last ~100 tokens
+            let keep_start = self.working_tokens.len() - 100;
+            let to_finalize: Vec<String> = self.working_tokens.drain(..keep_start).collect();
+            let finalize_text = to_finalize.join(" ");
+            if !finalize_text.is_empty() {
+                self.finalized_sentences.push(FinalizedSentence {
+                    text: finalize_text,
+                    start_time: 0.0,
+                    end_time: 0.0,
+                });
+            }
+            self.working_buffer = self.working_tokens.join(" ");
+        }
+
         // Check if this is a finalizing update (sentence complete)
         let is_sentence_complete = is_final && self.ends_with_sentence_terminator(&self.working_buffer);
 
@@ -159,6 +202,77 @@ impl GrowingTextMerger {
         self.compact_working_list();
 
         self.current_result_with_sentence(tail_changed, current_sentence)
+    }
+
+    /// Detect and truncate repetition corruption in working tokens.
+    /// Scans for any word appearing 3+ times consecutively and truncates before
+    /// the first occurrence of the repetition.
+    fn detect_repetition(&mut self) {
+        if self.working_tokens.len() < 4 {
+            return;
+        }
+
+        // Check for 3+ consecutive identical words
+        let mut consecutive_count = 1usize;
+        for i in 1..self.working_tokens.len() {
+            if self.working_tokens[i].to_lowercase() == self.working_tokens[i - 1].to_lowercase()
+                && self.working_tokens[i].len() > 1
+            {
+                consecutive_count += 1;
+                if consecutive_count >= 3 {
+                    let truncate_at = i + 1 - consecutive_count;
+                    if truncate_at > 0 {
+                        eprintln!(
+                            "[GrowingTextMerger] Repetition detected: '{}' x{}, truncating at word {}",
+                            self.working_tokens[i], consecutive_count, truncate_at
+                        );
+                        self.working_tokens.truncate(truncate_at);
+                        self.working_buffer = self.working_tokens.join(" ");
+                        return;
+                    }
+                }
+            } else {
+                consecutive_count = 1;
+            }
+        }
+
+        // Check for repeated phrases (2-3 word patterns)
+        for pattern_len in 2..=3usize {
+            if self.working_tokens.len() < pattern_len * 3 {
+                continue;
+            }
+            for i in 0..=(self.working_tokens.len() - pattern_len * 3) {
+                let mut pattern_count = 1;
+                let mut j = i + pattern_len;
+                while j + pattern_len <= self.working_tokens.len() {
+                    let matches = (0..pattern_len).all(|k| {
+                        self.working_tokens[i + k].to_lowercase()
+                            == self.working_tokens[j + k].to_lowercase()
+                    });
+                    if matches {
+                        pattern_count += 1;
+                        if pattern_count >= 3 {
+                            eprintln!(
+                                "[GrowingTextMerger] Repeated phrase detected at {}: '{}'",
+                                i,
+                                self.working_tokens[i..i + pattern_len].join(" ")
+                            );
+                            if i > 0 {
+                                self.working_tokens.truncate(i);
+                                self.working_buffer = self.working_tokens.join(" ");
+                            } else {
+                                self.working_tokens.clear();
+                                self.working_buffer.clear();
+                            }
+                            return;
+                        }
+                        j += pattern_len;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Find the best anchor point in the working buffer for the new tokens
@@ -209,7 +323,81 @@ impl GrowingTextMerger {
             }
         }
 
+        // If token-level anchor was found, return it
+        if best_match_len > 0 {
+            return (best_anchor, best_match_len, best_score);
+        }
+
+        // Fallback: sentence-level overlap check
+        // If the new text's first sentence overlaps > 60% with any sentence in the
+        // working buffer's tail (by word containment), treat the overlap point as the anchor.
+        // This handles cases like "der M" vs "DM" where Levenshtein fails on short tokens.
+        let new_first_sentence = Self::extract_first_sentence_words(new_tokens);
+        if new_first_sentence.len() >= 3 {
+            let new_normalized: Vec<String> = new_first_sentence
+                .iter()
+                .map(|w| Self::normalize_for_matching(w))
+                .filter(|w| !w.is_empty())
+                .collect();
+
+            if !new_normalized.is_empty() {
+                // Scan working buffer tail for sentence-level overlap
+                // Look at the last few sentences' worth of tokens
+                let scan_start = self.working_tokens.len().saturating_sub(self.config.search_back_tokens);
+                for start_idx in scan_start..self.working_tokens.len() {
+                    let remaining = &self.working_tokens[start_idx..];
+                    let remaining_normalized: Vec<String> = remaining
+                        .iter()
+                        .map(|w| Self::normalize_for_matching(w))
+                        .filter(|w| !w.is_empty())
+                        .collect();
+
+                    if remaining_normalized.is_empty() {
+                        continue;
+                    }
+
+                    // Count how many of the new words appear in the remaining working tokens
+                    let matching_words = new_normalized.iter()
+                        .filter(|w| remaining_normalized.contains(w))
+                        .count();
+                    let overlap = matching_words as f32 / new_normalized.len() as f32;
+
+                    if overlap >= 0.6 {
+                        return (start_idx, 1, overlap);
+                    }
+                }
+            }
+        }
+
         (best_anchor, best_match_len, best_score)
+    }
+
+    /// Extract words from the first sentence of a token list (up to first sentence terminator)
+    fn extract_first_sentence_words<'a>(tokens: &[&'a str]) -> Vec<&'a str> {
+        let mut result = Vec::new();
+        for &token in tokens {
+            result.push(token);
+            let trimmed = token.trim_end_matches(|c: char| c.is_ascii_punctuation());
+            let _ = trimmed; // we just check the original
+            if token.ends_with('.') || token.ends_with('!') || token.ends_with('?') {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Normalize a token for matching, stripping articles and common prefixes
+    /// that may differ between transcription passes (e.g., "der M" vs "DM")
+    fn normalize_for_matching(token: &str) -> String {
+        let normalized = Self::normalize_token(token);
+        // Strip common German/Romance articles that cause matching failures
+        let articles = ["der", "die", "das", "ein", "eine", "des", "dem", "den",
+                        "le", "la", "les", "un", "une", "el", "los", "las",
+                        "the", "a", "an"];
+        if articles.contains(&normalized.as_str()) {
+            return String::new(); // Skip articles in matching
+        }
+        normalized
     }
 
     /// Compute match score between two token sequences

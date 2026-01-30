@@ -705,6 +705,16 @@ pub fn run_session_transcription(
                         }
                     }
 
+                    // Hallucination rejection: skip results from extremely slow inference (>10s)
+                    if inference_time.as_secs() > 10 && !is_parallel_mode && !is_pause_parallel_mode {
+                        eprintln!(
+                            "[Session {}] HALLUCINATION GUARD: inference took {:.1}s, skipping result",
+                            transcription_session.id,
+                            inference_time.as_secs_f32(),
+                        );
+                        continue;
+                    }
+
                     // Log slow inference calls (> 5 seconds) for non-parallel modes
                     if inference_time.as_secs() > 5 && !is_parallel_mode && !is_pause_parallel_mode {
                         eprintln!(
@@ -715,8 +725,17 @@ pub fn run_session_transcription(
                         );
                     }
 
+                    // Apply hallucination truncation to each segment's text
+                    for segment in &mut result.segments {
+                        segment.text = truncate_hallucination_text(&segment.text);
+                    }
+
                     // Process segments through sentence buffer
                     for segment in result.segments {
+                        // Skip empty segments (truncated away entirely)
+                        if segment.text.trim().is_empty() {
+                            continue;
+                        }
                         if let Some(merged) = sentence_buffer.push(segment) {
                             emit_streaming_segments(&transcription_session, &[merged], &mut growing_merger);
                         }
@@ -1190,42 +1209,63 @@ fn create_canary_config(
             min_audio_secs: 1.0,
             process_interval_secs: 1.0,
             language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
         },
         "pause_based" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
             min_audio_secs: 2.0,
             process_interval_secs: 2.0,
             language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
         },
         "low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
             min_audio_secs: 1.5,
             process_interval_secs: 1.5,
             language,
+            pause_based_confirm: false,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
         },
         "ultra_low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 6.0,
             min_audio_secs: 1.0,
             process_interval_secs: 1.0,
             language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.5,
+            silence_energy_threshold: 0.008,
         },
         "extreme_low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 4.0,
             min_audio_secs: 0.5,
             process_interval_secs: 0.5,
             language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.4,
+            silence_energy_threshold: 0.008,
         },
         "lookahead" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
             min_audio_secs: 2.0,
             process_interval_secs: 2.0,
             language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
         },
         _ => RealtimeCanaryConfig {
             buffer_size_secs: 8.0,
             min_audio_secs: 1.0,
             process_interval_secs: 1.0,
             language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
         },
     }
 }
@@ -1341,9 +1381,18 @@ fn emit_streaming_segments(
         // Process through growing text merger for incremental display
         let growing_result = growing_merger.push(&segment.text, segment.is_final);
 
+        // Emit delta as primary text when available and non-empty,
+        // falling back to segment.text. Keep segment.text as raw_text for clients that need it.
+        let primary_text = if !growing_result.delta.is_empty() {
+            &growing_result.delta
+        } else {
+            &segment.text
+        };
+
         let subtitle_msg = serde_json::json!({
             "type": "subtitle",
-            "text": segment.text,
+            "text": primary_text,
+            "raw_text": segment.text,
             "growing_text": growing_result.current_sentence,
             "full_transcript": growing_result.buffer,
             "delta": growing_result.delta,
@@ -1382,6 +1431,65 @@ fn emit_streaming_segments(
             tail_marker
         );
     }
+}
+
+/// Truncate text at first detected hallucination (3+ consecutive repeated words
+/// or 3+ repeated 2-3 word phrases) for the emit pipeline
+fn truncate_hallucination_text(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 4 {
+        return text.to_string();
+    }
+
+    // Check for 3+ consecutive identical words
+    let mut consecutive_count = 1;
+    for i in 1..words.len() {
+        if words[i].to_lowercase() == words[i - 1].to_lowercase() && words[i].len() > 1 {
+            consecutive_count += 1;
+            if consecutive_count >= 3 {
+                let truncate_at = i - consecutive_count + 1;
+                if truncate_at > 0 {
+                    return words[..truncate_at].join(" ");
+                }
+                return String::new();
+            }
+        } else {
+            consecutive_count = 1;
+        }
+    }
+
+    // Check for repeated phrases (2-3 word patterns)
+    for pattern_len in 2..=3 {
+        if words.len() < pattern_len * 3 {
+            continue;
+        }
+        for i in 0..=(words.len() - pattern_len * 3) {
+            let pattern: Vec<&str> = words[i..i + pattern_len].to_vec();
+            let mut pattern_count = 1;
+            let mut j = i + pattern_len;
+            while j + pattern_len <= words.len() {
+                let candidate: Vec<&str> = words[j..j + pattern_len].to_vec();
+                if candidate
+                    .iter()
+                    .zip(pattern.iter())
+                    .all(|(a, b)| a.to_lowercase() == b.to_lowercase())
+                {
+                    pattern_count += 1;
+                    if pattern_count >= 3 {
+                        if i > 0 {
+                            return words[..i].join(" ");
+                        }
+                        return String::new();
+                    }
+                    j += pattern_len;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    text.to_string()
 }
 
 /// Run VoD batch transcription

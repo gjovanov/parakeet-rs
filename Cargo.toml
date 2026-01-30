@@ -83,6 +83,10 @@ path = "examples/realtime_tdt.rs"
 name = "webrtc_transcriber"
 path = "examples/webrtc_transcriber/main.rs"
 
+[[example]]
+name = "test_canary_speedy_growing"
+path = "examples/tests/test_canary_speedy_growing.rs"
+
 [features]
 default = ["cpu"]
 cpu = []

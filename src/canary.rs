@@ -57,6 +57,9 @@ pub struct CanaryConfig {
     pub max_sequence_length: usize,
     /// Target language code (e.g., "en" for English)
     pub language: String,
+    /// Repetition penalty applied during greedy decoding (default: 1.2)
+    /// Values > 1.0 discourage repeating already-generated tokens.
+    pub repetition_penalty: f32,
 }
 
 impl Default for CanaryConfig {
@@ -66,6 +69,7 @@ impl Default for CanaryConfig {
             sample_rate: SAMPLE_RATE,
             max_sequence_length: 1024,
             language: "en".to_string(),
+            repetition_penalty: 1.2,
         }
     }
 }
@@ -493,7 +497,22 @@ impl CanaryModel {
 
             // Get logits for last position
             let last_pos_start = (seq_len - 1) * vocab_size;
-            let last_logits: Vec<f32> = logits_data[last_pos_start..last_pos_start + vocab_size].to_vec();
+            let mut last_logits: Vec<f32> = logits_data[last_pos_start..last_pos_start + vocab_size].to_vec();
+
+            // Apply repetition penalty to already-generated tokens
+            let penalty = self.config.repetition_penalty;
+            if penalty != 1.0 {
+                for &token_id in &tokens {
+                    let idx = token_id as usize;
+                    if idx < last_logits.len() {
+                        if last_logits[idx] > 0.0 {
+                            last_logits[idx] /= penalty;
+                        } else {
+                            last_logits[idx] *= penalty;
+                        }
+                    }
+                }
+            }
 
             // Greedy selection
             let next_token = last_logits
