@@ -140,6 +140,7 @@ export class WebSocketClient {
           this.emit('subtitle', {
             text: message.text,
             growingText: message.growing_text,
+            fullTranscript: message.full_transcript,
             delta: message.delta,
             tailChanged: message.tail_changed,
             speaker: message.speaker,

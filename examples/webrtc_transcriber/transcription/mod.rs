@@ -730,15 +730,45 @@ pub fn run_session_transcription(
                         segment.text = truncate_hallucination_text(&segment.text);
                     }
 
-                    // Process segments through sentence buffer
+                    // Every segment gets a partial for live subtitle display.
+                    // Growing_merger's sentence finalization determines when a
+                    // FINAL is emitted for the transcript (not the sentence_buffer,
+                    // which would emit for each progressive update causing duplicates).
                     for segment in result.segments {
                         // Skip empty segments (truncated away entirely)
                         if segment.text.trim().is_empty() {
                             continue;
                         }
-                        if let Some(merged) = sentence_buffer.push(segment) {
-                            emit_streaming_segments(&transcription_session, &[merged], &mut growing_merger);
+
+                        // Track finalization state before push
+                        let prev_finalized = growing_merger.get_finalized_sentences().len();
+
+                        // Update growing text
+                        let growing_result = growing_merger.push(&segment.text, segment.is_final);
+                        let new_finalized = growing_merger.get_finalized_sentences().len();
+
+                        // Emit FINAL for each newly finalized sentence (for transcript)
+                        for i in prev_finalized..new_finalized {
+                            let fs = &growing_merger.get_finalized_sentences()[i];
+                            // Skip degenerate sentences (just punctuation or very short)
+                            let trimmed = fs.text.trim();
+                            if trimmed.len() <= 2 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
+                                continue;
+                            }
+                            let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                                text: fs.text.clone(),
+                                start_time: segment.start_time,
+                                end_time: segment.end_time,
+                                speaker: segment.speaker,
+                                confidence: None,
+                                is_final: true,
+                                inference_time_ms: segment.inference_time_ms,
+                            };
+                            emit_final_subtitle(&transcription_session, &final_segment, &growing_result);
                         }
+
+                        // Always emit partial for live display
+                        emit_partial_subtitle(&transcription_session, &segment, &growing_result);
                     }
                 }
                 Err(e) => {
@@ -1207,7 +1237,7 @@ fn create_canary_config(
         "speedy" => RealtimeCanaryConfig {
             buffer_size_secs: 8.0,
             min_audio_secs: 1.0,
-            process_interval_secs: 1.0,
+            process_interval_secs: 0.5,
             language,
             pause_based_confirm: true,
             pause_threshold_secs: 0.6,
@@ -1363,35 +1393,108 @@ fn create_transcription_config(
     }
 }
 
-/// Helper to emit transcript segments from StreamingTranscriber with growing text support
+/// Emit a partial subtitle for live display.
+/// Called for every segment to keep the live subtitle area updated with growing text.
+fn emit_partial_subtitle(
+    session: &TranscriptionSession,
+    segment: &parakeet_rs::streaming_transcriber::TranscriptionSegment,
+    growing_result: &parakeet_rs::growing_text::GrowingTextResult,
+) {
+    let subtitle_msg = serde_json::json!({
+        "type": "subtitle",
+        "text": segment.text,
+        "raw_text": segment.text,
+        "growing_text": growing_result.current_sentence,
+        "full_transcript": growing_result.buffer,
+        "delta": growing_result.delta,
+        "tail_changed": growing_result.tail_changed,
+        "speaker": segment.speaker,
+        "start": segment.start_time,
+        "end": segment.end_time,
+        "is_final": false,
+        "inference_time_ms": segment.inference_time_ms
+    });
+
+    let receiver_count = session.subtitle_tx.receiver_count();
+    let subtitle_str = subtitle_msg.to_string();
+    session.set_last_subtitle(subtitle_str.clone());
+    let _ = session.subtitle_tx.send(subtitle_str);
+
+    let tail_marker = if growing_result.tail_changed { " [TAIL CHANGED]" } else { "" };
+    eprintln!(
+        "[Session {} | partial | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (inference: {}ms, receivers: {}){}",
+        session.id,
+        segment.speaker.map(|s| s.to_string()).unwrap_or_else(|| "?".to_string()),
+        &segment.text.chars().take(80).collect::<String>(),
+        segment.start_time,
+        segment.end_time,
+        segment.inference_time_ms.unwrap_or(0),
+        receiver_count,
+        tail_marker
+    );
+}
+
+/// Emit a final subtitle for the transcript.
+/// Called when the growing_merger finalizes a sentence.
+fn emit_final_subtitle(
+    session: &TranscriptionSession,
+    merged: &parakeet_rs::streaming_transcriber::TranscriptionSegment,
+    growing_result: &parakeet_rs::growing_text::GrowingTextResult,
+) {
+    // For FINAL messages, use the finalized text as growing_text so the live
+    // subtitle display shows the completed sentence (not the working buffer
+    // which may be just "." right after finalization).
+    let growing_text = if growing_result.current_sentence.trim().len() <= 2 {
+        &merged.text
+    } else {
+        &growing_result.current_sentence
+    };
+
+    let subtitle_msg = serde_json::json!({
+        "type": "subtitle",
+        "text": merged.text,
+        "raw_text": merged.text,
+        "growing_text": growing_text,
+        "full_transcript": growing_result.buffer,
+        "delta": "",
+        "tail_changed": false,
+        "speaker": merged.speaker,
+        "start": merged.start_time,
+        "end": merged.end_time,
+        "is_final": true,
+        "inference_time_ms": merged.inference_time_ms
+    });
+
+    let receiver_count = session.subtitle_tx.receiver_count();
+    let subtitle_str = subtitle_msg.to_string();
+    session.set_last_subtitle(subtitle_str.clone());
+    let _ = session.subtitle_tx.send(subtitle_str);
+
+    eprintln!(
+        "[Session {} | FINAL | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (inference: {}ms, receivers: {})",
+        session.id,
+        merged.speaker.map(|s| s.to_string()).unwrap_or_else(|| "?".to_string()),
+        &merged.text.chars().take(80).collect::<String>(),
+        merged.start_time,
+        merged.end_time,
+        merged.inference_time_ms.unwrap_or(0),
+        receiver_count,
+    );
+}
+
+/// Helper to emit transcript segments from StreamingTranscriber with growing text support.
+/// Used for finalize/flush paths where sentence_buffer emits remaining content.
 fn emit_streaming_segments(
     session: &TranscriptionSession,
     segments: &[parakeet_rs::streaming_transcriber::TranscriptionSegment],
     growing_merger: &mut GrowingTextMerger,
 ) {
-    if !segments.is_empty() {
-        eprintln!(
-            "[Session {}] emit_streaming_segments: {} segment(s)",
-            session.id,
-            segments.len()
-        );
-    }
-
     for segment in segments {
-        // Process through growing text merger for incremental display
         let growing_result = growing_merger.push(&segment.text, segment.is_final);
-
-        // Emit delta as primary text when available and non-empty,
-        // falling back to segment.text. Keep segment.text as raw_text for clients that need it.
-        let primary_text = if !growing_result.delta.is_empty() {
-            &growing_result.delta
-        } else {
-            &segment.text
-        };
 
         let subtitle_msg = serde_json::json!({
             "type": "subtitle",
-            "text": primary_text,
+            "text": segment.text,
             "raw_text": segment.text,
             "growing_text": growing_result.current_sentence,
             "full_transcript": growing_result.buffer,
@@ -1404,31 +1507,21 @@ fn emit_streaming_segments(
             "inference_time_ms": segment.inference_time_ms
         });
 
-        let receiver_count = session.subtitle_tx.receiver_count();
         let subtitle_str = subtitle_msg.to_string();
-
-        // Cache the last subtitle for late-joining clients
         session.set_last_subtitle(subtitle_str.clone());
-
         let _ = session.subtitle_tx.send(subtitle_str);
 
-        // Log with growing text info
         let partial_marker = if segment.is_final { "FINAL" } else { "partial" };
-        let tail_marker = if growing_result.tail_changed { " [TAIL CHANGED]" } else { "" };
         eprintln!(
-            "[Session {} | {} | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (inference: {}ms, receivers: {}){}",
+            "[Session {} | {} | Speaker {}] \"{}\" [{:.2}s-{:.2}s] (inference: {}ms, receivers: {})",
             session.id,
             partial_marker,
-            segment
-                .speaker
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "?".to_string()),
-            segment.text,
+            segment.speaker.map(|s| s.to_string()).unwrap_or_else(|| "?".to_string()),
+            &segment.text.chars().take(80).collect::<String>(),
             segment.start_time,
             segment.end_time,
             segment.inference_time_ms.unwrap_or(0),
-            receiver_count,
-            tail_marker
+            session.subtitle_tx.receiver_count(),
         );
     }
 }

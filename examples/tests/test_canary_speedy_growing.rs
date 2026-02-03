@@ -79,12 +79,12 @@ fn truncate_hallucination_text(text: &str) -> String {
 fn word_similarity(generated: &str, reference: &str) -> (f64, usize, usize, usize) {
     let gen_words: Vec<String> = generated
         .split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+        .map(|w: &str| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
         .filter(|w| !w.is_empty())
         .collect();
     let ref_words: Vec<String> = reference
         .split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+        .map(|w: &str| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
         .filter(|w| !w.is_empty())
         .collect();
 
@@ -117,12 +117,16 @@ fn word_similarity(generated: &str, reference: &str) -> (f64, usize, usize, usiz
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Canary Speedy Mode: Growing Sentence Test ===\n");
+    let args: Vec<String> = std::env::args().collect();
+    let audio_path = args.get(1).map(|s| s.as_str()).unwrap_or("./media/broadcast_1.wav");
+    let transcript_path = args.get(2).map(|s| s.as_str()).unwrap_or("./media/broadcast_1.transcript.txt");
+
+    println!("=== Canary Speedy Mode: Growing Sentence Test ===");
+    println!("Audio: {}", audio_path);
+    println!("Transcript: {}\n", transcript_path);
 
     // Check required files
     let canary_path = "./canary";
-    let audio_path = "./media/broadcast_1.wav";
-    let transcript_path = "./media/broadcast_1.transcript.txt";
 
     if !std::path::Path::new(canary_path).exists() {
         eprintln!("ERROR: Canary model not found at {}", canary_path);
@@ -149,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = RealtimeCanaryConfig {
         buffer_size_secs: 8.0,
         min_audio_secs: 1.0,
-        process_interval_secs: 1.0,
+        process_interval_secs: 0.5,
         language: "de".to_string(),
         pause_based_confirm: true,
         pause_threshold_secs: 0.6,
@@ -264,6 +268,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // End-of-stream: finalize transcriber, flush sentence buffer, flush growing merger
+    match transcriber.finalize() {
+        Ok(result) => {
+            for mut segment in result.segments {
+                segment.text = truncate_hallucination_text(&segment.text);
+                if segment.text.trim().is_empty() { continue; }
+                if let Some(merged) = sentence_buffer.push(segment) {
+                    segment_count += 1;
+                    let growing_result = growing_merger.push(&merged.text, merged.is_final);
+                    if growing_result.buffer != last_growing_text {
+                        last_growing_text = growing_result.buffer.clone();
+                    }
+                }
+            }
+        }
+        Err(e) => eprintln!("Finalize error: {}", e),
+    }
+    // Flush sentence buffer
+    if let Some(flushed) = sentence_buffer.flush() {
+        let growing_result = growing_merger.push(&flushed.text, flushed.is_final);
+        if growing_result.buffer != last_growing_text {
+            last_growing_text = growing_result.buffer.clone();
+        }
+    }
     let elapsed = start_time.elapsed();
     let rtf = elapsed.as_secs_f32() / duration_secs;
     println!("\n\n=== Pipeline Complete ===");
@@ -271,19 +299,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Segments emitted: {}", segment_count);
     println!("Growing text snapshots: {}", growing_snapshots.len());
 
-    // Get final growing text
+    // Get final growing text (full buffer = finalized + working)
     let final_growing = if !last_growing_text.is_empty() {
         last_growing_text.clone()
     } else {
         "(empty)".to_string()
     };
 
-    // Print final growing text
-    println!("\n=== Final Growing Text ===");
+    // Get finalized-only text (primary quality metric)
+    let finalized_sentences = growing_merger.get_finalized_sentences();
+    let finalized_text = if finalized_sentences.is_empty() {
+        // If nothing was finalized, fall back to the full buffer
+        final_growing.clone()
+    } else {
+        finalized_sentences.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ")
+    };
+
+    // Print outputs
+    println!("\n=== Finalized Text (primary metric) ===");
+    println!("{}", finalized_text);
+    println!("\n=== Full Growing Text (debug) ===");
     println!("{}", final_growing);
 
-    // Compare against reference
-    println!("\n=== Comparison with Reference Transcript ===");
+    // === Primary metric: Finalized text vs reference ===
+    println!("\n=== Finalized Text vs Reference Transcript (PRIMARY) ===");
+    let (fin_similarity, fin_lcs_len, fin_gen_words, fin_ref_words) = word_similarity(&finalized_text, reference_text);
+    println!("Finalized words: {}", fin_gen_words);
+    println!("Reference words: {}", fin_ref_words);
+    println!("LCS matching words: {}", fin_lcs_len);
+    println!("Word-order similarity (LCS): {:.1}%", fin_similarity * 100.0);
+
+    let fin_gen_word_set: std::collections::HashSet<String> = finalized_text
+        .split_whitespace()
+        .map(|w: &str| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+        .collect();
+    let fin_ref_word_set: std::collections::HashSet<String> = reference_text
+        .split_whitespace()
+        .map(|w: &str| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+        .collect();
+    let fin_common = fin_gen_word_set.intersection(&fin_ref_word_set).count();
+    let fin_recall = if !fin_ref_word_set.is_empty() {
+        fin_common as f64 / fin_ref_word_set.len() as f64
+    } else {
+        0.0
+    };
+    let fin_precision = if !fin_gen_word_set.is_empty() {
+        fin_common as f64 / fin_gen_word_set.len() as f64
+    } else {
+        0.0
+    };
+    println!("Finalized word recall: {:.1}% ({}/{})", fin_recall * 100.0, fin_common, fin_ref_word_set.len());
+    println!("Finalized word precision: {:.1}% ({}/{})", fin_precision * 100.0, fin_common, fin_gen_word_set.len());
+
+    // === Secondary metric: Full buffer vs reference (debug) ===
+    println!("\n=== Full Buffer vs Reference Transcript (SECONDARY/DEBUG) ===");
     let (similarity, lcs_len, gen_words, ref_words) = word_similarity(&final_growing, reference_text);
     println!("Generated words: {}", gen_words);
     println!("Reference words: {}", ref_words);
@@ -293,11 +362,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Word recall (what fraction of reference words appear in generated text)
     let gen_word_set: std::collections::HashSet<String> = final_growing
         .split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+        .map(|w: &str| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
         .collect();
     let ref_word_set: std::collections::HashSet<String> = reference_text
         .split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+        .map(|w: &str| w.to_lowercase().trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
         .collect();
     let common_words = gen_word_set.intersection(&ref_word_set).count();
     let recall = if !ref_word_set.is_empty() {
@@ -313,8 +382,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Unique word recall: {:.1}% ({}/{})", recall * 100.0, common_words, ref_word_set.len());
     println!("Unique word precision: {:.1}% ({}/{})", precision * 100.0, common_words, gen_word_set.len());
 
-    // Check for repetition issues in final output
-    let words: Vec<&str> = final_growing.split_whitespace().collect();
+    // Check for repetition issues in finalized output
+    let words: Vec<&str> = finalized_text.split_whitespace().collect();
     let mut max_repeat = 1;
     let mut current_repeat = 1;
     for i in 1..words.len() {
@@ -364,8 +433,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n=== Growing Text Evolution (last 5 snapshots) ===");
             for (i, (t, text)) in growing_snapshots.iter().rev().take(5).rev().enumerate() {
                 let idx = growing_snapshots.len() - 5 + i;
-                let display = if text.len() > 120 {
-                    format!("...{}", &text[text.len() - 117..])
+                let display = if text.chars().count() > 120 {
+                    let tail: String = text.chars().rev().take(117).collect::<Vec<_>>().into_iter().rev().collect();
+                    format!("...{}", tail)
                 } else {
                     text.clone()
                 };

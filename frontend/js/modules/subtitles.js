@@ -370,7 +370,7 @@ export class SubtitleRenderer {
       // Use growingText if available (incrementally built transcript), otherwise fallback to text
       const displayText = segment.growingText || segment.text;
       // Split text by sentence-ending punctuation into separate paragraphs
-      const sentences = displayText.split(/([.!?])/);
+      const sentences = displayText.split(/((?<!\d)\.(?!\d)|[!?])/);
       let formattedHtml = '';
       let currentSentence = '';
 

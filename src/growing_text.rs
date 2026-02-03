@@ -488,6 +488,16 @@ impl GrowingTextMerger {
         prev_row[n]
     }
 
+    /// Check if a dot at the given byte position is inside a number (e.g., "25.000").
+    /// A dot is inside a number if it's preceded by a digit AND followed by a digit.
+    fn is_dot_in_number(text: &str, byte_pos: usize) -> bool {
+        let bytes = text.as_bytes();
+        byte_pos > 0
+            && byte_pos + 1 < bytes.len()
+            && bytes[byte_pos - 1].is_ascii_digit()
+            && bytes[byte_pos + 1].is_ascii_digit()
+    }
+
     /// Check if text ends with sentence terminator
     fn ends_with_sentence_terminator(&self, text: &str) -> bool {
         let trimmed = text.trim_end();
@@ -547,17 +557,27 @@ impl GrowingTextMerger {
 
     /// Count complete sentences in working buffer
     fn count_sentences_in_working(&self) -> usize {
-        self.working_buffer
-            .chars()
-            .filter(|c| *c == '.' || *c == '!' || *c == '?' || *c == '。')
-            .count()
+        let mut count = 0;
+        for (i, c) in self.working_buffer.char_indices() {
+            match c {
+                '!' | '?' | '。' => count += 1,
+                '.' if !Self::is_dot_in_number(&self.working_buffer, i) => count += 1,
+                _ => {}
+            }
+        }
+        count
     }
 
     /// Find character position to split after N sentences
     fn find_sentence_split_position(&self, n: usize) -> Option<usize> {
         let mut count = 0;
         for (i, c) in self.working_buffer.char_indices() {
-            if c == '.' || c == '!' || c == '?' || c == '。' {
+            let is_terminator = match c {
+                '!' | '?' | '。' => true,
+                '.' => !Self::is_dot_in_number(&self.working_buffer, i),
+                _ => false,
+            };
+            if is_terminator {
                 count += 1;
                 if count == n {
                     return Some(i + c.len_utf8());
@@ -619,14 +639,13 @@ impl GrowingTextMerger {
             return String::new();
         }
 
-        // Find the last sentence-ending punctuation
-        let terminators = ['.', '!', '?'];
-
-        // Find the last terminator position
+        // Find the last sentence-ending punctuation (skipping dots inside numbers)
         let mut last_terminator_pos = None;
         for (i, c) in text.char_indices() {
-            if terminators.contains(&c) {
-                last_terminator_pos = Some(i);
+            match c {
+                '!' | '?' => last_terminator_pos = Some(i),
+                '.' if !Self::is_dot_in_number(text, i) => last_terminator_pos = Some(i),
+                _ => {}
             }
         }
 
@@ -637,10 +656,17 @@ impl GrowingTextMerger {
                 let trimmed = after.trim();
                 if trimmed.is_empty() {
                     // If nothing after terminator, return the last complete sentence
-                    // Find the second-to-last terminator
-                    let before = &text[..pos];
-                    if let Some(prev_pos) = before.rfind(|c| terminators.contains(&c)) {
-                        text[prev_pos + 1..].trim().to_string()
+                    // Find the second-to-last terminator (skipping dots in numbers)
+                    let mut prev_pos = None;
+                    for (i, c) in text[..pos].char_indices() {
+                        match c {
+                            '!' | '?' => prev_pos = Some(i),
+                            '.' if !Self::is_dot_in_number(text, i) => prev_pos = Some(i),
+                            _ => {}
+                        }
+                    }
+                    if let Some(pp) = prev_pos {
+                        text[pp + 1..].trim().to_string()
                     } else {
                         // No second terminator - return the whole text as the sentence
                         text.trim().to_string()
