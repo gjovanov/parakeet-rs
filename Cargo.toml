@@ -66,6 +66,8 @@ webrtc = "0.11"
 audiopus = "0.3.0-rc.0"
 # For killing ffmpeg processes on session stop
 libc = "0.2"
+# HTTP client for FAB live transcription forwarding
+reqwest = { version = "0.12", default-features = false }
 
 [[example]]
 name = "diarization_fast"

@@ -1,0 +1,96 @@
+# Multi-stage build for parakeet-rs WebRTC transcriber (CPU mode)
+# Based on: https://github.com/gjovanov/parakeet-rs/blob/main/docker/Dockerfile.cpu
+
+# ---- Stage 1: Builder ----
+FROM rust:latest AS builder
+
+ARG ONNX_VERSION=1.20.1
+
+RUN apt-get update && apt-get install -y \
+    cmake \
+    clang \
+    pkg-config \
+    libssl-dev \
+    libopus-dev \
+    libasound2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install ONNX Runtime CPU for build and runtime
+RUN curl -L "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-${ONNX_VERSION}.tgz" | \
+    tar -xz -C /tmp && \
+    cp /tmp/onnxruntime-linux-x64-${ONNX_VERSION}/lib/libonnxruntime*.so* /usr/local/lib/ && \
+    ldconfig && \
+    rm -rf /tmp/onnxruntime-linux-x64-${ONNX_VERSION}
+
+WORKDIR /app
+
+# Copy manifests first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy source for dependency compilation
+RUN mkdir -p src && echo "pub fn lib() {}" > src/lib.rs
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+RUN cargo build --release --features sortformer 2>/dev/null || true
+
+# Copy actual source code
+COPY src/ src/
+COPY examples/ examples/
+
+# Build the webrtc_transcriber example binary
+RUN cargo build --release --example webrtc_transcriber --features sortformer
+
+# ---- Stage 2: Runtime ----
+FROM debian:bookworm-slim
+
+ARG ONNX_VERSION=1.20.1
+
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    libopus0 \
+    ca-certificates \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy ONNX Runtime shared libraries from builder
+COPY --from=builder /usr/local/lib/libonnxruntime* /usr/local/lib/
+RUN ldconfig
+
+WORKDIR /app
+
+# Copy the compiled binary
+COPY --from=builder /app/target/release/examples/webrtc_transcriber /app/
+
+# Copy frontend
+COPY frontend/ /app/frontend/
+
+# Create model directories
+RUN mkdir -p /app/models/tdt /app/models/diarization /app/models/canary /app/media
+
+# Environment defaults
+ENV PORT=8080 \
+    PUBLIC_IP="" \
+    WS_HOST="" \
+    FRONTEND_PATH="/app/frontend" \
+    TDT_MODEL_PATH="/app/models/tdt" \
+    DIAR_MODEL_PATH="/app/models/diarization/model.onnx" \
+    CANARY_MODEL_PATH="/app/models/canary" \
+    VAD_MODEL_PATH="/app/models/silero_vad.onnx" \
+    MEDIA_DIR="/app/media" \
+    USE_GPU="false" \
+    SPEEDY_MODE="1" \
+    INTRA_THREADS="4" \
+    INTER_THREADS="1" \
+    TURN_SERVER="" \
+    TURN_USERNAME="" \
+    TURN_PASSWORD="" \
+    RUST_LOG="info" \
+    ORT_DYLIB_PATH="/usr/local/lib/libonnxruntime.so"
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+ENTRYPOINT ["/app/webrtc_transcriber"]
+CMD ["--frontend", "/app/frontend"]

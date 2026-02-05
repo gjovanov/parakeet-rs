@@ -71,6 +71,10 @@ pub struct GrowingTextMerger {
 
     // Previous state for delta calculation
     previous_buffer: String,
+
+    // Stability tracking for trailing sentence finalization
+    last_stable_buffer: String,
+    stable_count: usize,
 }
 
 impl GrowingTextMerger {
@@ -87,6 +91,8 @@ impl GrowingTextMerger {
             working_buffer: String::new(),
             working_tokens: Vec::new(),
             previous_buffer: String::new(),
+            last_stable_buffer: String::new(),
+            stable_count: 0,
         }
     }
 
@@ -114,6 +120,8 @@ impl GrowingTextMerger {
 
         let tail_changed;
 
+        let mut divergence_fired = false;
+
         if anchor_idx == self.working_tokens.len() || match_len == 0 {
             // No anchor found - check for divergence (complete restart detection)
             // If the new text's first 5 tokens share < 30% similarity with the
@@ -132,6 +140,7 @@ impl GrowingTextMerger {
                         similarity * 100.0
                     );
                     self.finalize_current_sentence();
+                    divergence_fired = true;
                 }
             }
 
@@ -185,6 +194,44 @@ impl GrowingTextMerger {
                 });
             }
             self.working_buffer = self.working_tokens.join(" ");
+        }
+
+        // Proactively finalize complete sentences that have new text after them.
+        // Skip when divergence just fired — the text just arrived fresh, let it
+        // accumulate for at least one more push before splitting.
+        if !divergence_fired {
+            self.finalize_inner_sentences();
+        }
+
+        // Stability-based trailing sentence finalization:
+        // If the working buffer ends with a sentence terminator and hasn't changed
+        // for 3+ consecutive pushes, the model has stabilized — finalize it even
+        // without is_final from the transcriber.
+        // Skip when divergence just fired — buffer just changed, can't be stable.
+        if !divergence_fired {
+            if self.working_buffer == self.last_stable_buffer {
+                self.stable_count += 1;
+            } else {
+                self.stable_count = 0;
+                self.last_stable_buffer = self.working_buffer.clone();
+            }
+            if self.stable_count >= 3
+                && !self.working_buffer.is_empty()
+                && self.ends_with_sentence_terminator(&self.working_buffer)
+            {
+                eprintln!(
+                    "[GrowingTextMerger] Stable trailing sentence detected ({} pushes), finalizing: \"{}\"",
+                    self.stable_count,
+                    &self.working_buffer.chars().take(80).collect::<String>()
+                );
+                self.finalize_current_sentence();
+                self.stable_count = 0;
+                self.last_stable_buffer.clear();
+            }
+        } else {
+            // Reset stability tracking after divergence
+            self.stable_count = 0;
+            self.last_stable_buffer = self.working_buffer.clone();
         }
 
         // Check if this is a finalizing update (sentence complete)
@@ -515,6 +562,14 @@ impl GrowingTextMerger {
             return;
         }
 
+        // Dedup: skip if this text heavily overlaps with a recent finalized entry
+        if self.is_duplicate_of_recent(&self.working_buffer) {
+            // Don't finalize — just clear the working buffer to avoid re-processing
+            self.working_buffer.clear();
+            self.working_tokens.clear();
+            return;
+        }
+
         let sentence = FinalizedSentence {
             text: std::mem::take(&mut self.working_buffer),
             start_time: 0.0, // Could be populated if we track timing
@@ -523,6 +578,100 @@ impl GrowingTextMerger {
 
         self.finalized_sentences.push(sentence);
         self.working_tokens.clear();
+    }
+
+    /// Proactively finalize complete sentences in the working buffer when new text
+    /// has started after them. If the buffer contains "First sentence. Second sentence.
+    /// Third partial text", everything up to the last terminator with ≥ 2 words after it
+    /// is finalized, and only "Third partial text" remains as the working buffer.
+    fn finalize_inner_sentences(&mut self) {
+        // Find the LAST sentence terminator that has ≥ 2 words after it
+        let mut split_pos = None;
+        for (i, c) in self.working_buffer.char_indices() {
+            let is_terminator = match c {
+                '!' | '?' | '。' | '！' | '？' => true,
+                '.' => !Self::is_dot_in_number(&self.working_buffer, i),
+                _ => false,
+            };
+            if is_terminator {
+                let after_pos = i + c.len_utf8();
+                let after = self.working_buffer[after_pos..].trim();
+                if after.split_whitespace().count() >= 2 {
+                    split_pos = Some(after_pos);
+                }
+            }
+        }
+
+        if let Some(pos) = split_pos {
+            let to_finalize = self.working_buffer[..pos].trim().to_string();
+            let to_keep = self.working_buffer[pos..].trim().to_string();
+
+            if !to_finalize.is_empty()
+                && to_finalize.len() > 2
+                && to_finalize.chars().any(|c| c.is_alphanumeric())
+                && !self.is_duplicate_of_recent(&to_finalize)
+            {
+                self.finalized_sentences.push(FinalizedSentence {
+                    text: to_finalize,
+                    start_time: 0.0,
+                    end_time: 0.0,
+                });
+                self.working_buffer = to_keep;
+                self.working_tokens = self
+                    .working_buffer
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        }
+    }
+
+    /// Normalize a word for dedup comparison: lowercase + strip non-alphanumeric chars.
+    fn normalize_word_for_dedup(word: &str) -> String {
+        word.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase()
+    }
+
+    /// Check if text is a near-duplicate of any of the last N finalized entries.
+    /// Uses word-level overlap (case-insensitive, punctuation-stripped): if ≥ 60%
+    /// of the candidate's words appear in a recent entry (or vice versa), it's a duplicate.
+    fn is_duplicate_of_recent(&self, text: &str) -> bool {
+        let candidate_words: Vec<String> = text.split_whitespace()
+            .map(Self::normalize_word_for_dedup)
+            .filter(|w| !w.is_empty())
+            .collect();
+        if candidate_words.len() < 3 {
+            return false; // Too short to meaningfully dedup
+        }
+
+        // Check against last 5 finalized entries
+        let check_count = std::cmp::min(5, self.finalized_sentences.len());
+        for i in (self.finalized_sentences.len() - check_count)..self.finalized_sentences.len() {
+            let existing = &self.finalized_sentences[i].text;
+            let existing_words: Vec<String> = existing.split_whitespace()
+                .map(Self::normalize_word_for_dedup)
+                .filter(|w| !w.is_empty())
+                .collect();
+            if existing_words.len() < 3 {
+                continue;
+            }
+
+            // Count how many candidate words appear in the existing entry
+            let matching = candidate_words.iter()
+                .filter(|w| existing_words.contains(w))
+                .count();
+
+            let overlap_of_candidate = matching as f32 / candidate_words.len() as f32;
+            let overlap_of_existing = matching as f32 / existing_words.len() as f32;
+
+            // Duplicate if either direction has ≥ 60% overlap
+            if overlap_of_candidate >= 0.6 || overlap_of_existing >= 0.6 {
+                return true;
+            }
+        }
+        false
     }
 
     /// Keep only the last N sentences in working list, move older to finalized
@@ -711,6 +860,8 @@ impl GrowingTextMerger {
         self.working_buffer.clear();
         self.working_tokens.clear();
         self.previous_buffer.clear();
+        self.last_stable_buffer.clear();
+        self.stable_count = 0;
     }
 }
 

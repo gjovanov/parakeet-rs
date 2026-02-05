@@ -500,6 +500,17 @@ pub async fn start_session(
     session.start();
     session.set_state(SessionState::Running).await;
 
+    // Spawn FAB forwarder if configured
+    if let (Some(ref fab_url), Some(ref client)) = (&state.fab_url, &state.fab_client) {
+        let subtitle_rx = session.subscribe_subtitles();
+        crate::fab_forwarder::spawn_fab_forwarder(
+            id.clone(),
+            fab_url.clone(),
+            subtitle_rx,
+            client.clone(),
+        );
+    }
+
     let session_clone = session.clone();
     let model_path = model.model_path.clone();
     let diar_path = model.diarization_path.clone();

@@ -1,36 +1,60 @@
 #!/bin/bash
+#
+# Parakeet-rs CPU Server Launcher
+#
+# Usage: ./start-server.sh [extra args...]
+#   or:  sudo ./start-server.sh
+#
 
-# SRT Stream Configuration
-export SRT_ENCODER_IP="10.84.17.100"
-export SRT_CHANNELS='[{"name":"ORF1","port":"24001"},{"name":"ORF2","port":"24002"},{"name":"KIDS","port":"24011"},{"name":"ORFS","port":"24004"},{"name":"ORF-B","port":"24013"},{"name":"ORF-K","port":"24019"},{"name":"ORF-NOE","port":"24012"},{"name":"ORF-OOE","port":"24014"},{"name":"ORF-S","port":"24015"},{"name":"ORF-ST","port":"24018"},{"name":"ORF-T","port":"24016"},{"name":"ORF-V","port":"24017"},{"name":"ORF-W","port":"24011"},{"name":"ORF-SI","port":"24016"}]'
-export SRT_LATENCY="200000"
-export SRT_RCVBUF="2097152"
+set -e
 
-# Optional: Override auto-detected max parallel threads
-# (auto-detection uses: min(available_ram_gb - 4) / 2.5, cpu_cores), max 8)
-# export MAX_PARALLEL_THREADS=2
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-# Limit max concurrent sessions to prevent memory exhaustion
-export MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-3}"
+# Load .env if present
+if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
+fi
 
-# Enable GPU acceleration (CUDA)
-export USE_GPU=true
+# CPU mode: force correct values (override stale .env entries)
+export ORT_DYLIB_PATH="/usr/local/lib/libonnxruntime.so"
+export USE_GPU="false"
+export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
-# Add CUDA 12.8 libraries to path (includes cuDNN 9)
-# Also add ONNX Runtime provider libraries
-ORT_LIB_PATH="/home/ubuntu/parakeet-rs/target/release/examples"
-export LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib:/usr/local/cuda-12.8/lib64:${ORT_LIB_PATH}:${LD_LIBRARY_PATH}"
+PORT="${PORT:-80}"
+MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-10}"
 
-# Canary model path (for multilingual support)
-export CANARY_MODEL_PATH="/home/ubuntu/parakeet-rs/canary"
+# Build command args
+ARGS=(
+    --port "$PORT"
+    --tdt-model ./tdt
+    --canary-model ./canary
+    --diar-model ./diar_streaming_sortformer_4spk-v2.onnx
+    --vad-model ./silero_vad.onnx
+    --frontend ./frontend
+    --media-dir ./media
+    --max-sessions "$MAX_CONCURRENT_SESSIONS"
+)
 
-exec ./target/release/examples/webrtc_transcriber \
-  --port 80 \
-  --tdt-model ./tdt \
-  --diar-model ./diar_streaming_sortformer_4spk-v2.onnx \
-  --vad-model ./silero_vad.onnx \
-  --frontend ./frontend \
-  --media-dir ./media \
-  --public-ip "10.84.17.72" \
-  --max-sessions "${MAX_CONCURRENT_SESSIONS}" \
-  --speedy
+if [ -n "$PUBLIC_IP" ]; then
+    ARGS+=(--public-ip "$PUBLIC_IP")
+fi
+
+if [ -n "$FAB_URL" ]; then
+    ARGS+=(--fab-url "$FAB_URL")
+fi
+
+if [ "${SPEEDY_MODE:-true}" = "true" ]; then
+    ARGS+=(--speedy)
+fi
+
+echo "Starting parakeet-rs (CPU mode) on port $PORT..."
+
+# Port 80 requires root — re-exec with sudo -E if needed
+if [ "$PORT" -le 1024 ] && [ "$(id -u)" -ne 0 ]; then
+    exec sudo -E "$0" "$@"
+fi
+
+exec ./target/release/examples/webrtc_transcriber "${ARGS[@]}" "$@"

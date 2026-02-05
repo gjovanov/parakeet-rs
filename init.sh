@@ -1,7 +1,8 @@
 #!/bin/bash
 #
-# Parakeet-rs Initialization Script
-# Downloads required models and creates .env configuration
+# Parakeet-rs CPU Initialization Script
+# Sets up system deps, ONNX Runtime, models, and builds the binary.
+# Idempotent — safe to re-run; skips steps that are already done.
 #
 # Usage: ./init.sh
 #
@@ -11,40 +12,78 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+ORT_VERSION="1.22.0"
+ORT_LIB="/usr/local/lib/libonnxruntime.so"
+
 echo "========================================"
-echo "  Parakeet-rs Initialization"
+echo "  Parakeet-rs CPU Initialization"
 echo "========================================"
 echo ""
 
-# Check for required tools
-check_requirements() {
+# ─── 1. System dependencies ──────────────────────────────────────────
+
+install_system_deps() {
+    local pkgs=(cmake clang pkg-config libssl-dev libopus-dev libasound2-dev ffmpeg curl)
     local missing=()
 
-    if ! command -v curl &> /dev/null && ! command -v wget &> /dev/null; then
-        missing+=("curl or wget")
-    fi
+    for pkg in "${pkgs[@]}"; do
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            missing+=("$pkg")
+        fi
+    done
 
-    if ! command -v docker &> /dev/null; then
-        missing+=("docker")
-    fi
-
-    if [ ${#missing[@]} -ne 0 ]; then
-        echo "Error: Missing required tools: ${missing[*]}"
-        echo "Please install them and try again."
-        exit 1
+    if [ ${#missing[@]} -eq 0 ]; then
+        echo "[1/5] System dependencies already installed"
+    else
+        echo "[1/5] Installing system dependencies: ${missing[*]}"
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq "${missing[@]}"
     fi
 }
 
-# Load HF_TOKEN from .env if exists
+# ─── 2. ONNX Runtime CPU ─────────────────────────────────────────────
+
+install_onnxruntime() {
+    if [ -f "$ORT_LIB" ]; then
+        echo "[2/5] ONNX Runtime CPU $ORT_VERSION already installed"
+        return 0
+    fi
+
+    echo "[2/5] Installing ONNX Runtime CPU $ORT_VERSION..."
+    local arch
+    arch=$(uname -m)
+    if [ "$arch" = "aarch64" ]; then
+        arch="aarch64"
+    else
+        arch="x64"
+    fi
+
+    local tarball="onnxruntime-linux-${arch}-${ORT_VERSION}.tgz"
+    local url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${tarball}"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    curl -L --progress-bar "$url" -o "$tmpdir/$tarball"
+    tar -xzf "$tmpdir/$tarball" -C "$tmpdir"
+
+    local extract_dir="$tmpdir/onnxruntime-linux-${arch}-${ORT_VERSION}"
+    sudo cp "$extract_dir"/lib/libonnxruntime.so* /usr/local/lib/
+    sudo cp -r "$extract_dir"/include/* /usr/local/include/ 2>/dev/null || true
+    sudo ldconfig
+
+    rm -rf "$tmpdir"
+    echo "  [DONE] ONNX Runtime installed to /usr/local/lib/"
+}
+
+# ─── 3. Download models ──────────────────────────────────────────────
+
 load_hf_token() {
     if [ -f ".env" ]; then
         HF_TOKEN=$(grep -E "^HF_TOKEN=" .env 2>/dev/null | cut -d'=' -f2 || echo "")
     fi
-    # Also check environment variable
     HF_TOKEN="${HF_TOKEN:-$HUGGING_FACE_HUB_TOKEN}"
 }
 
-# Download file with progress (with optional HF auth)
 download_file() {
     local url="$1"
     local output="$2"
@@ -54,235 +93,118 @@ download_file() {
         return 0
     fi
 
-    echo "  [DOWN] Downloading $output..."
-    if command -v curl &> /dev/null; then
-        if [ -n "$HF_TOKEN" ]; then
-            curl -L --progress-bar -H "Authorization: Bearer $HF_TOKEN" "$url" -o "$output"
-        else
-            curl -L --progress-bar "$url" -o "$output"
-        fi
-    else
-        if [ -n "$HF_TOKEN" ]; then
-            wget --show-progress -q --header="Authorization: Bearer $HF_TOKEN" "$url" -O "$output"
-        else
-            wget --show-progress -q "$url" -O "$output"
-        fi
+    echo "  [DOWN] $output"
+    local auth_args=()
+    if [ -n "$HF_TOKEN" ]; then
+        auth_args=(-H "Authorization: Bearer $HF_TOKEN")
     fi
+    curl -L --progress-bar "${auth_args[@]}" "$url" -o "$output"
     echo "  [DONE] $output"
 }
 
-# Download TDT model (multilingual transcription)
-download_tdt_model() {
-    echo ""
-    echo "[1/4] Downloading TDT Model (Multilingual Transcription)..."
-    echo "      Source: huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx"
-    echo ""
+download_models() {
+    load_hf_token
 
+    if [ -n "$HF_TOKEN" ]; then
+        echo "[3/5] Downloading models (with HF auth)..."
+    else
+        echo "[3/5] Downloading models..."
+    fi
+
+    # TDT model
+    echo "  --- TDT (Multilingual Transcription) ---"
     mkdir -p tdt
+    local tdt_url="https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
+    download_file "$tdt_url/encoder-model.onnx" "tdt/encoder-model.onnx"
+    download_file "$tdt_url/encoder-model.onnx.data" "tdt/encoder-model.onnx.data"
+    download_file "$tdt_url/decoder_joint-model.onnx" "tdt/decoder_joint-model.onnx"
+    download_file "$tdt_url/vocab.txt" "tdt/vocab.txt"
 
-    local base_url="https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
+    # Sortformer diarization
+    echo "  --- Sortformer (Speaker Diarization) ---"
+    download_file \
+        "https://huggingface.co/altunenes/parakeet-rs/resolve/main/diar_streaming_sortformer_4spk-v2.onnx" \
+        "diar_streaming_sortformer_4spk-v2.onnx"
 
-    download_file "$base_url/encoder-model.onnx" "tdt/encoder-model.onnx"
-    download_file "$base_url/encoder-model.onnx.data" "tdt/encoder-model.onnx.data"
-    download_file "$base_url/decoder_joint-model.onnx" "tdt/decoder_joint-model.onnx"
-    download_file "$base_url/vocab.txt" "tdt/vocab.txt"
-}
-
-# Download Diarization model (speaker identification)
-download_diarization_model() {
-    echo ""
-    echo "[2/4] Downloading Diarization Model (Speaker Identification)..."
-    echo "      Source: huggingface.co/altunenes/parakeet-rs"
-    echo ""
-
-    local url="https://huggingface.co/altunenes/parakeet-rs/resolve/main/diar_streaming_sortformer_4spk-v2.onnx"
-    download_file "$url" "diar_streaming_sortformer_4spk-v2.onnx"
-}
-
-# Download Canary model (multilingual ASR)
-download_canary_model() {
-    echo ""
-    echo "[3/4] Downloading Canary 1B v2 Model (Multilingual ASR)..."
-    echo "      Source: huggingface.co/istupakov/canary-1b-v2-onnx"
-    echo "      Note: Using INT8 quantized models (~1GB total)"
-    echo ""
-
+    # Canary INT8
+    echo "  --- Canary INT8 (Multilingual ASR) ---"
     mkdir -p canary
+    local canary_url="https://huggingface.co/istupakov/canary-1b-v2-onnx/resolve/main"
+    download_file "$canary_url/encoder-model.int8.onnx" "canary/encoder-model.int8.onnx"
+    download_file "$canary_url/decoder-model.int8.onnx" "canary/decoder-model.int8.onnx"
+    download_file "$canary_url/vocab.txt" "canary/vocab.txt"
+    download_file "$canary_url/config.json" "canary/config.json"
 
-    local base_url="https://huggingface.co/istupakov/canary-1b-v2-onnx/resolve/main"
-
-    download_file "$base_url/encoder-model.int8.onnx" "canary/encoder-model.int8.onnx"
-    download_file "$base_url/decoder-model.int8.onnx" "canary/decoder-model.int8.onnx"
-    download_file "$base_url/vocab.txt" "canary/vocab.txt"
-    download_file "$base_url/config.json" "canary/config.json"
+    # Silero VAD
+    echo "  --- Silero VAD (Voice Activity Detection) ---"
+    download_file \
+        "https://huggingface.co/snakers4/silero-vad/resolve/master/files/silero_vad.onnx" \
+        "silero_vad.onnx"
 }
 
-# Download VAD model (Voice Activity Detection)
-download_vad_model() {
-    echo ""
-    echo "[4/4] Downloading VAD Model (Voice Activity Detection)..."
-    echo "      Source: huggingface.co/snakers4/silero-vad"
-    echo ""
+# ─── 4. Build binary ─────────────────────────────────────────────────
 
-    local url="https://huggingface.co/snakers4/silero-vad/resolve/master/files/silero_vad.onnx"
-    download_file "$url" "silero_vad.onnx"
-}
+build_binary() {
+    local bin="target/release/examples/webrtc_transcriber"
 
-# Create .env file from template
-create_env_file() {
-    echo ""
-    echo "[ENV] Creating .env configuration file..."
-
-    if [ -f ".env" ]; then
-        echo "  [SKIP] .env already exists"
-        echo "  To recreate, delete .env and run init.sh again"
+    if [ -f "$bin" ]; then
+        echo "[4/5] Binary already built at $bin"
         return 0
     fi
 
-    # Detect public IP (optional)
-    local public_ip=""
-    if command -v curl &> /dev/null; then
-        public_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "")
+    echo "[4/5] Building webrtc_transcriber (release, sortformer)..."
+    export ORT_DYLIB_PATH="$ORT_LIB"
+    cargo build --release --example webrtc_transcriber --features sortformer
+    echo "  [DONE] Built $bin"
+}
+
+# ─── 5. Create .env ──────────────────────────────────────────────────
+
+create_env() {
+    if [ -f ".env" ]; then
+        echo "[5/5] .env already exists (skipping)"
+        return 0
     fi
 
+    echo "[5/5] Creating .env with CPU defaults..."
+
+    local public_ip=""
+    public_ip=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "")
+
     cat > .env << 'EOF'
-# Parakeet-rs WebRTC Transcriber Configuration
-# Generated by init.sh
-
-# =============================================================================
-# Hugging Face Configuration
-# =============================================================================
-
-# Hugging Face token for downloading gated/private models
-# Get your token at: https://huggingface.co/settings/tokens
-HF_TOKEN=
-
-# =============================================================================
-# Server Configuration
-# =============================================================================
-
-# GPU Mode (set to false for CPU-only, or to cuda/tensorrt for specific provider)
-USE_GPU=true
-
-# HTTP/WebSocket server ports
-PORT=8080
-GPU_PORT=8090
-
-# Public IP address for WebRTC ICE candidates (NAT traversal)
-# Required for external access. Auto-detected or set manually.
+# Parakeet-rs Configuration (CPU mode)
+USE_GPU=false
+ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+PORT=80
 PUBLIC_IP=
-
-# WebSocket host for browser connection
-# This is the host that browsers use to connect to the WebSocket server
-# Priority: WS_HOST > PUBLIC_IP > auto-detected IP > localhost
-# Examples:
-#   - Leave empty for localhost (default)
-#   - Set to your LAN IP for local network access (e.g., 192.168.1.100)
-#   - Set to your public domain for internet access (e.g., transcribe.example.com)
-WS_HOST=
-
-# =============================================================================
-# Transcription Mode
-# =============================================================================
-
-# Enable speedy mode for lower latency transcription (recommended)
+MAX_CONCURRENT_SESSIONS=10
 SPEEDY_MODE=true
-
-# =============================================================================
-# Model Paths (used inside Docker container)
-# =============================================================================
-
-TDT_MODEL_PATH=/app/models/tdt
-DIAR_MODEL_PATH=/app/models/diarization/model.onnx
-CANARY_MODEL_PATH=/app/models/canary
-VAD_MODEL_PATH=/app/models/silero_vad.onnx
-FRONTEND_PATH=/app/frontend
-
-# =============================================================================
-# TURN Server Configuration (for NAT traversal)
-# Optional but recommended for public access
-# =============================================================================
-
-# TURN server URL (examples):
-#   turn:your-server.com:3478?transport=tcp
-#   turn:your-server.com:3478?transport=udp
-#   turns:your-server.com:443
-TURN_SERVER=
-
-# TURN authentication credentials
-TURN_USERNAME=
-TURN_PASSWORD=
-
-# =============================================================================
-# Performance Tuning
-# =============================================================================
-
-# ONNX Runtime thread configuration
-INTRA_THREADS=2
-INTER_THREADS=1
-
-# =============================================================================
-# Logging
-# =============================================================================
-
-# Log level: error, warn, info, debug, trace
 RUST_LOG=info
+HF_TOKEN=
 EOF
 
-    # Set detected public IP if available
     if [ -n "$public_ip" ]; then
         sed -i "s/^PUBLIC_IP=$/PUBLIC_IP=$public_ip/" .env
         echo "  [INFO] Detected public IP: $public_ip"
     fi
 
     echo "  [DONE] Created .env"
-    echo ""
-    echo "  IMPORTANT: Edit .env to configure:"
-    echo "    - HF_TOKEN (required for gated models)"
-    echo "    - WS_HOST (required for Docker/remote browser access)"
-    echo "    - PUBLIC_IP (required for external WebRTC access)"
-    echo "    - TURN_SERVER (recommended for NAT traversal)"
 }
 
-# Main
-main() {
-    check_requirements
-    load_hf_token
+# ─── Main ─────────────────────────────────────────────────────────────
 
-    if [ -n "$HF_TOKEN" ]; then
-        echo "[AUTH] Using Hugging Face token for downloads"
-    else
-        echo "[AUTH] No HF_TOKEN found (set in .env or environment for gated models)"
-    fi
+install_system_deps
+install_onnxruntime
+download_models
+build_binary
+create_env
 
-    download_tdt_model
-    download_diarization_model
-    download_canary_model
-    download_vad_model
-    create_env_file
-
-    echo ""
-    echo "========================================"
-    echo "  Initialization Complete!"
-    echo "========================================"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Edit .env to configure your settings"
-    echo "  2. Run: ./run.sh [cpu|gpu]"
-    echo ""
-    echo "Model sizes:"
-    if [ -d "tdt" ]; then
-        du -sh tdt/
-    fi
-    if [ -f "diar_streaming_sortformer_4spk-v2.onnx" ]; then
-        du -sh diar_streaming_sortformer_4spk-v2.onnx
-    fi
-    if [ -d "canary" ]; then
-        du -sh canary/
-    fi
-    if [ -f "silero_vad.onnx" ]; then
-        du -sh silero_vad.onnx
-    fi
-}
-
-main "$@"
+echo ""
+echo "========================================"
+echo "  Initialization Complete!"
+echo "========================================"
+echo ""
+echo "Next steps:"
+echo "  1. Review .env (edit PUBLIC_IP, HF_TOKEN, etc.)"
+echo "  2. Run: ./start-server.sh"
+echo ""

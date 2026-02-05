@@ -24,6 +24,7 @@
 
 mod api;
 mod config;
+mod fab_forwarder;
 mod srt_config;
 mod state;
 mod transcription;
@@ -120,6 +121,10 @@ struct Args {
     /// Lookahead mode: Best quality with future context (~1.0-3.0s)
     #[arg(long)]
     lookahead: bool,
+
+    /// FAB live transcription endpoint URL
+    #[arg(long, env = "FAB_URL")]
+    fab_url: Option<String>,
 }
 
 impl Args {
@@ -329,6 +334,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("SRT streams: not configured (set SRT_ENCODER_IP and SRT_CHANNELS to enable)");
     }
 
+    // Initialize FAB forwarding (optional)
+    let (fab_url, fab_client) = if let Some(ref url) = args.fab_url {
+        eprintln!("[FAB] Live transcription forwarding enabled: {}", url);
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("Failed to create FAB HTTP client");
+        (Some(url.clone()), Some(client))
+    } else {
+        eprintln!("[FAB] Live transcription forwarding: not configured (set FAB_URL to enable)");
+        (None, None)
+    };
+
     let state = Arc::new(AppState {
         session_manager,
         model_registry,
@@ -341,6 +358,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         parallel_configs: RwLock::new(HashMap::new()),
         pause_configs: RwLock::new(HashMap::new()),
         srt_config,
+        fab_url,
+        fab_client,
     });
 
     // Build router

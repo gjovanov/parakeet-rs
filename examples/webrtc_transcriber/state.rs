@@ -51,4 +51,8 @@ pub struct AppState {
     pub pause_configs: RwLock<HashMap<String, PauseConfig>>,
     /// SRT stream configuration (optional)
     pub srt_config: Option<SrtConfig>,
+    /// FAB live transcription endpoint URL (optional)
+    pub fab_url: Option<String>,
+    /// Shared HTTP client for FAB forwarding (optional)
+    pub fab_client: Option<reqwest::Client>,
 }
