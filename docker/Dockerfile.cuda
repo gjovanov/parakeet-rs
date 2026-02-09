@@ -1,8 +1,8 @@
-# Multi-stage Dockerfile for parakeet-rs WebRTC transcriber with CUDA 13 + Blackwell (sm_120) support
-# Build: docker build -f docker/Dockerfile.cuda -t parakeet-transcriber-gpu .
+# Multi-stage Dockerfile for parakeet-rs server with CUDA 13 + Blackwell (sm_120) support
+# Build: docker build -f docker/Dockerfile.cuda -t parakeet-server-gpu .
 #
 # Requires: NVIDIA Docker runtime (nvidia-docker2)
-# Run: docker run --gpus all -p 8090:8090 -v ./tdt:/app/models/tdt -v ./diar:/app/models/diarization parakeet-transcriber-gpu
+# Run: docker run --gpus all -p 8090:8090 -v ./tdt:/app/models/tdt -v ./diar:/app/models/diarization parakeet-server-gpu
 #
 # NOTE: This build takes 1-2 hours as it compiles ONNX Runtime from source with Blackwell (sm_120) support
 
@@ -81,26 +81,24 @@ ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source for dependency compilation
-RUN mkdir -p src examples/webrtc_transcriber && \
-    echo "fn main() {}" > src/lib.rs && \
-    echo "fn main() {}" > examples/webrtc_transcriber/main.rs
+RUN mkdir -p src && \
+    echo "pub fn lib() {}" > src/lib.rs
 
 # Build dependencies only (cache layer)
-RUN cargo build --release --example webrtc_transcriber --features "cuda,sortformer" 2>/dev/null || true
+RUN cargo build --release --features "server,cuda,sortformer" 2>/dev/null || true
 
 # Remove dummy source and clear cached compilation
-RUN rm -rf src examples && \
+RUN rm -rf src && \
     rm -rf target/release/.fingerprint/parakeet* \
            target/release/deps/parakeet* \
            target/release/deps/libparakeet* \
-           target/release/examples/webrtc_transcriber
+           target/release/parakeet-server
 
 # Copy actual source code
 COPY src/ ./src/
-COPY examples/ ./examples/
 
-# Build release binary with cuda and sortformer features
-RUN touch src/lib.rs && cargo build --release --example webrtc_transcriber --features "cuda,sortformer"
+# Build release binary with cuda, server, and sortformer features
+RUN touch src/lib.rs && cargo build --release --features "server,cuda,sortformer"
 
 # ==============================================================================
 # Stage 3: Runtime environment with CUDA
@@ -125,7 +123,7 @@ COPY --from=ort-builder /build/onnxruntime/build/Linux/Release/libonnxruntime*.s
 RUN ldconfig
 
 # Copy binary from builder
-COPY --from=builder /app/target/release/examples/webrtc_transcriber /app/
+COPY --from=builder /app/target/release/parakeet-server /app/
 
 # Copy frontend files
 COPY frontend/ /app/frontend/
@@ -181,5 +179,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Default command
-ENTRYPOINT ["/app/webrtc_transcriber"]
+ENTRYPOINT ["/app/parakeet-server"]
 CMD ["--frontend", "/app/frontend"]

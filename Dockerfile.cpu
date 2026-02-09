@@ -1,5 +1,4 @@
-# Multi-stage build for parakeet-rs WebRTC transcriber (CPU mode)
-# Based on: https://github.com/gjovanov/parakeet-rs/blob/main/docker/Dockerfile.cpu
+# Multi-stage build for parakeet-rs server (CPU mode)
 
 # ---- Stage 1: Builder ----
 FROM rust:latest AS builder
@@ -30,14 +29,13 @@ COPY Cargo.toml Cargo.lock ./
 # Create dummy source for dependency compilation
 RUN mkdir -p src && echo "pub fn lib() {}" > src/lib.rs
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
-RUN cargo build --release --features sortformer 2>/dev/null || true
+RUN cargo build --release --features "server,sortformer" 2>/dev/null || true
 
 # Copy actual source code
 COPY src/ src/
-COPY examples/ examples/
 
-# Build the webrtc_transcriber example binary
-RUN cargo build --release --example webrtc_transcriber --features sortformer
+# Build the server binary
+RUN touch src/lib.rs && cargo build --release --features "server,sortformer"
 
 # ---- Stage 2: Runtime ----
 FROM debian:bookworm-slim
@@ -59,7 +57,7 @@ RUN ldconfig
 WORKDIR /app
 
 # Copy the compiled binary
-COPY --from=builder /app/target/release/examples/webrtc_transcriber /app/
+COPY --from=builder /app/target/release/parakeet-server /app/
 
 # Copy frontend
 COPY frontend/ /app/frontend/
@@ -92,5 +90,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-ENTRYPOINT ["/app/webrtc_transcriber"]
+ENTRYPOINT ["/app/parakeet-server"]
 CMD ["--frontend", "/app/frontend"]

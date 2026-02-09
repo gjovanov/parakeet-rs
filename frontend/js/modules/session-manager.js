@@ -151,6 +151,9 @@ export class SessionManager {
    * @param {boolean} [options.diarization=false] - Enable diarization
    * @param {Object} [options.pauseConfig] - Pause detection config
    * @param {string} [options.sentenceCompletion='minimal'] - Sentence completion mode
+   * @param {string} [options.fabEnabled='default'] - FAB forwarding ("default", "enabled", "disabled")
+   * @param {string} [options.fabUrl=''] - FAB endpoint URL override
+   * @param {string} [options.fabSendType='default'] - FAB send type ("default", "growing", "confirmed")
    */
   async createSession(modelId, options = {}) {
     const {
@@ -162,7 +165,10 @@ export class SessionManager {
       noiseCancellation = 'none',
       diarization = false,
       pauseConfig = null,
-      sentenceCompletion = 'minimal'
+      sentenceCompletion = 'minimal',
+      fabEnabled = 'default',
+      fabUrl = '',
+      fabSendType = 'default'
     } = options;
 
     try {
@@ -192,6 +198,17 @@ export class SessionManager {
       // Add pause config if provided
       if (pauseConfig) {
         body.pause_config = pauseConfig;
+      }
+
+      // Add FAB config if not default
+      if (fabEnabled && fabEnabled !== 'default') {
+        body.fab_enabled = fabEnabled;
+      }
+      if (fabUrl) {
+        body.fab_url = fabUrl;
+      }
+      if (fabSendType && fabSendType !== 'default') {
+        body.fab_send_type = fabSendType;
       }
 
       const res = await fetch(`${API_BASE}/api/sessions`, {

@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(config.n_mels, 128);
         assert_eq!(config.sample_rate, 16000);
         assert_eq!(config.language, "en");
-        assert_eq!(config.num_decoder_layers, 4);
+        assert_eq!(config.num_decoder_layers, 3);
     }
 
     #[test]

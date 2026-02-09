@@ -666,8 +666,8 @@ impl GrowingTextMerger {
             let overlap_of_candidate = matching as f32 / candidate_words.len() as f32;
             let overlap_of_existing = matching as f32 / existing_words.len() as f32;
 
-            // Duplicate if either direction has ≥ 60% overlap
-            if overlap_of_candidate >= 0.6 || overlap_of_existing >= 0.6 {
+            // Duplicate if BOTH directions have ≥ 80% overlap
+            if overlap_of_candidate >= 0.8 && overlap_of_existing >= 0.8 {
                 return true;
             }
         }
@@ -854,6 +854,34 @@ impl GrowingTextMerger {
         &self.finalized_sentences
     }
 
+    /// Flush the working buffer: finalize whatever remains, even if incomplete.
+    /// Call this when the session ends to avoid losing trailing text.
+    /// Returns the flushed text (if any) so the caller can emit a FINAL.
+    pub fn flush(&mut self) -> Option<String> {
+        let trimmed = self.working_buffer.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let text = trimmed.to_string();
+        // Skip degenerate fragments
+        if text.len() <= 2 || !text.chars().any(|c| c.is_alphanumeric()) {
+            self.working_buffer.clear();
+            self.working_tokens.clear();
+            return None;
+        }
+        // No dedup on flush — this is the last chance to emit trailing text.
+        // The working buffer may partially overlap a recent FINAL (e.g. the
+        // model revised text that was already finalized via divergence) but
+        // it also contains new content that would otherwise be lost.
+        self.finalized_sentences.push(FinalizedSentence {
+            text: std::mem::take(&mut self.working_buffer),
+            start_time: 0.0,
+            end_time: 0.0,
+        });
+        self.working_tokens.clear();
+        Some(text)
+    }
+
     /// Reset the merger state
     pub fn reset(&mut self) {
         self.finalized_sentences.clear();
@@ -875,6 +903,10 @@ impl Default for GrowingTextMerger {
 mod tests {
     use super::*;
 
+    // ========================================================================
+    // Basic operations
+    // ========================================================================
+
     #[test]
     fn test_basic_append() {
         let mut merger = GrowingTextMerger::new();
@@ -885,8 +917,37 @@ mod tests {
 
         let result2 = merger.push("Hello world", false);
         assert_eq!(result2.buffer, "Hello world");
-        // Should find anchor and extend
     }
+
+    #[test]
+    fn test_empty_input() {
+        let mut merger = GrowingTextMerger::new();
+
+        let result = merger.push("", false);
+        assert_eq!(result.buffer, "");
+        assert!(!result.tail_changed);
+        assert_eq!(result.finalized_count, 0);
+    }
+
+    #[test]
+    fn test_whitespace_only_input() {
+        let mut merger = GrowingTextMerger::new();
+
+        let result = merger.push("   \t\n  ", false);
+        assert_eq!(result.buffer, "");
+    }
+
+    #[test]
+    fn test_single_word() {
+        let mut merger = GrowingTextMerger::new();
+        let result = merger.push("Hallo", false);
+        assert_eq!(result.buffer, "Hallo");
+        assert_eq!(result.current_sentence, "Hallo");
+    }
+
+    // ========================================================================
+    // Tail overwrite / anchor matching
+    // ========================================================================
 
     #[test]
     fn test_tail_overwrite() {
@@ -895,10 +956,48 @@ mod tests {
         merger.push("wie jene bei Paleo K", false);
         let result = merger.push("wie jene bei Paleo Kastriza", false);
 
-        // Should find anchor at "Paleo" and overwrite "K" with "Kastriza"
         assert!(result.buffer.contains("Kastriza"));
         assert!(!result.buffer.contains(" K "));
     }
+
+    #[test]
+    fn test_tail_overwrite_correction() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Simulating a growing transcription where the model corrects itself
+        merger.push("Das ist ein Tets", false);
+        let result = merger.push("Das ist ein Test der Qualität", false);
+
+        // The corrected word "Test" should replace "Tets"
+        assert!(result.buffer.contains("Test"));
+        assert!(result.buffer.contains("Qualität"));
+    }
+
+    #[test]
+    fn test_growing_sequence() {
+        let mut merger = GrowingTextMerger::new();
+
+        let texts = [
+            "wie",
+            "wie jene",
+            "wie jene bei",
+            "wie jene bei Paleo",
+            "wie jene bei Paleo Kastriza",
+            "wie jene bei Paleo Kastriza oder die Zwillingsbucht Porto Timoni.",
+        ];
+
+        for text in texts {
+            merger.push(text, text.ends_with('.'));
+        }
+
+        let final_text = merger.get_full_transcript();
+        assert!(final_text.contains("Paleo Kastriza"));
+        assert!(final_text.contains("Porto Timoni"));
+    }
+
+    // ========================================================================
+    // Finalization
+    // ========================================================================
 
     #[test]
     fn test_finalization() {
@@ -913,11 +1012,110 @@ mod tests {
     }
 
     #[test]
+    fn test_finalization_with_is_final() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Sentence ending + is_final should finalize
+        merger.push("Guten Morgen.", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+        assert_eq!(merger.get_finalized_sentences()[0].text, "Guten Morgen.");
+    }
+
+    #[test]
+    fn test_no_finalization_without_terminator() {
+        let mut merger = GrowingTextMerger::new();
+
+        // is_final but no sentence terminator → should NOT finalize
+        merger.push("Guten Morgen", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 0);
+    }
+
+    #[test]
+    fn test_inner_sentence_finalization() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Push text with a complete inner sentence
+        merger.push("Erster Satz. Zweiter Satz. Dritter Teil", false);
+
+        // The inner sentences should be finalized (since there are ≥2 words after the last terminator)
+        let finalized = merger.get_finalized_sentences();
+        assert!(finalized.len() >= 1, "Expected at least 1 finalized sentence, got {}", finalized.len());
+    }
+
+    #[test]
+    fn test_question_mark_finalization() {
+        let mut merger = GrowingTextMerger::new();
+        merger.push("Wie geht es Ihnen?", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+    }
+
+    #[test]
+    fn test_exclamation_finalization() {
+        let mut merger = GrowingTextMerger::new();
+        merger.push("Das ist toll!", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_sentences_sequential() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Erster Satz.", true);
+        merger.push("Zweiter Satz.", true);
+        merger.push("Dritter Satz.", true);
+
+        assert_eq!(merger.get_finalized_sentences().len(), 3);
+    }
+
+    // ========================================================================
+    // Dot-in-number handling
+    // ========================================================================
+
+    #[test]
+    fn test_dot_in_number() {
+        assert!(GrowingTextMerger::is_dot_in_number("25.000", 2));
+        assert!(GrowingTextMerger::is_dot_in_number("3.14", 1));
+        assert!(!GrowingTextMerger::is_dot_in_number("end.", 3));
+        assert!(!GrowingTextMerger::is_dot_in_number(".", 0));
+    }
+
+    #[test]
+    fn test_number_in_text_not_finalized() {
+        let mut merger = GrowingTextMerger::new();
+
+        // "25.000" should NOT trigger inner finalization
+        merger.push("Es waren 25.000 Menschen dort und es war super", false);
+        let finalized = merger.get_finalized_sentences();
+        // The "25.000" dot should not cause finalization
+        assert_eq!(finalized.len(), 0, "Number dot should not trigger finalization");
+    }
+
+    // ========================================================================
+    // Token similarity and normalization
+    // ========================================================================
+
+    #[test]
     fn test_token_similarity() {
         assert_eq!(GrowingTextMerger::token_similarity("hello", "hello"), 1.0);
         assert_eq!(GrowingTextMerger::token_similarity("Hello", "hello"), 1.0);
         assert!(GrowingTextMerger::token_similarity("hello", "helo") > 0.7);
         assert!(GrowingTextMerger::token_similarity("hello", "world") < 0.5);
+    }
+
+    #[test]
+    fn test_token_similarity_empty() {
+        // Both empty should be 1.0
+        assert_eq!(GrowingTextMerger::token_similarity("", ""), 1.0);
+        // One empty → 0.0
+        assert_eq!(GrowingTextMerger::token_similarity("hello", ""), 0.0);
+        assert_eq!(GrowingTextMerger::token_similarity("", "hello"), 0.0);
+    }
+
+    #[test]
+    fn test_token_similarity_german_umlauts() {
+        // Similar tokens with umlauts
+        assert!(GrowingTextMerger::token_similarity("Qualität", "Qualitat") > 0.7);
+        assert!(GrowingTextMerger::token_similarity("über", "uber") > 0.7);
     }
 
     #[test]
@@ -928,26 +1126,278 @@ mod tests {
     }
 
     #[test]
-    fn test_growing_sequence() {
+    fn test_normalize_token_unicode() {
+        assert_eq!(GrowingTextMerger::normalize_token("Über"), "über");
+        assert_eq!(GrowingTextMerger::normalize_token("café,"), "café");
+    }
+
+    // ========================================================================
+    // Levenshtein distance
+    // ========================================================================
+
+    #[test]
+    fn test_levenshtein_identical() {
+        assert_eq!(GrowingTextMerger::levenshtein_distance("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_empty() {
+        assert_eq!(GrowingTextMerger::levenshtein_distance("", ""), 0);
+        assert_eq!(GrowingTextMerger::levenshtein_distance("abc", ""), 3);
+        assert_eq!(GrowingTextMerger::levenshtein_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn test_levenshtein_single_edit() {
+        assert_eq!(GrowingTextMerger::levenshtein_distance("cat", "bat"), 1);
+        assert_eq!(GrowingTextMerger::levenshtein_distance("cat", "cats"), 1);
+        assert_eq!(GrowingTextMerger::levenshtein_distance("cat", "at"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_known_values() {
+        assert_eq!(GrowingTextMerger::levenshtein_distance("kitten", "sitting"), 3);
+        assert_eq!(GrowingTextMerger::levenshtein_distance("sunday", "saturday"), 3);
+    }
+
+    // ========================================================================
+    // Repetition detection
+    // ========================================================================
+
+    #[test]
+    fn test_repetition_consecutive_words() {
         let mut merger = GrowingTextMerger::new();
 
-        // Simulate growing transcription
-        let texts = [
-            "wie",
-            "wie jene",
-            "wie jene bei",
-            "wie jene bei Paleo",
-            "wie jene bei Paleo Kastriza",
-            "wie jene bei Paleo Kastriza oder die Zwillingsbucht Porto Timoni.",
-        ];
+        // Push text with 3 consecutive identical words
+        merger.push("Das ist ist ist ein Problem", false);
 
-        for text in texts {
-            let result = merger.push(text, text.ends_with('.'));
-            println!("[{}] {}", if result.tail_changed { "CHANGED" } else { "APPEND" }, result.buffer);
+        // After push, repetition should be detected and truncated
+        let transcript = merger.get_full_transcript();
+        // Should not contain "ist ist ist"
+        let count = transcript.matches(" ist").count();
+        assert!(count < 3, "Repetition should be truncated, got: {}", transcript);
+    }
+
+    #[test]
+    fn test_repetition_phrase() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Push text with repeated 2-word phrase
+        merger.push("hello world hello world hello world other text", false);
+
+        let transcript = merger.get_full_transcript();
+        let count = transcript.matches("hello world").count();
+        assert!(count < 3, "Phrase repetition should be truncated, got: {}", transcript);
+    }
+
+    #[test]
+    fn test_no_false_repetition() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Normal text with some repeated words (but not 3+)
+        merger.push("Die Kinder und die Eltern sind da", false);
+        let transcript = merger.get_full_transcript();
+        assert!(transcript.contains("die Eltern"), "Normal text should not be truncated");
+    }
+
+    // ========================================================================
+    // Dedup (is_duplicate_of_recent)
+    // ========================================================================
+
+    #[test]
+    fn test_dedup_prevents_duplicate_finalization() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Finalize the same sentence twice
+        merger.push("Guten Morgen allerseits.", true);
+        let count_after_first = merger.get_finalized_sentences().len();
+
+        merger.push("Guten Morgen allerseits.", true);
+        let count_after_second = merger.get_finalized_sentences().len();
+
+        assert_eq!(count_after_first, 1);
+        // Second should be deduped
+        assert_eq!(count_after_second, count_after_first,
+            "Duplicate sentence should not be finalized again");
+    }
+
+    #[test]
+    fn test_dedup_allows_different_sentences() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Erster Satz hier.", true);
+        merger.push("Zweiter Satz dort.", true);
+
+        assert_eq!(merger.get_finalized_sentences().len(), 2);
+    }
+
+    // ========================================================================
+    // Flush and reset
+    // ========================================================================
+
+    #[test]
+    fn test_flush_returns_working_buffer() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Teilweise geschriebener Satz", false);
+        let flushed = merger.flush();
+
+        assert!(flushed.is_some());
+        assert!(flushed.unwrap().contains("Teilweise"));
+    }
+
+    #[test]
+    fn test_flush_empty() {
+        let mut merger = GrowingTextMerger::new();
+        assert!(merger.flush().is_none());
+    }
+
+    #[test]
+    fn test_flush_after_finalization() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Complete sentence.", true);
+        // Working buffer should be empty after finalization
+        let flushed = merger.flush();
+        assert!(flushed.is_none());
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Some text.", true);
+        merger.push("More text", false);
+
+        merger.reset();
+
+        assert_eq!(merger.get_finalized_sentences().len(), 0);
+        assert_eq!(merger.get_full_transcript(), "");
+    }
+
+    // ========================================================================
+    // Custom config
+    // ========================================================================
+
+    #[test]
+    fn test_custom_config() {
+        let config = GrowingTextConfig {
+            search_back_tokens: 20,
+            max_match_tokens: 10,
+            min_each_sim: 0.9,
+            min_avg_sim: 0.95,
+            working_sentences: 3,
+        };
+        let mut merger = GrowingTextMerger::with_config(config);
+
+        merger.push("Test mit Konfiguration.", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+    }
+
+    // ========================================================================
+    // Delta calculation
+    // ========================================================================
+
+    #[test]
+    fn test_delta_on_append() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Hello", false);
+        let result = merger.push("Hello world", false);
+
+        // Delta should be the newly added text
+        assert!(!result.delta.is_empty());
+    }
+
+    #[test]
+    fn test_delta_on_tail_change() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Das ist ein Tets", false);
+        let result = merger.push("Das ist ein Test", false);
+
+        // When tail changes, delta should reflect the working buffer
+        if result.tail_changed {
+            assert!(!result.delta.is_empty());
         }
+    }
 
-        let final_text = merger.get_full_transcript();
-        assert!(final_text.contains("Paleo Kastriza"));
-        assert!(final_text.contains("Porto Timoni"));
+    // ========================================================================
+    // Compact working list
+    // ========================================================================
+
+    #[test]
+    fn test_compact_working_list_at_threshold() {
+        let config = GrowingTextConfig {
+            working_sentences: 3,
+            ..Default::default()
+        };
+        let mut merger = GrowingTextMerger::with_config(config);
+
+        // Push a long text with many sentences in a single push to trigger compaction
+        let text = "Erster Satz hier. Zweiter Satz dort. Dritter Satz jetzt. \
+                    Vierter Satz dann. Fünfter Satz noch. Sechster Satz am Ende.";
+        merger.push(text, false);
+
+        // With >5 sentences and working_sentences=3, compaction should occur
+        let finalized = merger.get_finalized_sentences().len();
+        // Either inner finalization or compact should have moved some to finalized
+        assert!(finalized > 0, "Expected some sentences to be finalized, got 0. Full transcript: {}",
+            merger.get_full_transcript());
+    }
+
+    // ========================================================================
+    // Full transcript
+    // ========================================================================
+
+    #[test]
+    fn test_full_transcript_includes_all() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("Erster Satz.", true);
+        merger.push("Zweiter Satz.", true);
+        merger.push("Dritter Teil", false);
+
+        let full = merger.get_full_transcript();
+        assert!(full.contains("Erster Satz."));
+        assert!(full.contains("Zweiter Satz."));
+        assert!(full.contains("Dritter Teil"));
+    }
+
+    // ========================================================================
+    // Edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_very_long_text() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Push 400 words (should trigger max working buffer check at 300 tokens)
+        let long_text: String = (0..400).map(|i| format!("Wort{}", i)).collect::<Vec<_>>().join(" ");
+        merger.push(&long_text, false);
+
+        // Should not panic, and transcript should contain content
+        let transcript = merger.get_full_transcript();
+        assert!(!transcript.is_empty());
+    }
+
+    #[test]
+    fn test_unicode_punctuation() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Chinese period
+        merger.push("这是一个测试。", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+    }
+
+    #[test]
+    fn test_current_sentence_extraction() {
+        let mut merger = GrowingTextMerger::new();
+
+        merger.push("First sentence. Second partial", false);
+        let finalized = merger.get_finalized_sentences();
+        // Inner finalization should have finalized "First sentence."
+        // and current_sentence should be something about the partial
+        assert!(finalized.len() >= 1);
     }
 }

@@ -139,10 +139,31 @@ pub type TranscriberFactory = Box<dyn Fn() -> Result<Box<dyn StreamingTranscribe
 mod tests {
     use super::*;
 
+    fn make_segment(text: &str, is_final: bool) -> TranscriptionSegment {
+        TranscriptionSegment {
+            text: text.to_string(),
+            start_time: 0.0,
+            end_time: 1.0,
+            speaker: None,
+            confidence: None,
+            is_final,
+            inference_time_ms: None,
+        }
+    }
+
     #[test]
-    fn test_streaming_chunk_result() {
-        let mut result = StreamingChunkResult::empty();
+    fn test_streaming_chunk_result_empty() {
+        let result = StreamingChunkResult::empty();
         assert!(!result.has_segments());
+        assert_eq!(result.final_segments().count(), 0);
+        assert_eq!(result.partial_segments().count(), 0);
+        assert_eq!(result.buffer_duration, 0.0);
+        assert_eq!(result.total_duration, 0.0);
+    }
+
+    #[test]
+    fn test_streaming_chunk_result_mixed() {
+        let mut result = StreamingChunkResult::empty();
 
         result.segments.push(TranscriptionSegment {
             text: "Hello".to_string(),
@@ -167,5 +188,105 @@ mod tests {
         assert!(result.has_segments());
         assert_eq!(result.final_segments().count(), 1);
         assert_eq!(result.partial_segments().count(), 1);
+    }
+
+    #[test]
+    fn test_all_final_segments() {
+        let mut result = StreamingChunkResult::empty();
+        result.segments.push(make_segment("One.", true));
+        result.segments.push(make_segment("Two.", true));
+
+        assert_eq!(result.final_segments().count(), 2);
+        assert_eq!(result.partial_segments().count(), 0);
+    }
+
+    #[test]
+    fn test_all_partial_segments() {
+        let mut result = StreamingChunkResult::empty();
+        result.segments.push(make_segment("partial", false));
+
+        assert_eq!(result.final_segments().count(), 0);
+        assert_eq!(result.partial_segments().count(), 1);
+    }
+
+    #[test]
+    fn test_segment_default_values() {
+        let seg = make_segment("test", false);
+        assert_eq!(seg.speaker, None);
+        assert_eq!(seg.confidence, None);
+        assert_eq!(seg.inference_time_ms, None);
+        assert!(!seg.is_final);
+    }
+
+    #[test]
+    fn test_segment_with_all_fields() {
+        let seg = TranscriptionSegment {
+            text: "Full segment".to_string(),
+            start_time: 1.5,
+            end_time: 3.2,
+            speaker: Some(2),
+            confidence: Some(0.87),
+            is_final: true,
+            inference_time_ms: Some(150),
+        };
+
+        assert_eq!(seg.text, "Full segment");
+        assert_eq!(seg.start_time, 1.5);
+        assert_eq!(seg.end_time, 3.2);
+        assert_eq!(seg.speaker, Some(2));
+        assert_eq!(seg.confidence, Some(0.87));
+        assert!(seg.is_final);
+        assert_eq!(seg.inference_time_ms, Some(150));
+    }
+
+    #[test]
+    fn test_model_info() {
+        let info = ModelInfo {
+            id: "canary-1b".to_string(),
+            display_name: "Canary 1B".to_string(),
+            description: "Multilingual ASR model".to_string(),
+            supports_diarization: true,
+            languages: vec!["en".to_string(), "de".to_string()],
+            is_loaded: true,
+        };
+
+        assert_eq!(info.id, "canary-1b");
+        assert!(info.supports_diarization);
+        assert_eq!(info.languages.len(), 2);
+    }
+
+    #[test]
+    fn test_segment_serialization() {
+        let seg = make_segment("test", true);
+        let json = serde_json::to_string(&seg).unwrap();
+        assert!(json.contains("\"text\":\"test\""));
+        assert!(json.contains("\"is_final\":true"));
+        // inference_time_ms should be skipped when None
+        assert!(!json.contains("inference_time_ms"));
+    }
+
+    #[test]
+    fn test_segment_serialization_with_inference_time() {
+        let seg = TranscriptionSegment {
+            text: "test".to_string(),
+            start_time: 0.0,
+            end_time: 1.0,
+            speaker: None,
+            confidence: None,
+            is_final: true,
+            inference_time_ms: Some(200),
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        assert!(json.contains("\"inference_time_ms\":200"));
+    }
+
+    #[test]
+    fn test_segment_deserialization() {
+        let json = r#"{"text":"hello","start_time":0.5,"end_time":1.5,"speaker":1,"confidence":0.9,"is_final":true}"#;
+        let seg: TranscriptionSegment = serde_json::from_str(json).unwrap();
+        assert_eq!(seg.text, "hello");
+        assert_eq!(seg.start_time, 0.5);
+        assert_eq!(seg.speaker, Some(1));
+        assert!(seg.is_final);
     }
 }

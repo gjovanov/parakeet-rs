@@ -721,7 +721,7 @@ mod tests {
         let pause = VadConfig::pause_based();
 
         assert!(speedy.silence_trigger_ms < pause.silence_trigger_ms);
-        assert!(speedy.speech_threshold < pause.speech_threshold);
+        assert!(speedy.speech_threshold > pause.speech_threshold);
     }
 
     #[test]

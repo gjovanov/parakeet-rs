@@ -9,12 +9,20 @@ import {
   formatStateForLog,
   type ConsoleMessage,
 } from './helpers/webrtc-helpers';
+import {
+  createSessionViaAPI,
+  startSessionViaAPI,
+  stopSessionViaAPI,
+  getMediaFiles,
+} from './helpers/session-helpers';
 
 test.describe('WebRTC Connection Tests', () => {
   let consoleLogs: ConsoleMessage[];
+  let cleanupSessionIds: string[] = [];
 
   test.beforeEach(async ({ page }) => {
     consoleLogs = setupConsoleCapture(page);
+    cleanupSessionIds = [];
 
     await page.goto('/');
     await page.waitForLoadState('networkidle');
@@ -37,7 +45,56 @@ test.describe('WebRTC Connection Tests', () => {
       console.log('\n=== Final State ===');
       console.log(formatStateForLog(state));
     }
+
+    // Clean up sessions
+    for (const id of cleanupSessionIds) {
+      await stopSessionViaAPI(id).catch(() => {});
+    }
   });
+
+  /**
+   * Create a fresh session via API, start it, then join via UI so
+   * audio is actively streaming when the test observes WebRTC state.
+   */
+  async function createAndJoinActiveSession(page: import('@playwright/test').Page): Promise<boolean> {
+    const mediaFiles = await getMediaFiles();
+    if (mediaFiles.length === 0) return false;
+
+    const mediaFile = mediaFiles.find(f => f.includes('news') || f.includes('long')) || mediaFiles[0];
+
+    const session = await createSessionViaAPI({
+      mode: 'speedy',
+      mediaFile,
+      language: 'de',
+    });
+    cleanupSessionIds.push(session.id);
+
+    await startSessionViaAPI(session.id);
+
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    const sessionCard = page.locator('.session-card').first();
+    try {
+      await expect(sessionCard).toBeVisible({ timeout: 10000 });
+    } catch {
+      return false;
+    }
+
+    await sessionCard.click();
+    await page.waitForTimeout(500);
+
+    const connectBtn = page.locator('#connect-btn');
+    await expect(connectBtn).toBeEnabled({ timeout: 10000 });
+    await connectBtn.click();
+
+    await page.waitForFunction(() => (window as any)._webrtcClient !== null, {
+      timeout: 15000,
+    });
+
+    await waitForConnectionState(page, 'connected', 30000);
+    return true;
+  }
 
   test('should load the page and display sessions', async ({ page }) => {
     await expect(page.locator('h1')).toContainText('Multi-Session Transcription');
@@ -85,31 +142,14 @@ test.describe('WebRTC Connection Tests', () => {
   });
 
   test('should receive audio packets after connection', async ({ page }) => {
-    test.setTimeout(90000);
+    test.setTimeout(120000);
 
-    const sessionCard = page.locator('.session-card').first();
-    const hasSession = await sessionCard.isVisible().catch(() => false);
-
-    if (!hasSession) {
-      console.log('No sessions available - skipping packet test');
+    const connected = await createAndJoinActiveSession(page);
+    if (!connected) {
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
-
-    await sessionCard.click();
-    await page.waitForTimeout(500);
-
-    const connectBtn = page.locator('#connect-btn');
-    await expect(connectBtn).toBeEnabled({ timeout: 10000 });
-    await connectBtn.click();
-
-    await page.waitForFunction(
-      () => (window as any)._webrtcClient !== null,
-      { timeout: 15000 }
-    );
-
-    console.log('Waiting for connection...');
-    await waitForConnectionState(page, 'connected', 30000);
 
     console.log('Waiting for packets (5 seconds)...');
     await page.waitForTimeout(5000);
@@ -236,30 +276,14 @@ test.describe('WebRTC Connection Tests', () => {
   });
 
   test('should verify audio element receives stream', async ({ page }) => {
-    test.setTimeout(60000);
+    test.setTimeout(120000);
 
-    const sessionCard = page.locator('.session-card').first();
-    const hasSession = await sessionCard.isVisible().catch(() => false);
-
-    if (!hasSession) {
-      console.log('No sessions available - skipping audio element test');
+    const connected = await createAndJoinActiveSession(page);
+    if (!connected) {
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
-
-    await sessionCard.click();
-    await page.waitForTimeout(500);
-
-    const connectBtn = page.locator('#connect-btn');
-    await expect(connectBtn).toBeEnabled({ timeout: 10000 });
-    await connectBtn.click();
-
-    await page.waitForFunction(
-      () => (window as any)._webrtcClient !== null,
-      { timeout: 15000 }
-    );
-
-    await waitForConnectionState(page, 'connected', 30000);
 
     const audioState = await page.evaluate(() => {
       const client = (window as any)._webrtcClient;

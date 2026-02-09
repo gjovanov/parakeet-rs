@@ -238,6 +238,16 @@ async function connect() {
     console.error('WebRTC connection failed');
   });
 
+  webrtcClient.on('reconnecting', ({ attempt, delay }) => {
+    updateConnectionStatus('reconnecting');
+    elements.bufferInfo.textContent = `Reconnecting (attempt ${attempt})...`;
+  });
+
+  webrtcClient.on('reconnectFailed', () => {
+    updateConnectionStatus('disconnected');
+    elements.bufferInfo.textContent = 'Reconnection failed. Click Connect to retry.';
+  });
+
   webrtcClient.on('error', (error) => {
     console.error('WebRTC error:', error);
   });
@@ -303,6 +313,9 @@ function updateConnectionStatus(status) {
       break;
     case 'connecting':
       elements.connectionStatus.textContent = 'Connecting...';
+      break;
+    case 'reconnecting':
+      elements.connectionStatus.textContent = 'Reconnecting...';
       break;
   }
 }

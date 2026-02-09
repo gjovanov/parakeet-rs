@@ -1,6 +1,6 @@
 [package]
 name = "parakeet-rs"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
 authors = ["altunenes"]
 description = "Fast ASR & Speaker Diarization with NVIDIA Parakeet via ONNX"
@@ -13,21 +13,10 @@ categories = ["multimedia::audio", "science"]
 name = "parakeet_rs"
 path = "src/lib.rs"
 
-[[example]]
-name = "transcribe"
-path = "examples/transcribe.rs"
-
-[[example]]
-name = "diarization"
-path = "examples/diarization.rs"
-
-[[example]]
-name = "raw"
-path = "examples/raw.rs"
-
-[[example]]
-name = "streaming"
-path = "examples/streaming.rs"
+[[bin]]
+name = "parakeet-server"
+path = "src/bin/server/main.rs"
+required-features = ["server"]
 
 [dependencies]
 ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
@@ -38,62 +27,33 @@ tokenizers = "0.20"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rustfft = "6.4"
-# Required for session and media management
 tokio = { version = "1", features = ["fs", "process", "sync"] }
 bytes = "1.5"
 uuid = { version = "1.6", features = ["v4"] }
-# Noise cancellation
-nnnoiseless = "0.5"  # RNNoise pure Rust port
-# Date/time handling for VoD transcripts
+nnnoiseless = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
-rubato = "0.15"      # High-quality audio resampling
+rubato = "0.15"
+
+# Server-only dependencies (optional, gated behind "server" feature)
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
+axum = { version = "0.7", features = ["ws", "multipart"], optional = true }
+tower-http = { version = "0.5", features = ["fs", "cors"], optional = true }
+futures-util = { version = "0.3", optional = true }
+base64 = { version = "0.22", optional = true }
+webrtc = { version = "0.11", optional = true }
+audiopus = { version = "0.3.0-rc.0", optional = true }
+libc = { version = "0.2", optional = true }
+reqwest = { version = "0.12", default-features = false, optional = true }
 
 [dev-dependencies]
-rayon = "1.10"
-num_cpus = "1.16"
-cpal = "0.15"
-clap = { version = "4.5", features = ["derive", "env"] }
-ctrlc = "3.4"
 tokio = { version = "1", features = ["full"] }
-# High-performance web framework
-axum = { version = "0.7", features = ["ws", "multipart"] }
-tower-http = { version = "0.5", features = ["fs", "cors"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
-base64 = "0.22"
-# WebRTC for low-latency audio streaming
-webrtc = "0.11"
-# Opus audio codec (builds from source)
-audiopus = "0.3.0-rc.0"
-# For killing ffmpeg processes on session stop
-libc = "0.2"
-# HTTP client for FAB live transcription forwarding
-reqwest = { version = "0.12", default-features = false }
-
-[[example]]
-name = "diarization_fast"
-path = "examples/diarization_fast.rs"
-
-[[example]]
-name = "realtime_streaming"
-path = "examples/realtime_streaming.rs"
-
-[[example]]
-name = "realtime_tdt"
-path = "examples/realtime_tdt.rs"
-
-[[example]]
-name = "webrtc_transcriber"
-path = "examples/webrtc_transcriber/main.rs"
-
-[[example]]
-name = "test_canary_speedy_growing"
-path = "examples/tests/test_canary_speedy_growing.rs"
 
 [features]
 default = ["cpu"]
 cpu = []
-# With load-dynamic, execution providers are loaded at runtime from libonnxruntime.so
-# These features just enable the code paths, not ort's provider downloads
 cuda = []
 tensorrt = []
 coreml = []
@@ -102,4 +62,16 @@ rocm = []
 openvino = []
 webgpu = []
 sortformer = []
-rnnoise = []  # Enable RNNoise noise cancellation
+rnnoise = []
+server = [
+    "dep:clap",
+    "dep:axum",
+    "dep:tower-http",
+    "dep:futures-util",
+    "dep:base64",
+    "dep:webrtc",
+    "dep:audiopus",
+    "dep:libc",
+    "dep:reqwest",
+    "tokio/full",
+]

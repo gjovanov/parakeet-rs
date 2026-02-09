@@ -7,15 +7,23 @@ import {
   formatStateForLog,
   type ConsoleMessage,
 } from './helpers/webrtc-helpers';
+import {
+  createSessionViaAPI,
+  startSessionViaAPI,
+  stopSessionViaAPI,
+  getMediaFiles,
+  getSessions,
+} from './helpers/session-helpers';
+
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8080';
 
 test.describe('Transcription UI Tests', () => {
   let consoleLogs: ConsoleMessage[];
+  let cleanupSessionIds: string[] = [];
 
   test.beforeEach(async ({ page }) => {
     consoleLogs = setupConsoleCapture(page);
-
-    await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    cleanupSessionIds = [];
   });
 
   test.afterEach(async ({ page }, testInfo) => {
@@ -38,21 +46,60 @@ test.describe('Transcription UI Tests', () => {
       console.log('\n=== WebRTC Diagnostics ===');
       console.log(JSON.stringify(diagnostics, null, 2));
     }
+
+    // Clean up sessions
+    for (const id of cleanupSessionIds) {
+      await stopSessionViaAPI(id).catch(() => {});
+    }
   });
 
   /**
-   * Helper: connect to the first available session.
-   * Returns true if connected, false if no session available (test should skip).
+   * Join an actively-running session so transcription is live when the test
+   * observes the UI. Prefers SRT stream sessions (continuous audio) over
+   * short-lived file sessions that complete in seconds.
    */
-  async function connectToSession(page: import('@playwright/test').Page): Promise<boolean> {
-    const sessionCard = page.locator('.session-card').first();
-    const hasSession = await sessionCard.isVisible().catch(() => false);
+  async function createAndJoinActiveSession(page: import('@playwright/test').Page): Promise<boolean> {
+    const sessions = await getSessions();
 
-    if (!hasSession) {
-      return false;
+    // Prefer SRT stream sessions — they run continuously and won't complete mid-test
+    let targetId: string | null = null;
+    const srtSession = sessions.find(
+      (s: any) => s.state === 'running' && s.source_type === 'srtstream'
+    );
+
+    if (srtSession) {
+      targetId = srtSession.id;
+      console.log(`Joining SRT session: ${srtSession.media_filename} (${targetId})`);
+    } else {
+      // Fallback: create a new session from a media file
+      const mediaFiles = await getMediaFiles();
+      if (mediaFiles.length === 0) return false;
+
+      const mediaFile = mediaFiles.find(f => f.includes('news') || f.includes('long')) || mediaFiles[0];
+      const session = await createSessionViaAPI({
+        mode: 'speedy',
+        mediaFile,
+        language: 'de',
+      });
+      cleanupSessionIds.push(session.id);
+      await startSessionViaAPI(session.id);
+      targetId = session.id;
+      console.log(`Created file session: ${mediaFile} (${targetId})`);
     }
 
-    await sessionCard.click();
+    await page.goto('/');
+    await page.waitForLoadState('networkidle');
+
+    // Select the specific session by ID using the global JS function
+    await page.waitForFunction(
+      (id) => {
+        const cards = document.querySelectorAll('.session-card');
+        return cards.length > 0;
+      },
+      targetId,
+      { timeout: 10000 }
+    );
+    await page.evaluate((id) => (window as any).selectSession(id), targetId);
     await page.waitForTimeout(500);
 
     const connectBtn = page.locator('#connect-btn');
@@ -70,9 +117,9 @@ test.describe('Transcription UI Tests', () => {
   test('live subtitle text appears and updates over time', async ({ page }) => {
     test.setTimeout(120000);
 
-    const connected = await connectToSession(page);
+    const connected = await createAndJoinActiveSession(page);
     if (!connected) {
-      console.log('No sessions available - skipping');
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
@@ -83,9 +130,11 @@ test.describe('Transcription UI Tests', () => {
     await expect(subtitleText).not.toHaveText('', { timeout: 30000 });
 
     // Collect snapshots over time to verify text updates
+    // Sample frequently (every 1s) for up to 60s to catch text changes even during
+    // natural speech pauses in live SRT streams
     const snapshots: string[] = [];
-    for (let i = 0; i < 15; i++) {
-      await page.waitForTimeout(2000);
+    for (let i = 0; i < 60; i++) {
+      await page.waitForTimeout(1000);
       const text = (await subtitleText.innerText()).trim();
       if (text) {
         snapshots.push(text);
@@ -106,9 +155,9 @@ test.describe('Transcription UI Tests', () => {
   test('live subtitle has no hallucination repetition', async ({ page }) => {
     test.setTimeout(120000);
 
-    const connected = await connectToSession(page);
+    const connected = await createAndJoinActiveSession(page);
     if (!connected) {
-      console.log('No sessions available - skipping');
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
@@ -145,17 +194,14 @@ test.describe('Transcription UI Tests', () => {
   test('transcript segments accumulate over time', async ({ page }) => {
     test.setTimeout(120000);
 
-    const connected = await connectToSession(page);
+    const connected = await createAndJoinActiveSession(page);
     if (!connected) {
-      console.log('No sessions available - skipping');
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
 
-    const transcriptContent = page.locator('#transcript-content');
-    await expect(transcriptContent).toBeVisible();
-
-    // Wait for first segment to appear
+    // Wait for first segment to appear (transcript-content starts empty/hidden until populated)
     const firstSegment = page.locator('.transcript-segment').first();
     await expect(firstSegment).toBeVisible({ timeout: 60000 });
 
@@ -179,9 +225,9 @@ test.describe('Transcription UI Tests', () => {
   test('transcript segments have non-empty, non-duplicated text', async ({ page }) => {
     test.setTimeout(120000);
 
-    const connected = await connectToSession(page);
+    const connected = await createAndJoinActiveSession(page);
     if (!connected) {
-      console.log('No sessions available - skipping');
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
@@ -222,9 +268,9 @@ test.describe('Transcription UI Tests', () => {
   test('current panel shows coherent sentence starts, not mid-sentence fragments (DE)', async ({ page }) => {
     test.setTimeout(120000);
 
-    const connected = await connectToSession(page);
+    const connected = await createAndJoinActiveSession(page);
     if (!connected) {
-      console.log('No sessions available - skipping');
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
@@ -232,14 +278,15 @@ test.describe('Transcription UI Tests', () => {
     const subtitleText = page.locator('#live-subtitle .subtitle-text');
     await expect(subtitleText).not.toHaveText('', { timeout: 30000 });
 
-    // German lowercase mid-sentence indicators: articles, prepositions, conjunctions
-    // that almost never start a spoken sentence. If the panel frequently starts with
-    // these, the display is showing raw partial fragments instead of sentence starts.
+    // German mid-sentence indicators: prepositions, conjunctions, adverbs.
+    // NOTE: Articles (der/die/das/ein/eine) are excluded because they commonly
+    // START German sentences ("Die Regierung hat...", "Der Kanzler sprach...").
+    // Only genitive/dative-only forms retained as they rarely begin sentences.
     const midSentenceStarters = new Set([
-      'der', 'die', 'das', 'des', 'dem', 'den',
-      'ein', 'eine', 'einer', 'einem', 'einen', 'eines',
+      'des', 'dem', 'den',
+      'einer', 'einem', 'einen', 'eines',
       'und', 'oder', 'aber', 'sondern', 'denn', 'weil',
-      'als', 'wie', 'dass', 'wenn', 'ob', 'wer',
+      'als', 'wie', 'dass', 'wenn', 'ob',
       'in', 'im', 'an', 'am', 'auf', 'aus', 'bei', 'für',
       'mit', 'nach', 'von', 'vom', 'vor', 'zu', 'zum', 'zur',
       'über', 'unter', 'zwischen', 'gegen', 'durch', 'ohne',
@@ -253,7 +300,6 @@ test.describe('Transcription UI Tests', () => {
       const raw = (await subtitleText.innerText()).trim();
       if (!raw || raw.length < 3) continue;
 
-      // The panel may render multiple <p> tags; take the last (most current) paragraph
       const paragraphs = raw.split('\n').map(p => p.trim()).filter(Boolean);
       const text = paragraphs[paragraphs.length - 1];
       const firstWord = text.split(/\s+/)[0].toLowerCase().replace(/[.,!?;:]+$/, '');
@@ -271,28 +317,20 @@ test.describe('Transcription UI Tests', () => {
 
     console.log(`Subtitle sentence-start analysis (${total} samples):`);
     console.log(`  Mid-sentence starts: ${midCount}/${total} (${(midRate * 100).toFixed(0)}%)`);
-    // Log a few examples of flagged snapshots
-    snapshots
-      .filter(s => s.isMidSentence)
-      .slice(0, 5)
+    snapshots.filter(s => s.isMidSentence).slice(0, 5)
       .forEach(s => console.log(`  FLAGGED: "${s.firstWord}" -> "${s.text}"`));
-    // Log a few good examples
-    snapshots
-      .filter(s => !s.isMidSentence)
-      .slice(0, 5)
+    snapshots.filter(s => !s.isMidSentence).slice(0, 5)
       .forEach(s => console.log(`  OK:      "${s.firstWord}" -> "${s.text}"`));
 
-    // Heuristic: if >40% of samples start with mid-sentence words, the panel is
-    // displaying raw partial fragments rather than coherent growing sentences.
     expect(midRate).toBeLessThan(0.4);
   });
 
   test('transcript segments have speaker labels and timestamps', async ({ page }) => {
     test.setTimeout(120000);
 
-    const connected = await connectToSession(page);
+    const connected = await createAndJoinActiveSession(page);
     if (!connected) {
-      console.log('No sessions available - skipping');
+      console.log('Could not create active session - skipping');
       test.skip();
       return;
     }
@@ -307,13 +345,14 @@ test.describe('Transcription UI Tests', () => {
     console.log(`Checking ${segmentCount} segments for speaker/time metadata`);
 
     // Check first segment has expected child elements
-    const firstSpeaker = page.locator('.transcript-segment .segment-speaker').first();
+    // Frontend uses .speaker-label (not .segment-speaker) and .segment-time
+    const firstSpeaker = page.locator('.transcript-segment .speaker-label').first();
     const firstTime = page.locator('.transcript-segment .segment-time').first();
     const firstName = page.locator('.transcript-segment .segment-text').first();
 
     await expect(firstName).toBeVisible();
 
-    // Speaker label should exist (may say "Speaker ?" for unknown)
+    // Speaker label should exist (may say "[Speaker ?]" for unknown)
     const speakerText = await firstSpeaker.innerText();
     console.log(`First segment speaker: "${speakerText}"`);
     expect(speakerText.length).toBeGreaterThan(0);

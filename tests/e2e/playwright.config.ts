@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// Server URL: set BASE_URL env var or use default.
+// Start the server first: sudo bash -c './start-server.sh >> /tmp/parakeet-server.log 2>&1 &'
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8080';
+
 export default defineConfig({
   testDir: '.',
   fullyParallel: false,
@@ -12,7 +16,7 @@ export default defineConfig({
   ],
 
   use: {
-    baseURL: process.env.BASE_URL || 'http://172.31.244.165:8080',
+    baseURL: BASE_URL,
     trace: 'on-first-retry',
     video: 'on-first-retry',
     screenshot: 'only-on-failure',

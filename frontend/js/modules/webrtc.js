@@ -152,6 +152,12 @@ export class WebRTCClient {
   async reconnect() {
     console.log('[WebRTC] Attempting reconnection...');
 
+    // Clear ICE disconnect timer
+    if (this.iceDisconnectTimer) {
+      clearTimeout(this.iceDisconnectTimer);
+      this.iceDisconnectTimer = null;
+    }
+
     // Cleanup old peer connection
     if (this.pc) {
       this.pc.close();
@@ -248,7 +254,18 @@ export class WebRTCClient {
       } else if (this.pc.iceConnectionState === 'checking') {
         console.log('[WebRTC] ICE checking connectivity...');
       } else if (this.pc.iceConnectionState === 'disconnected') {
-        console.warn('[WebRTC] ICE disconnected - connection may recover');
+        console.warn('[WebRTC] ICE disconnected - waiting 5s for recovery');
+        this.iceDisconnectTimer = setTimeout(() => {
+          if (this.pc && this.pc.iceConnectionState === 'disconnected') {
+            console.error('[WebRTC] ICE did not recover, triggering reconnect');
+            this.emit('connectionFailed');
+          }
+        }, 5000);
+      } else if (['connected', 'completed'].includes(this.pc.iceConnectionState)) {
+        if (this.iceDisconnectTimer) {
+          clearTimeout(this.iceDisconnectTimer);
+          this.iceDisconnectTimer = null;
+        }
       }
     };
 
@@ -420,6 +437,12 @@ export class WebRTCClient {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
+    }
+
+    // Clear ICE disconnect timer
+    if (this.iceDisconnectTimer) {
+      clearTimeout(this.iceDisconnectTimer);
+      this.iceDisconnectTimer = null;
     }
 
     if (this.pc) {

@@ -62,6 +62,20 @@ async function init() {
   // Set up UI event listeners
   setupEventListeners();
 
+  // Populate FAB defaults from config
+  if (elements.fabEnabledSelect && config.fabEnabled !== undefined) {
+    const defaultLabel = config.fabEnabled ? 'Default (enabled)' : 'Default (disabled)';
+    elements.fabEnabledSelect.options[0].textContent = defaultLabel;
+  }
+  if (elements.fabUrlInput && config.fabUrl) {
+    elements.fabUrlInput.value = config.fabUrl;
+    elements.fabUrlInput.placeholder = config.fabUrl || 'No server default';
+  }
+  if (elements.fabSendTypeSelect && config.fabSendType) {
+    const defaultLabel = `Default (${config.fabSendType})`;
+    elements.fabSendTypeSelect.options[0].textContent = defaultLabel;
+  }
+
   // Load initial data
   await Promise.all([
     sessionManager.fetchModels(),
@@ -136,6 +150,13 @@ function cacheElements() {
   elements.contextBufferGroup = document.getElementById('context-buffer-group');
   elements.contextBuffer = document.getElementById('context-buffer');
   elements.contextBufferValue = document.getElementById('context-buffer-value');
+
+  // FAB config elements
+  elements.fabEnabledSelect = document.getElementById('fab-enabled-select');
+  elements.fabUrlGroup = document.getElementById('fab-url-group');
+  elements.fabUrlInput = document.getElementById('fab-url-input');
+  elements.fabSendTypeGroup = document.getElementById('fab-send-type-group');
+  elements.fabSendTypeSelect = document.getElementById('fab-send-type-select');
 
   // Source type tabs (Media Files vs Live Streams)
   elements.sourceTabs = document.querySelectorAll('.source-tab');
@@ -260,6 +281,20 @@ function setupEventListeners() {
     });
   }
 
+  // FAB select - show/hide URL input and send type
+  if (elements.fabEnabledSelect) {
+    elements.fabEnabledSelect.addEventListener('change', () => {
+      const val = elements.fabEnabledSelect.value;
+      const show = val === 'enabled';
+      if (elements.fabUrlGroup) {
+        elements.fabUrlGroup.style.display = show ? 'flex' : 'none';
+      }
+      if (elements.fabSendTypeGroup) {
+        elements.fabSendTypeGroup.style.display = show ? 'flex' : 'none';
+      }
+    });
+  }
+
   // Create session
   elements.createSessionBtn.addEventListener('click', async () => {
     const modelId = elements.modelSelect.value;
@@ -304,6 +339,11 @@ function setupEventListeners() {
       };
     }
 
+    // Get FAB config
+    const fabEnabled = elements.fabEnabledSelect?.value || 'default';
+    const fabUrl = elements.fabUrlInput?.value?.trim() || '';
+    const fabSendType = elements.fabSendTypeSelect?.value || 'default';
+
     // Get pause config for pause-related modes
     let pauseConfig = null;
     if (PAUSE_MODES.includes(mode) && elements.pauseThreshold) {
@@ -327,7 +367,10 @@ function setupEventListeners() {
         noiseCancellation,
         diarization,
         pauseConfig,
-        sentenceCompletion
+        sentenceCompletion,
+        fabEnabled,
+        fabUrl,
+        fabSendType
       });
       // Auto-start the session
       await sessionManager.startSession(session.id);

@@ -57,4 +57,4 @@ if [ "$PORT" -le 1024 ] && [ "$(id -u)" -ne 0 ]; then
     exec sudo -E "$0" "$@"
 fi
 
-exec ./target/release/examples/webrtc_transcriber "${ARGS[@]}" "$@"
+exec ./target/release/parakeet-server "${ARGS[@]}" "$@"

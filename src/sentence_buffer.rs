@@ -357,6 +357,10 @@ mod tests {
         }
     }
 
+    // ========================================================================
+    // Mode configuration
+    // ========================================================================
+
     #[test]
     fn test_off_mode_passthrough() {
         let mut buffer = SentenceBuffer::new(SentenceBufferConfig::off());
@@ -365,6 +369,46 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().text, "Hello world");
     }
+
+    #[test]
+    fn test_off_mode_is_disabled() {
+        let buffer = SentenceBuffer::new(SentenceBufferConfig::off());
+        assert!(buffer.is_disabled());
+    }
+
+    #[test]
+    fn test_minimal_mode_not_disabled() {
+        let buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
+        assert!(!buffer.is_disabled());
+    }
+
+    #[test]
+    fn test_mode_from_str() {
+        assert_eq!(SentenceBufferMode::from_str("off"), SentenceBufferMode::Off);
+        assert_eq!(SentenceBufferMode::from_str("minimal"), SentenceBufferMode::Minimal);
+        assert_eq!(SentenceBufferMode::from_str("balanced"), SentenceBufferMode::Balanced);
+        assert_eq!(SentenceBufferMode::from_str("complete"), SentenceBufferMode::Complete);
+        // Unknown defaults to minimal
+        assert_eq!(SentenceBufferMode::from_str("unknown"), SentenceBufferMode::Minimal);
+    }
+
+    #[test]
+    fn test_mode_as_str() {
+        assert_eq!(SentenceBufferMode::Off.as_str(), "off");
+        assert_eq!(SentenceBufferMode::Minimal.as_str(), "minimal");
+        assert_eq!(SentenceBufferMode::Balanced.as_str(), "balanced");
+        assert_eq!(SentenceBufferMode::Complete.as_str(), "complete");
+    }
+
+    #[test]
+    fn test_with_mode_factory() {
+        let buffer = SentenceBuffer::with_mode(SentenceBufferMode::Balanced);
+        assert!(!buffer.is_disabled());
+    }
+
+    // ========================================================================
+    // Sentence punctuation detection
+    // ========================================================================
 
     #[test]
     fn test_sentence_detection() {
@@ -377,14 +421,41 @@ mod tests {
     }
 
     #[test]
+    fn test_sentence_detection_unicode() {
+        // Chinese punctuation
+        assert!(SentenceBuffer::ends_with_sentence_punctuation("测试。"));
+        assert!(SentenceBuffer::ends_with_sentence_punctuation("测试！"));
+        assert!(SentenceBuffer::ends_with_sentence_punctuation("测试？"));
+    }
+
+    #[test]
+    fn test_sentence_detection_curly_quotes() {
+        // English curly quotes: U+201C opening, U+201D closing (supported)
+        let english = format!("He said \u{201C}Hello.\u{201D}");
+        assert!(SentenceBuffer::ends_with_sentence_punctuation(&english));
+        // Closing single quote U+2019
+        let single = format!("He said \u{2018}Hello.\u{2019}");
+        assert!(SentenceBuffer::ends_with_sentence_punctuation(&single));
+        // Guillemets
+        assert!(SentenceBuffer::ends_with_sentence_punctuation("Il a dit .»"));
+    }
+
+    #[test]
+    fn test_sentence_detection_empty() {
+        assert!(!SentenceBuffer::ends_with_sentence_punctuation(""));
+    }
+
+    // ========================================================================
+    // Buffering behavior
+    // ========================================================================
+
+    #[test]
     fn test_minimal_buffering() {
         let mut buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
 
-        // First segment without punctuation - should buffer
         let seg1 = make_segment("Hello", 0.0, 0.5);
         assert!(buffer.push(seg1).is_none());
 
-        // Second segment with punctuation - should emit
         let seg2 = make_segment("world.", 0.5, 1.0);
         let result = buffer.push(seg2);
         assert!(result.is_some());
@@ -400,11 +471,85 @@ mod tests {
             min_segments: 1,
         });
 
-        // Segment spanning more than max duration
         let seg = make_segment("This is a long segment without punctuation", 0.0, 1.5);
         let result = buffer.push(seg);
         assert!(result.is_some());
     }
+
+    #[test]
+    fn test_multiple_segments_accumulate() {
+        let mut buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
+
+        let seg1 = make_segment("Erster", 0.0, 0.3);
+        assert!(buffer.push(seg1).is_none());
+        assert_eq!(buffer.pending_count(), 1);
+
+        let seg2 = make_segment("Teil", 0.3, 0.6);
+        assert!(buffer.push(seg2).is_none());
+        assert_eq!(buffer.pending_count(), 2);
+
+        assert!(buffer.has_pending());
+
+        let seg3 = make_segment("Ende.", 0.6, 1.0);
+        let result = buffer.push(seg3);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().text, "Erster Teil Ende.");
+    }
+
+    #[test]
+    fn test_buffered_text() {
+        let mut buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
+
+        let seg = make_segment("Pending text", 0.0, 0.5);
+        buffer.push(seg);
+
+        assert_eq!(buffer.buffered_text(), "Pending text");
+    }
+
+    #[test]
+    fn test_balanced_mode_buffering() {
+        let mut buffer = SentenceBuffer::new(SentenceBufferConfig::balanced());
+
+        let seg = make_segment("Short.", 0.0, 0.3);
+        let result = buffer.push(seg);
+        // Balanced mode has longer buffer - short sentence may still be emitted
+        // since it ends with punctuation
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_inference_time_accumulation() {
+        let mut buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
+
+        let seg1 = TranscriptionSegment {
+            text: "Hello".to_string(),
+            start_time: 0.0,
+            end_time: 0.5,
+            speaker: Some(0),
+            confidence: None,
+            is_final: true,
+            inference_time_ms: Some(100),
+        };
+        buffer.push(seg1);
+
+        let seg2 = TranscriptionSegment {
+            text: "world.".to_string(),
+            start_time: 0.5,
+            end_time: 1.0,
+            speaker: Some(0),
+            confidence: None,
+            is_final: true,
+            inference_time_ms: Some(200),
+        };
+        let result = buffer.push(seg2).unwrap();
+
+        // Should take max inference time from accumulated segments
+        assert!(result.inference_time_ms.is_some());
+    }
+
+    // ========================================================================
+    // Flush
+    // ========================================================================
 
     #[test]
     fn test_flush() {
@@ -413,12 +558,53 @@ mod tests {
         let seg = make_segment("Incomplete", 0.0, 0.5);
         assert!(buffer.push(seg).is_none());
 
-        // Flush should return the buffered content
         let result = buffer.flush();
         assert!(result.is_some());
         assert_eq!(result.unwrap().text, "Incomplete");
 
-        // Buffer should be empty now
         assert!(!buffer.has_pending());
+    }
+
+    #[test]
+    fn test_flush_empty() {
+        let mut buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
+        assert!(buffer.flush().is_none());
+    }
+
+    #[test]
+    fn test_flush_preserves_timing() {
+        let mut buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
+
+        // Use short timings that stay under max_buffer_secs (2.0)
+        let seg1 = make_segment("Part one", 0.0, 0.5);
+        buffer.push(seg1);
+        let seg2 = make_segment("part two", 0.5, 1.0);
+        buffer.push(seg2);
+
+        let flushed = buffer.flush().unwrap();
+        assert_eq!(flushed.start_time, 0.0);
+        assert_eq!(flushed.end_time, 1.0);
+    }
+
+    // ========================================================================
+    // Speaker handling
+    // ========================================================================
+
+    #[test]
+    fn test_speaker_preserved() {
+        let mut buffer = SentenceBuffer::new(SentenceBufferConfig::minimal());
+
+        let seg = TranscriptionSegment {
+            text: "Hello world.".to_string(),
+            start_time: 0.0,
+            end_time: 1.0,
+            speaker: Some(2),
+            confidence: None,
+            is_final: true,
+            inference_time_ms: None,
+        };
+
+        let result = buffer.push(seg).unwrap();
+        assert_eq!(result.speaker, Some(2));
     }
 }

@@ -1,5 +1,5 @@
-# Multi-stage Dockerfile for parakeet-rs WebRTC transcriber
-# Build: docker build -f docker/Dockerfile.transcriber -t parakeet-transcriber .
+# Multi-stage Dockerfile for parakeet-rs server (CPU)
+# Build: docker build -f docker/Dockerfile.cpu -t parakeet-server .
 
 # ==============================================================================
 # Stage 1: Build environment
@@ -22,22 +22,21 @@ RUN apt-get update && apt-get install -y \
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source for dependency compilation
-RUN mkdir -p src examples && \
-    echo "fn main() {}" > src/lib.rs && \
-    echo "fn main() {}" > examples/webrtc_transcriber.rs
+RUN mkdir -p src && \
+    echo "pub fn lib() {}" > src/lib.rs
 
 # Build dependencies only (cache layer)
-RUN cargo build --release --example webrtc_transcriber --features sortformer 2>/dev/null || true
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+RUN cargo build --release --features "server,sortformer" 2>/dev/null || true
 
 # Remove dummy source and clear cached compilation to force rebuild
-RUN rm -rf src examples && rm -rf target/release/.fingerprint/parakeet* target/release/deps/parakeet* target/release/deps/libparakeet* target/release/examples/webrtc_transcriber
+RUN rm -rf src && rm -rf target/release/.fingerprint/parakeet* target/release/deps/parakeet* target/release/deps/libparakeet* target/release/parakeet-server
 
 # Copy actual source code
 COPY src/ ./src/
-COPY examples/ ./examples/
 
-# Build release binary with sortformer feature (force rebuild)
-RUN touch src/lib.rs && cargo build --release --example webrtc_transcriber --features sortformer
+# Build release binary with server and sortformer features
+RUN touch src/lib.rs && cargo build --release --features "server,sortformer"
 
 # ==============================================================================
 # Stage 2: Runtime environment
@@ -56,7 +55,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
-COPY --from=builder /app/target/release/examples/webrtc_transcriber /app/
+COPY --from=builder /app/target/release/parakeet-server /app/
 
 # Copy frontend files
 COPY frontend/ /app/frontend/
@@ -97,7 +96,5 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Default command
-# Note: Uses environment variables for configuration
-# Override with docker run -e PUBLIC_IP=x.x.x.x -e SPEEDY_MODE=1 etc.
-ENTRYPOINT ["/app/webrtc_transcriber"]
+ENTRYPOINT ["/app/parakeet-server"]
 CMD ["--frontend", "/app/frontend"]

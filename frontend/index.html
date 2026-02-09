@@ -516,6 +516,30 @@
             <small style="color: #666;">Buffer segments for complete sentences before display</small>
           </div>
 
+          <div class="form-group">
+            <label for="fab-enabled-select">FAB Forwarding</label>
+            <select id="fab-enabled-select">
+              <option value="default" selected>Default (from server)</option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
+            </select>
+            <small style="color: #666;">Forward live transcription to FAB endpoint</small>
+          </div>
+          <div class="form-group" id="fab-url-group" style="display: none;">
+            <label for="fab-url-input">FAB URL</label>
+            <input type="text" id="fab-url-input" placeholder="Loading...">
+            <small style="color: #666;">Override FAB endpoint URL (leave empty for server default)</small>
+          </div>
+          <div class="form-group" id="fab-send-type-group" style="display: none;">
+            <label for="fab-send-type-select">FAB Send Type</label>
+            <select id="fab-send-type-select">
+              <option value="default" selected>Default (from server)</option>
+              <option value="growing">Growing (cumulative text)</option>
+              <option value="confirmed">Confirmed (segment text)</option>
+            </select>
+            <small style="color: #666;">What text to send: cumulative growing sentence or discrete finalized segments</small>
+          </div>
+
           <!-- Parallel Mode Config (hidden by default) -->
           <div id="parallel-config" style="display: none;">
             <div class="form-group">

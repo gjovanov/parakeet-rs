@@ -1,0 +1,72 @@
+//! Application state types for the WebRTC transcription server
+
+use crate::api::sessions::{ParallelConfig, PauseConfig};
+use crate::config::RuntimeConfig;
+use crate::srt_config::SrtConfig;
+use parakeet_rs::{SharedMediaManager, SharedModelRegistry, SharedSessionManager};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+
+/// Per-session FAB forwarding configuration
+#[derive(Debug, Clone)]
+pub struct FabConfig {
+    pub enabled: bool,
+    pub url: Option<String>,
+    pub send_type: String,
+}
+
+/// Client connection with WebRTC peer connection
+pub struct ClientConnection {
+    pub id: String,
+    pub session_id: String,
+    pub peer_connection: Arc<RTCPeerConnection>,
+    pub ice_tx: mpsc::Sender<String>,
+}
+
+/// Per-session audio track state
+pub struct SessionAudioState {
+    pub audio_track: Arc<TrackLocalStaticRTP>,
+    pub running: Arc<AtomicBool>,
+    /// FFmpeg process ID for killing on session stop
+    pub ffmpeg_pid: Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// Shared application state
+pub struct AppState {
+    /// Session manager
+    pub session_manager: SharedSessionManager,
+    /// Model registry
+    pub model_registry: SharedModelRegistry,
+    /// Media manager
+    pub media_manager: SharedMediaManager,
+    /// WebRTC API
+    pub api: webrtc::api::API,
+    /// Connected clients by ID
+    pub clients: Mutex<HashMap<String, ClientConnection>>,
+    /// Total client count
+    pub client_count: AtomicU64,
+    /// Runtime configuration for frontend
+    pub config: RuntimeConfig,
+    /// Per-session audio tracks
+    pub session_audio: RwLock<HashMap<String, SessionAudioState>>,
+    /// Per-session parallel configs (for parallel mode)
+    pub parallel_configs: RwLock<HashMap<String, ParallelConfig>>,
+    /// Per-session pause configs (for pause-related modes)
+    pub pause_configs: RwLock<HashMap<String, PauseConfig>>,
+    /// SRT stream configuration (optional)
+    pub srt_config: Option<SrtConfig>,
+    /// Whether FAB forwarding is enabled by default
+    pub fab_enabled: bool,
+    /// FAB send type: "growing" (cumulative text) or "confirmed" (finalized segment text)
+    pub fab_send_type: String,
+    /// FAB live transcription endpoint URL (optional)
+    pub fab_url: Option<String>,
+    /// Shared HTTP client for FAB forwarding (optional)
+    pub fab_client: Option<reqwest::Client>,
+    /// Per-session FAB configurations
+    pub fab_configs: RwLock<HashMap<String, FabConfig>>,
+}

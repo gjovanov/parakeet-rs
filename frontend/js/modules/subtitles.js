@@ -167,7 +167,7 @@ export class SubtitleRenderer {
    */
   getSpeakerName(speaker) {
     if (speaker === null || speaker === undefined) {
-      return ''; // Hide speaker label when not available (e.g., Canary model)
+      return 'Speaker ?';
     }
     return `Speaker ${speaker}`;
   }
@@ -298,7 +298,7 @@ export class SubtitleRenderer {
 
     // Only show speaker label if available (TDT has diarization, Canary doesn't)
     if (speakerName) {
-      html += `<span class="segment-speaker" style="color: ${color}">[${speakerName}]</span>`;
+      html += `<span class="speaker-label" style="color: ${color}">[${speakerName}]</span>`;
     }
 
     if (this.options.showTimestamps) {

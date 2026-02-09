@@ -471,6 +471,6 @@ mod tests {
     fn test_sanitize_filename() {
         assert_eq!(sanitize_filename("test.wav"), "test.wav");
         assert_eq!(sanitize_filename("my file.wav"), "my_file.wav");
-        assert_eq!(sanitize_filename("test<>:?.wav"), "test_____.wav");
+        assert_eq!(sanitize_filename("test<>:?.wav"), "test____.wav");
     }
 }
