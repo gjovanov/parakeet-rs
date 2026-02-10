@@ -530,6 +530,102 @@ mod integration {
         assert!(recall >= 0.2, "Key phrase recall too low: {:.1}%", recall * 100.0);
     }
 
+    /// A/B test: KV cache (O(n)) vs full decode (O(n²)) quality comparison.
+    /// Loads the Canary 1B model directly (no server) and compares both decode
+    /// paths against reference transcripts. The KV cache path uses decoder_mems
+    /// (the intended usage), while the full path re-processes all tokens with
+    /// empty mems each step. The cached path should have equal or better quality.
+    #[tokio::test]
+    #[ignore]
+    async fn test_kv_cache_quality() {
+        let refs = load_references();
+        let model_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("canary");
+        if !model_dir.exists() {
+            eprintln!("Skipping: canary model not found at {}", model_dir.display());
+            return;
+        }
+
+        let config = parakeet_rs::canary::CanaryConfig {
+            language: "de".to_string(),
+            ..Default::default()
+        };
+        let mut model = parakeet_rs::canary::CanaryModel::from_pretrained(
+            &model_dir, None, Some(config),
+        ).expect("Failed to load Canary model");
+
+        // Use de_short — other fixtures may not work well in direct model mode
+        // (server applies additional preprocessing like VAD/resampling)
+        let fixture_names = ["de_short"];
+
+        for name in &fixture_names {
+            let fixture = refs.get(*name).expect(&format!("{} fixture not found", name));
+            let audio_path = fixture_path(&fixture.file);
+            let audio_bytes = std::fs::read(&audio_path).expect("Read audio file");
+
+            // Decode WAV to f32 samples
+            let cursor = std::io::Cursor::new(audio_bytes);
+            let reader = hound::WavReader::new(cursor).expect("Parse WAV");
+            let spec = reader.spec();
+            let samples: Vec<f32> = if spec.bits_per_sample == 16 {
+                reader.into_samples::<i16>()
+                    .map(|s| s.unwrap() as f32 / 32768.0)
+                    .collect()
+            } else {
+                reader.into_samples::<f32>()
+                    .map(|s| s.unwrap())
+                    .collect()
+            };
+
+            // Transcribe with KV cache (default path)
+            let t0 = std::time::Instant::now();
+            let cached_result = model.transcribe(&samples).expect("transcribe() failed");
+            let cached_time = t0.elapsed();
+
+            // Transcribe with full decode (O(n²) path)
+            let t1 = std::time::Instant::now();
+            let full_result = model.transcribe_full(&samples).expect("transcribe_full() failed");
+            let full_time = t1.elapsed();
+
+            let cached_wer = word_error_rate(&fixture.reference, &cached_result);
+            let full_wer = word_error_rate(&fixture.reference, &full_result);
+            let cached_recall = key_phrase_recall(&cached_result, &fixture.key_phrases);
+            let full_recall = key_phrase_recall(&full_result, &fixture.key_phrases);
+
+            eprintln!("\n  [KV Cache A/B] Fixture: {}", name);
+            eprintln!("    Reference: {}", &fixture.reference.chars().take(80).collect::<String>());
+            eprintln!("    Cached ({:?}): WER={:.1}% Recall={:.0}% \"{}\"",
+                cached_time, cached_wer * 100.0, cached_recall * 100.0,
+                &cached_result.chars().take(80).collect::<String>());
+            eprintln!("    Full   ({:?}): WER={:.1}% Recall={:.0}% \"{}\"",
+                full_time, full_wer * 100.0, full_recall * 100.0,
+                &full_result.chars().take(80).collect::<String>());
+            eprintln!("    Speedup: {:.1}x",
+                full_time.as_secs_f64() / cached_time.as_secs_f64().max(0.001));
+
+            // Cached path should produce reasonable quality (WER < 50%)
+            assert!(
+                cached_wer < 0.50,
+                "KV cache WER too high: {:.1}% for fixture {}.\n  Result: {}\n  Reference: {}",
+                cached_wer * 100.0, name, cached_result, fixture.reference
+            );
+
+            // Cached path should have at least some key phrase recall
+            assert!(
+                cached_recall >= 0.3,
+                "KV cache recall too low: {:.0}% for fixture {}",
+                cached_recall * 100.0, name
+            );
+
+            // Cached path quality should be equal or better than full path
+            // (KV cache is the intended model usage; empty mems is a workaround)
+            assert!(
+                cached_wer <= full_wer + 0.10,
+                "KV cache should not be significantly worse than full decode.\n  Cached WER: {:.1}% vs Full WER: {:.1}% for {}",
+                cached_wer * 100.0, full_wer * 100.0, name
+            );
+        }
+    }
+
     /// Comprehensive quality report across all modes and fixtures
     #[tokio::test]
     #[ignore]

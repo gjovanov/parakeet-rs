@@ -164,6 +164,14 @@ export class WebRTCClient {
       this.pc = null;
     }
 
+    // Close old WebSocket (prevent duplicate connections)
+    if (this.ws) {
+      this.intentionalClose = true; // prevent ws.onclose from scheduling another reconnect
+      this.ws.close();
+      this.ws = null;
+      this.intentionalClose = false;
+    }
+
     // Don't close the audio element - we want to resume playback
     if (this.audioElement) {
       this.audioElement.srcObject = null;
@@ -177,7 +185,7 @@ export class WebRTCClient {
       console.log('[WebRTC] Reconnected successfully');
     } catch (e) {
       console.error('[WebRTC] Reconnection failed:', e);
-      // Will trigger onclose which will schedule another attempt
+      this.scheduleReconnect();
     }
   }
 
@@ -247,18 +255,25 @@ export class WebRTCClient {
     this.pc.oniceconnectionstatechange = () => {
       console.log('[WebRTC] ICE connection state:', this.pc.iceConnectionState);
       if (this.pc.iceConnectionState === 'failed') {
-        console.error('[WebRTC] ICE connection failed');
+        console.error('[WebRTC] ICE connection failed, closing connection to trigger reconnect');
         this.emit('connectionFailed');
+        // Close PC and WS to trigger auto-reconnect via ws.onclose
+        if (this.pc) { this.pc.close(); this.pc = null; }
+        if (this.ws) { this.ws.close(); }
       } else if (this.pc.iceConnectionState === 'connected' || this.pc.iceConnectionState === 'completed') {
         console.log('[WebRTC] ICE connected! Media should flow now.');
       } else if (this.pc.iceConnectionState === 'checking') {
         console.log('[WebRTC] ICE checking connectivity...');
       } else if (this.pc.iceConnectionState === 'disconnected') {
         console.warn('[WebRTC] ICE disconnected - waiting 5s for recovery');
+        if (this.iceDisconnectTimer) clearTimeout(this.iceDisconnectTimer);
         this.iceDisconnectTimer = setTimeout(() => {
           if (this.pc && this.pc.iceConnectionState === 'disconnected') {
-            console.error('[WebRTC] ICE did not recover, triggering reconnect');
+            console.error('[WebRTC] ICE did not recover, closing connection to trigger reconnect');
             this.emit('connectionFailed');
+            // Close the peer connection and WebSocket to trigger auto-reconnect
+            if (this.pc) { this.pc.close(); this.pc = null; }
+            if (this.ws) { this.ws.close(); } // triggers ws.onclose → scheduleReconnect()
           }
         }, 5000);
       } else if (['connected', 'completed'].includes(this.pc.iceConnectionState)) {

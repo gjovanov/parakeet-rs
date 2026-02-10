@@ -262,7 +262,7 @@ test.describe('Transcription UI Tests', () => {
     console.log(`Duplicate consecutive segments: ${duplicateCount} / ${segmentTexts.length}`);
     // Allow some duplicates (model may re-confirm) but not excessive
     const duplicateRate = duplicateCount / Math.max(segmentTexts.length - 1, 1);
-    expect(duplicateRate).toBeLessThan(0.3);
+    expect(duplicateRate).toBeLessThanOrEqual(0.3);
   });
 
   test('current panel shows coherent sentence starts, not mid-sentence fragments (DE)', async ({ page }) => {

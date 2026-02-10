@@ -231,8 +231,8 @@ async function connect() {
 
   webrtcClient.on('connectionFailed', () => {
     state.connected = false;
-    updateConnectionStatus('disconnected');
-    elements.bufferInfo.textContent = 'Connection failed';
+    updateConnectionStatus('reconnecting');
+    elements.bufferInfo.textContent = 'ICE failed, reconnecting...';
     // Clear any stuck partial subtitle on connection failure
     subtitleRenderer.clearCurrent();
     console.error('WebRTC connection failed');

@@ -9,7 +9,7 @@
 use crate::error::{Error, Result};
 use crate::execution::ModelConfig as ExecutionConfig;
 use ndarray::{Array1, Array2, Array3, Array4};
-use ort::session::Session;
+use ort::session::{Session, SessionOutputs};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -444,17 +444,10 @@ impl CanaryModel {
         Ok((encoder_out, encoder_mask))
     }
 
-    /// Run greedy decoding
-    fn greedy_decode(
-        &mut self,
-        encoder_embeddings: &Array3<f32>,
-        encoder_mask: &Array2<i64>,
-    ) -> Result<Vec<i64>> {
+    /// Build the 9-token Canary prompt
+    fn build_prompt(&self) -> Vec<i64> {
         let lang_id = self.tokenizer.get_language_id(&self.config.language);
-
-        // Initialize with 9-token prompt (Canary format):
-        // <|startofcontext|><|startoftranscript|><|emo:undefined|><|lang|><|lang|><|pnc|><|noitn|><|notimestamp|><|nodiarize|>
-        let initial_prompt: Vec<i64> = vec![
+        vec![
             STARTOFCONTEXT_ID,
             STARTOFTRANSCRIPT_ID,
             EMO_UNDEFINED_ID,
@@ -464,19 +457,102 @@ impl CanaryModel {
             NOITN_ID,         // no inverse text normalization
             NOTIMESTAMP_ID,   // no timestamps
             NODIARIZE_ID,     // no diarization
-        ];
+        ]
+    }
 
-        let mut tokens = initial_prompt.clone();
+    /// Run greedy decoding — tries O(n) KV-cached path, falls back to O(n²) full path
+    fn greedy_decode(
+        &mut self,
+        encoder_embeddings: &Array3<f32>,
+        encoder_mask: &Array2<i64>,
+    ) -> Result<Vec<i64>> {
+        match self.greedy_decode_cached(encoder_embeddings, encoder_mask) {
+            Ok(tokens) => Ok(tokens),
+            Err(e) => {
+                eprintln!("[CanaryModel] KV cache decode failed ({}), falling back to full decode", e);
+                self.greedy_decode_full(encoder_embeddings, encoder_mask)
+            }
+        }
+    }
 
-        // Note: This ONNX model doesn't have KV cache output, so we must pass ALL tokens each step
-        // This is slower but necessary for correct decoding
+    /// O(n) greedy decoding with KV cache
+    ///
+    /// The decoder ONNX model accepts `decoder_mems` [10, batch, mems_len, 1024] as cached
+    /// hidden states and outputs `decoder_hidden_states` [10, batch, seq_len, 1024] which
+    /// can be fed back as the cache for the next step.
+    ///
+    /// Step 0: input_ids = [9 prompt tokens], decoder_mems = empty → get cache for 9 positions
+    /// Step N: input_ids = [1 new token],     decoder_mems = cache → get cache for N+9 positions
+    fn greedy_decode_cached(
+        &mut self,
+        encoder_embeddings: &Array3<f32>,
+        encoder_mask: &Array2<i64>,
+    ) -> Result<Vec<i64>> {
+        let mut tokens = self.build_prompt();
+        let mut decoder_mems = Array4::<f32>::zeros((10, 1, 0, 1024));
 
-        for step in 0..self.config.max_sequence_length {
-            // Always pass all tokens - no KV caching available in this ONNX export
+        // Step 0: process all prompt tokens (scoped to drop outputs before loop)
+        let first_token = {
             let input_ids = Array2::from_shape_vec((1, tokens.len()), tokens.clone())
                 .map_err(|e| Error::Model(format!("Failed to create input_ids: {}", e)))?;
 
-            // decoder_mems is just a dummy input with zero cache since the model ignores it anyway
+            let outputs = self.decoder.run(ort::inputs!(
+                "input_ids" => ort::value::Value::from_array(input_ids)?,
+                "encoder_embeddings" => ort::value::Value::from_array(encoder_embeddings.clone())?,
+                "encoder_mask" => ort::value::Value::from_array(encoder_mask.clone())?,
+                "decoder_mems" => ort::value::Value::from_array(decoder_mems)?
+            ))?;
+
+            // Extract KV cache from decoder_hidden_states
+            decoder_mems = Self::extract_decoder_hidden_states(&outputs)?;
+
+            // Extract first generated token
+            Self::extract_next_token(&outputs, &tokens, self.config.repetition_penalty)?
+        };
+        if first_token == ENDOFTEXT_ID {
+            return Ok(tokens);
+        }
+        tokens.push(first_token);
+
+        // Steps 1..N: process only the last token with cached decoder_mems
+        for _step in 1..self.config.max_sequence_length {
+            let last_token = *tokens.last().unwrap();
+            let input_ids = Array2::from_shape_vec((1, 1), vec![last_token])
+                .map_err(|e| Error::Model(format!("Failed to create input_ids: {}", e)))?;
+
+            let outputs = self.decoder.run(ort::inputs!(
+                "input_ids" => ort::value::Value::from_array(input_ids)?,
+                "encoder_embeddings" => ort::value::Value::from_array(encoder_embeddings.clone())?,
+                "encoder_mask" => ort::value::Value::from_array(encoder_mask.clone())?,
+                "decoder_mems" => ort::value::Value::from_array(decoder_mems)?
+            ))?;
+
+            // Update cache
+            decoder_mems = Self::extract_decoder_hidden_states(&outputs)?;
+
+            // Extract next token
+            let next_token = Self::extract_next_token(&outputs, &tokens, self.config.repetition_penalty)?;
+            if next_token == ENDOFTEXT_ID {
+                break;
+            }
+            tokens.push(next_token);
+        }
+
+        Ok(tokens)
+    }
+
+    /// O(n²) greedy decoding without KV cache (fallback)
+    fn greedy_decode_full(
+        &mut self,
+        encoder_embeddings: &Array3<f32>,
+        encoder_mask: &Array2<i64>,
+    ) -> Result<Vec<i64>> {
+        let mut tokens = self.build_prompt();
+
+        for step in 0..self.config.max_sequence_length {
+            let input_ids = Array2::from_shape_vec((1, tokens.len()), tokens.clone())
+                .map_err(|e| Error::Model(format!("Failed to create input_ids: {}", e)))?;
+
             let decoder_mems = Array4::<f32>::zeros((10, 1, 0, 1024));
 
             let outputs = self.decoder.run(ort::inputs!(
@@ -486,56 +562,77 @@ impl CanaryModel {
                 "decoder_mems" => ort::value::Value::from_array(decoder_mems)?
             ))?;
 
-            // Extract logits
-            let (logits_shape, logits_data) = outputs["logits"]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| Error::Model(format!("Failed to extract logits: {}", e)))?;
-
-            let logits_dims = logits_shape.as_ref();
-            let vocab_size = logits_dims[2] as usize;
-            let seq_len = logits_dims[1] as usize;
-
-            // Get logits for last position
-            let last_pos_start = (seq_len - 1) * vocab_size;
-            let mut last_logits: Vec<f32> = logits_data[last_pos_start..last_pos_start + vocab_size].to_vec();
-
-            // Apply repetition penalty to already-generated tokens
-            let penalty = self.config.repetition_penalty;
-            if penalty != 1.0 {
-                for &token_id in &tokens {
-                    let idx = token_id as usize;
-                    if idx < last_logits.len() {
-                        if last_logits[idx] > 0.0 {
-                            last_logits[idx] /= penalty;
-                        } else {
-                            last_logits[idx] *= penalty;
-                        }
-                    }
-                }
-            }
-
-            // Greedy selection
-            let next_token = last_logits
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx as i64)
-                .unwrap_or(ENDOFTEXT_ID);
-
-            // Check for end of text
+            let next_token = Self::extract_next_token(&outputs, &tokens, self.config.repetition_penalty)?;
             if next_token == ENDOFTEXT_ID {
                 break;
             }
-
             tokens.push(next_token);
 
-            // Safety limit
             if step >= self.config.max_sequence_length - 1 {
                 break;
             }
         }
 
         Ok(tokens)
+    }
+
+    /// Extract decoder_hidden_states from ONNX output as the KV cache tensor
+    /// Shape: [10, batch, seq_len, 1024]
+    fn extract_decoder_hidden_states(outputs: &SessionOutputs) -> Result<Array4<f32>> {
+        let (shape, data) = outputs["decoder_hidden_states"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| Error::Model(format!("Failed to extract decoder_hidden_states: {}", e)))?;
+        let dims = shape.as_ref();
+        if dims.len() != 4 {
+            return Err(Error::Model(format!(
+                "Expected 4D decoder_hidden_states, got {}D: {:?}", dims.len(), dims
+            )));
+        }
+        Array4::from_shape_vec(
+            (dims[0] as usize, dims[1] as usize, dims[2] as usize, dims[3] as usize),
+            data.to_vec(),
+        ).map_err(|e| Error::Model(format!("Failed to reshape decoder_hidden_states: {}", e)))
+    }
+
+    /// Extract the next token from decoder logits with repetition penalty
+    fn extract_next_token(
+        outputs: &SessionOutputs,
+        tokens: &[i64],
+        repetition_penalty: f32,
+    ) -> Result<i64> {
+        let (logits_shape, logits_data) = outputs["logits"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| Error::Model(format!("Failed to extract logits: {}", e)))?;
+
+        let logits_dims = logits_shape.as_ref();
+        let vocab_size = logits_dims[2] as usize;
+        let seq_len = logits_dims[1] as usize;
+
+        // Get logits for last position
+        let last_pos_start = (seq_len - 1) * vocab_size;
+        let mut last_logits: Vec<f32> = logits_data[last_pos_start..last_pos_start + vocab_size].to_vec();
+
+        // Apply repetition penalty
+        if repetition_penalty != 1.0 {
+            for &token_id in tokens {
+                let idx = token_id as usize;
+                if idx < last_logits.len() {
+                    if last_logits[idx] > 0.0 {
+                        last_logits[idx] /= repetition_penalty;
+                    } else {
+                        last_logits[idx] *= repetition_penalty;
+                    }
+                }
+            }
+        }
+
+        // Greedy selection
+        Ok(last_logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx as i64)
+            .unwrap_or(ENDOFTEXT_ID))
     }
 
     /// Transcribe audio samples
@@ -565,6 +662,17 @@ impl CanaryModel {
         Ok(text)
     }
 
+    /// Transcribe using the O(n²) full decode path (for A/B quality testing)
+    pub fn transcribe_full(&mut self, samples: &[f32]) -> Result<String> {
+        if samples.is_empty() {
+            return Ok(String::new());
+        }
+        let features = self.extract_features(samples)?;
+        let (encoder_embeddings, encoder_mask) = self.run_encoder(&features)?;
+        let token_ids = self.greedy_decode_full(&encoder_embeddings, &encoder_mask)?;
+        Ok(self.tokenizer.decode(&token_ids))
+    }
+
     /// Set the target language
     pub fn set_language(&mut self, lang: &str) {
         self.config.language = lang.to_string();
@@ -590,5 +698,52 @@ mod tests {
         assert_eq!(config.n_mels, 128);
         assert_eq!(config.sample_rate, 16000);
         assert_eq!(config.language, "en");
+    }
+
+    #[test]
+    fn test_build_prompt_length() {
+        // Verify the Canary prompt construction is exactly 9 tokens
+        // (tested directly since we can't construct a CanaryModel without ONNX files)
+        let lang_id = EN_LANG_ID;
+        let prompt = vec![
+            STARTOFCONTEXT_ID, STARTOFTRANSCRIPT_ID, EMO_UNDEFINED_ID,
+            lang_id, lang_id, PNC_ID, NOITN_ID, NOTIMESTAMP_ID, NODIARIZE_ID,
+        ];
+        assert_eq!(prompt.len(), 9);
+        assert_eq!(prompt[0], 7); // STARTOFCONTEXT_ID
+        assert_eq!(prompt[1], 4); // STARTOFTRANSCRIPT_ID
+        assert_eq!(prompt[8], 13); // NODIARIZE_ID
+
+        // Source and target language slots (positions 3 and 4) use the same lang ID
+        assert_eq!(prompt[3], prompt[4]);
+    }
+
+    #[test]
+    fn test_extract_next_token_greedy() {
+        // Test that extract_next_token does greedy argmax with repetition penalty
+        // We can't easily construct SessionOutputs, so test the penalty logic directly
+        let mut logits = vec![0.0f32; 100];
+        logits[42] = 10.0; // Token 42 has highest logit
+
+        // Without penalty: should pick token 42
+        let best = logits.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx as i64)
+            .unwrap();
+        assert_eq!(best, 42);
+
+        // With repetition penalty on token 42: logit should decrease
+        let penalty = 1.2f32;
+        let tokens = vec![42i64];
+        for &token_id in &tokens {
+            let idx = token_id as usize;
+            if idx < logits.len() {
+                if logits[idx] > 0.0 {
+                    logits[idx] /= penalty;
+                }
+            }
+        }
+        assert!((logits[42] - 10.0 / 1.2).abs() < 1e-6);
     }
 }

@@ -827,8 +827,8 @@ async function connect(sessionId) {
 
   webrtcClient.on('connectionFailed', () => {
     state.connected = false;
-    updateConnectionStatus('disconnected');
-    elements.bufferInfo.textContent = 'Connection failed';
+    updateConnectionStatus('reconnecting');
+    elements.bufferInfo.textContent = 'ICE failed, reconnecting...';
     subtitleRenderer.clearCurrent();
   });
 

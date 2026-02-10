@@ -57,6 +57,138 @@ function isHallucinated(text, threshold = 3) {
 }
 
 /**
+ * Teletext maximum characters per send (42 chars/line × 2 lines)
+ */
+const MAX_TELETEXT_CHARS = 84;
+
+/**
+ * Containment coefficient threshold: max(|A∩B|/|A|, |A∩B|/|B|).
+ * More robust than Jaccard for sliding-window refinements.
+ */
+const CONTAINMENT_THRESHOLD = 0.75;
+
+/**
+ * Minimum shared words required for containment-based dedup
+ */
+const MIN_SHARED_WORDS = 3;
+
+/**
+ * How many recently confirmed texts to keep for deduplication
+ */
+const CONFIRMED_HISTORY_SIZE = 15;
+
+/**
+ * Check if a dot at the given index is inside a number (e.g. "3.5")
+ * @param {string} text
+ * @param {number} dotIndex
+ * @returns {boolean}
+ */
+function isDotInNumber(text, dotIndex) {
+  const before = dotIndex > 0 ? text[dotIndex - 1] : '';
+  const after = dotIndex < text.length - 1 ? text[dotIndex + 1] : '';
+  return /\d/.test(before) && /\d/.test(after);
+}
+
+/**
+ * Split text into Teletext-compatible chunks (each ≤ maxChars characters).
+ * Prefers splitting at sentence boundaries (. ! ?), then clause separators
+ * (, ; : – —), then word boundaries (spaces).
+ * @param {string} text - Text to split
+ * @param {number} maxChars - Maximum characters per chunk (default: 84)
+ * @returns {string[]} Array of text chunks
+ */
+function splitForTeletext(text, maxChars = MAX_TELETEXT_CHARS) {
+  text = text.trim();
+  if (!text) return [];
+  if (text.length <= maxChars) return [text];
+
+  const result = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxChars) {
+      const trimmed = remaining.trim();
+      if (trimmed) result.push(trimmed);
+      break;
+    }
+
+    const searchRegion = remaining.slice(0, maxChars);
+
+    // Find last occurrence of each split-point type
+    let bestSentence = -1;
+    let bestClause = -1;
+    let bestWord = -1;
+
+    for (let i = 0; i < searchRegion.length; i++) {
+      const ch = searchRegion[i];
+      if (ch === '.' && !isDotInNumber(remaining, i)) {
+        bestSentence = i + 1;
+      } else if (ch === '!' || ch === '?') {
+        bestSentence = i + 1;
+      } else if (ch === ',' || ch === ';' || ch === ':' || ch === '–' || ch === '—') {
+        bestClause = i + 1;
+      } else if (ch === ' ') {
+        bestWord = i;
+      }
+    }
+
+    let splitPos;
+    if (bestSentence > 0) {
+      splitPos = bestSentence;
+    } else if (bestClause > 0) {
+      splitPos = bestClause;
+    } else if (bestWord > 0) {
+      splitPos = bestWord;
+    } else {
+      splitPos = maxChars;
+    }
+
+    const piece = remaining.slice(0, splitPos).trim();
+    if (piece) result.push(piece);
+    remaining = remaining.slice(splitPos).trimStart();
+  }
+
+  return result;
+}
+
+/**
+ * Check if candidate text is a near-duplicate of any text in history.
+ * Uses containment coefficient (max directional word overlap) instead of
+ * Jaccard — more robust for sliding-window refinements where Jaccard is
+ * diluted by extra words in the union.
+ * @param {string} candidate - Text to check
+ * @param {string[]} history - Recently confirmed texts
+ * @returns {boolean} True if duplicate
+ */
+function isDuplicateOfHistory(candidate, history) {
+  if (!candidate || !candidate.trim()) return true;
+  const candidateWords = new Set(candidate.toLowerCase().split(/\s+/).filter(Boolean));
+  if (candidateWords.size === 0) return true;
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const prev = history[i];
+    // Exact match
+    if (candidate === prev) return true;
+    // Candidate is a subset of something already confirmed
+    if (prev.includes(candidate)) return true;
+    // Containment coefficient: max(|A∩B|/|A|, |A∩B|/|B|)
+    const prevWords = new Set(prev.toLowerCase().split(/\s+/).filter(Boolean));
+    if (prevWords.size === 0) continue;
+    let intersection = 0;
+    for (const w of candidateWords) {
+      if (prevWords.has(w)) intersection++;
+    }
+    if (intersection >= MIN_SHARED_WORDS) {
+      const minSize = Math.min(candidateWords.size, prevWords.size);
+      if (minSize > 0 && intersection / minSize >= CONTAINMENT_THRESHOLD) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Subtitle segment
  * @typedef {Object} Segment
  * @property {string} text - Segment text
@@ -109,6 +241,10 @@ export class SubtitleRenderer {
     // Queue for segments that arrived ahead of playback time
     /** @type {Segment[]} */
     this.pendingSegments = [];
+
+    // Confirmed text history for deduplication (Teletext-style)
+    /** @type {string[]} */
+    this.confirmedHistory = [];
 
     // Sync mode: if true, hold FINAL segments that are too far ahead of playback
     // DISABLED: The sync logic causes issues when WebRTC reconnects and audio time resets
@@ -214,16 +350,40 @@ export class SubtitleRenderer {
    */
   _processSegment(segment) {
     if (segment.isFinal) {
-      // Add to finalized segments
-      this.segments.push(segment);
+      // Use growing text (current sentence from merger) for display — it's
+      // shorter and more appropriate for Teletext/subtitle display.
+      // Fall back to segment text if growing text is unavailable.
+      const displaySource = segment.growingText || segment.text;
 
-      // Trim if over max
-      while (this.segments.length > this.options.maxSegments) {
-        this.segments.shift();
+      // Split for Teletext (≤84 chars per line) and deduplicate
+      const lines = splitForTeletext(displaySource, MAX_TELETEXT_CHARS);
+      const confirmedLines = lines.filter(
+        line => line && !isDuplicateOfHistory(line, this.confirmedHistory)
+      );
+
+      // Add confirmed lines to transcript
+      for (const line of confirmedLines) {
+        const confirmedSegment = {
+          ...segment,
+          text: line,
+          growingText: line,
+        };
+
+        this.segments.push(confirmedSegment);
+
+        // Trim if over max
+        while (this.segments.length > this.options.maxSegments) {
+          this.segments.shift();
+        }
+
+        this.appendToTranscript(confirmedSegment);
+
+        // Add to confirmed history for future dedup
+        this.confirmedHistory.push(line);
+        while (this.confirmedHistory.length > CONFIRMED_HISTORY_SIZE) {
+          this.confirmedHistory.shift();
+        }
       }
-
-      // Add to transcript
-      this.appendToTranscript(segment);
 
       // Clear current if it matches
       if (this.currentSegment &&
@@ -566,6 +726,7 @@ export class SubtitleRenderer {
     this.currentSegment = null;
     this.currentTime = 0;
     this.pendingSegments = [];
+    this.confirmedHistory = [];
     this.isStale = false;  // Reset stale state
 
     // Clear stale timer
