@@ -1,122 +1,167 @@
 # parakeet-rs
+
 [![Rust](https://github.com/altunenes/parakeet-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/altunenes/parakeet-rs/actions/workflows/rust.yml)
 [![crates.io](https://img.shields.io/crates/v/parakeet-rs.svg)](https://crates.io/crates/parakeet-rs)
+[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-Fast speech recognition with NVIDIA's Parakeet models via ONNX Runtime.
-Note: CoreML doesn't stable with this model - stick w/ CPU (or other GPU EP like CUDA). But its incredible fast in my Mac M3 16gb' CPU compared to Whisper metal! :-)
+Real-time speech recognition server and Rust library built on NVIDIA's Parakeet ASR models via ONNX Runtime. Provides a multi-session WebRTC transcription server with live subtitles, speaker diarization, FAB teletext forwarding, and 13 transcription modes optimized for different latency/accuracy trade-offs.
 
-## Models
+## Features
 
-**CTC (English-only)**: Fast & accurate
-```rust
-use parakeet_rs::Parakeet;
+| Category | Features |
+|----------|----------|
+| **ASR Models** | Parakeet TDT 0.6B (English), Canary 1B with KV cache (multilingual: en/de/fr/es), Canary 180M Flash |
+| **Streaming** | 13 transcription modes from extreme-low-latency (~1.3s) to batch VoD processing |
+| **Diarization** | Sortformer v2 streaming speaker diarization (up to 4 speakers) |
+| **Server** | Axum HTTP/WS server, multi-session, REST API, WebSocket subtitles |
+| **Audio Input** | Media file playback, SRT live streams (14 channels), file upload (up to 2GB) |
+| **WebRTC** | Browser audio playback via WebRTC with TURN/STUN NAT traversal |
+| **FAB Teletext** | Live transcription forwarding to FAB endpoints with teletext line splitting (42x2 chars) |
+| **Text Processing** | GrowingTextMerger (anchor-based tail-overwrite), sentence boundary detection, deduplication |
+| **Noise Cancellation** | RNNoise real-time noise suppression |
+| **Frontend** | Web UI with session management, live subtitles, WebRTC audio, transcript export |
+| **Testing** | 199 Rust tests + 34 Playwright E2E tests |
 
-let mut parakeet = Parakeet::from_pretrained(".", None)?;
-let result = parakeet.transcribe_file("audio.wav")?;
-println!("{}", result.text);
+## Tech Stack
 
-// Or transcribe in-memory audio
-// let result = parakeet.transcribe_samples(audio, 16000, 1)?;
+| Layer | Technology |
+|-------|------------|
+| **Runtime** | Rust, Tokio async runtime |
+| **Backend** | Axum (HTTP/WS), WebRTC (webrtc-rs), SRT (FFmpeg) |
+| **Inference** | ONNX Runtime (CPU/CUDA/TensorRT), ndarray |
+| **Models** | Parakeet TDT 0.6B, Canary 1B, Canary 180M Flash, Sortformer v2, Silero VAD |
+| **Audio** | FFmpeg (decode), Opus (encode), RNNoise (denoise), rubato (resample) |
+| **Frontend** | Vanilla JS, WebRTC API, WebSocket API |
+| **Testing** | Rust test framework, Playwright (Bun), German TTS fixtures |
 
-// Token-level timestamps
-for token in result.tokens {
-    println!("[{:.3}s - {:.3}s] {}", token.start, token.end, token.text);
-}
+## Architecture
+
+```mermaid
+graph TD
+    subgraph Inputs
+        MF[Media Files]
+        SRT[SRT Live Streams]
+        UL[File Upload]
+    end
+
+    subgraph Server["Axum Server"]
+        API[REST API]
+        WS[WebSocket Handler]
+        SM[Session Manager]
+        MR[Model Registry]
+        MM[Media Manager]
+    end
+
+    subgraph Processing
+        AP[Audio Pipeline<br/>FFmpeg + Opus + RNNoise]
+        TF[Transcriber Factory<br/>13 modes]
+        GT[GrowingTextMerger<br/>anchor-based merge]
+    end
+
+    subgraph Models
+        TDT[Parakeet TDT 0.6B<br/>English]
+        CAN[Canary 1B + KV Cache<br/>Multilingual]
+        CF[Canary 180M Flash]
+        SF[Sortformer v2<br/>Diarization]
+        VAD[Silero VAD]
+    end
+
+    subgraph Output
+        SUB[WebSocket Subtitles]
+        RTC[WebRTC Audio]
+        FAB[FAB Teletext]
+    end
+
+    MF --> AP
+    SRT --> AP
+    UL --> MM --> AP
+    AP --> TF
+    TF --> TDT & CAN & CF
+    VAD --> TF
+    SF --> TF
+    TF --> GT
+    GT --> SUB
+    GT --> FAB
+    AP --> RTC
+
+    API --> SM
+    WS --> SM
+    SM --> MR
 ```
 
-**TDT (Multilingual)**: 25 languages with auto-detection
+## Quick Start
+
+### Library Usage
+
 ```rust
 use parakeet_rs::ParakeetTDT;
 
 let mut parakeet = ParakeetTDT::from_pretrained("./tdt", None)?;
 let result = parakeet.transcribe_file("audio.wav")?;
 println!("{}", result.text);
-
-// Or transcribe in-memory audio
-// let result = parakeet.transcribe_samples(audio, 16000, 1)?;
-
-// Token-level timestamps
-for token in result.tokens {
-    println!("[{:.3}s - {:.3}s] {}", token.start, token.end, token.text);
-}
 ```
 
-**EOU (Streaming)**: Real-time ASR with end-of-utterance detection
-```rust
-use parakeet_rs::ParakeetEOU;
+### Server Usage
 
-let mut parakeet = ParakeetEOU::from_pretrained("./eou", None)?;
+```bash
+# Build
+ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
+  cargo build --release --features "server,sortformer"
 
-// Prepare your audio (Vec<f32>, 16kHz mono, normalized)
-let audio: Vec<f32> = /* your audio samples */;
+# Configure
+cp .env.example .env  # Edit model paths, port, FAB settings
 
-// Process in 160ms chunks for streaming
-const CHUNK_SIZE: usize = 2560; // 160ms at 16kHz
-for chunk in audio.chunks(CHUNK_SIZE) {
-    let text = parakeet.transcribe(chunk, false)?;
-    print!("{}", text);
-}
+# Run
+./start-server.sh
+# Server starts on http://localhost:80
 ```
 
-**Sortformer v2 (Speaker Diarization)**: Streaming 4-speaker diarization
-```toml
-parakeet-rs = { version = "0.2", features = ["sortformer"] }
-```
-```rust
-use parakeet_rs::sortformer::{Sortformer, DiarizationConfig};
+See [docs/deployment.md](docs/deployment.md) for full configuration reference.
 
-let mut sortformer = Sortformer::with_config(
-    "diar_streaming_sortformer_4spk-v2.onnx",
-    None,
-    DiarizationConfig::callhome(),  // or dihard3(),custom()
-)?;
-let segments = sortformer.diarize(audio, 16000, 1)?;
-for seg in segments {
-    println!("Speaker {} [{:.2}s - {:.2}s]", seg.speaker_id, seg.start, seg.end);
-}
-```
-See `examples/diarization.rs` for combining with TDT transcription.
+## Transcription Models
 
+| Model | Type | Languages | Parameters | Use Case |
+|-------|------|-----------|------------|----------|
+| **Parakeet TDT 0.6B** | FastConformer-TDT | English | 600M | Fast, accurate English ASR with token timestamps |
+| **Canary 1B** | Encoder-Decoder + KV Cache | en, de, fr, es | 1B | Multilingual ASR with O(n) cached decoding |
+| **Canary 180M Flash** | Encoder-Decoder | en, de, fr, es | 180M | Faster multilingual variant, lower accuracy |
+| **Sortformer v2** | Streaming Diarization | Language-agnostic | - | Up to 4-speaker identification |
+| **Silero VAD** | Voice Activity Detection | Language-agnostic | - | Speech/silence boundary detection |
 
-## Setup
+## Transcription Modes
 
-**CTC**: Download from [HuggingFace](https://huggingface.co/onnx-community/parakeet-ctc-0.6b-ONNX/tree/main/onnx): `model.onnx`, `model.onnx_data`, `tokenizer.json`
+| Mode | Latency | Description |
+|------|---------|-------------|
+| `speedy` | ~0.3-1.5s | Best balance of latency and quality with pause detection |
+| `pause_based` | ~0.5-2.0s | Better accuracy with pause detection |
+| `low_latency` | ~3.5s | Fixed latency without pause detection |
+| `ultra_low_latency` | ~2.5s | Faster response for interactive use |
+| `extreme_low_latency` | ~1.3s | Fastest possible, may sacrifice accuracy |
+| `lookahead` | ~1.0-3.0s | Best quality with future context |
+| `vad_speedy` | ~0.3s pause | VAD-triggered, transcribes complete utterances |
+| `vad_pause_based` | ~0.7s pause | VAD-triggered with longer pause detection |
+| `vad_sliding_window` | 5 seg / 10s | Sliding window VAD with context overlap |
+| `asr` | continuous | Pure streaming without VAD |
+| `parallel` | sliding window | Multi-threaded parallel inference (4-8 threads) |
+| `pause_parallel` | pause-triggered | Pause-triggered parallel inference with ordered output |
+| `vod` | batch | Batch processing in 10-min chunks with deduplication |
 
-**TDT**: Download from [HuggingFace](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx): `encoder-model.onnx`, `encoder-model.onnx.data`, `decoder_joint-model.onnx`, `vocab.txt`
+See [docs/transcription-modes.md](docs/transcription-modes.md) for detailed configuration.
 
-**EOU**: Download from [HuggingFace](https://huggingface.co/altunenes/parakeet-rs/tree/main/realtime_eou_120m-v1-onnx): `encoder.onnx`, `decoder_joint.onnx`, `tokenizer.json`
+## Documentation
 
-**Diarization (Sortformer v2)**: Download from [HuggingFace](https://huggingface.co/altunenes/parakeet-rs/blob/main/diar_streaming_sortformer_4spk-v2.onnx): `diar_streaming_sortformer_4spk-v2.onnx`
-
-Quantized versions available (int8). All files must be in the same directory.
-
-GPU support (auto-falls back to CPU if fails):
-```toml
-parakeet-rs = { version = "0.1", features = ["cuda"] }  # or tensorrt, webgpu, directml, rocm
-```
-
-```rust
-use parakeet_rs::{Parakeet, ExecutionConfig, ExecutionProvider};
-
-let config = ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda);
-let mut parakeet = Parakeet::from_pretrained(".", Some(config))?;
-```
-
-
-## Features
-
-- [CTC: English with punctuation & capitalization](https://huggingface.co/nvidia/parakeet-ctc-0.6b)
-- [TDT: Multilingual (auto lang detection) ](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
-- [EOU: Streaming ASR with end-of-utterance detection](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1)
-- [Sortformer v2: Streaming speaker diarization (up to 4 speakers)](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2)
-- Token-level timestamps (CTC, TDT)
-
-## Notes
-
-- Audio: 16kHz mono WAV (16-bit PCM or 32-bit float)
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/architecture.md) | System design, audio pipeline, session lifecycle, module structure |
+| [API Reference](docs/api.md) | REST endpoints, WebSocket protocol, response format |
+| [Transcription Modes](docs/transcription-modes.md) | All 13 modes with configuration parameters and selection guide |
+| [Frontend](docs/frontend.md) | Web UI, JavaScript modules, subtitle processing pipeline |
+| [FAB Teletext](docs/fab-teletext.md) | FAB forwarding system, teletext splitting, deduplication |
+| [Testing](docs/testing.md) | 199 Rust tests + 34 E2E tests, fixtures, running tests |
+| [Deployment](docs/deployment.md) | Environment variables, CLI arguments, model setup, SRT channels |
 
 ## License
 
 Code: MIT OR Apache-2.0
 
-FYI: The Parakeet ONNX models (downloaded separately from HuggingFace) are licensed under **CC-BY-4.0** by NVIDIA. This library does not distribute the models.
+The Parakeet ONNX models (downloaded separately from HuggingFace) are licensed under **CC-BY-4.0** by NVIDIA. This library does not distribute the models.
