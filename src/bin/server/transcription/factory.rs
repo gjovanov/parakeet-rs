@@ -1,6 +1,6 @@
 //! Transcriber factory - creates the appropriate StreamingTranscriber based on mode and model
 
-use crate::api::sessions::{ParallelConfig, PauseConfig};
+use crate::api::sessions::{GrowingSegmentsConfig, ParallelConfig, PauseConfig};
 use parakeet_rs::streaming_transcriber::StreamingTranscriber;
 use std::path::PathBuf;
 
@@ -22,6 +22,7 @@ pub struct TranscriberParams {
     pub language: String,
     pub parallel_config: Option<ParallelConfig>,
     pub pause_config: Option<PauseConfig>,
+    pub growing_segments_config: Option<GrowingSegmentsConfig>,
 }
 
 /// Create the appropriate transcriber based on model type and mode.
@@ -42,6 +43,7 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
         language,
         parallel_config,
         pause_config,
+        growing_segments_config,
     } = params;
 
     let is_parallel_mode = mode == "parallel";
@@ -65,7 +67,7 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
     } else if is_canary_qwen {
         create_canary_qwen(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
-            &mode, &language,
+            &mode, &language, growing_segments_config.as_ref(),
         )
     } else if is_pause_parallel_mode {
         create_pause_parallel(
@@ -90,12 +92,12 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
     } else if is_canary {
         create_canary(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
-            &mode, &language,
+            &mode, &language, growing_segments_config.as_ref(),
         )
     } else {
         create_tdt(
             &session_id, &model_path, diar_path, exec_config,
-            &mode, pause_config.as_ref(),
+            &mode, pause_config.as_ref(), growing_segments_config.as_ref(),
         )
     }
 }
@@ -443,10 +445,21 @@ fn create_canary(
     exec_config: parakeet_rs::ExecutionConfig,
     mode: &str,
     language: &str,
+    gs_config: Option<&GrowingSegmentsConfig>,
 ) -> Option<Box<dyn StreamingTranscriber>> {
     use parakeet_rs::realtime_canary::RealtimeCanary;
 
-    let canary_config = create_canary_config(mode, language.to_string());
+    let mut canary_config = create_canary_config(mode, language.to_string());
+
+    // Apply growing segments overrides
+    if mode == "growing_segments" {
+        if let Some(gs) = gs_config {
+            if let Some(v) = gs.buffer_size_secs { canary_config.buffer_size_secs = v; }
+            if let Some(v) = gs.process_interval_secs { canary_config.process_interval_secs = v; }
+            if let Some(v) = gs.pause_threshold_ms { canary_config.pause_threshold_secs = v as f32 / 1000.0; }
+            if let Some(v) = gs.silence_energy_threshold { canary_config.silence_energy_threshold = v; }
+        }
+    }
 
     eprintln!(
         "[Session {}] Creating Canary transcriber from {:?} (language: {}, mode: {}, diar: {:?})",
@@ -481,6 +494,7 @@ fn create_tdt(
     exec_config: parakeet_rs::ExecutionConfig,
     mode: &str,
     pause_config: Option<&PauseConfig>,
+    gs_config: Option<&GrowingSegmentsConfig>,
 ) -> Option<Box<dyn StreamingTranscriber>> {
     #[cfg(feature = "sortformer")]
     {
@@ -494,7 +508,17 @@ fn create_tdt(
             }
         };
 
-        let config = create_transcription_config(mode, pause_config);
+        let mut config = create_transcription_config(mode, pause_config);
+
+        // Apply growing segments overrides (TDT uses buffer_size_secs, not buffer_duration_secs)
+        if mode == "growing_segments" {
+            if let Some(gs) = gs_config {
+                if let Some(v) = gs.buffer_size_secs { config.buffer_size_secs = v; }
+                if let Some(v) = gs.process_interval_secs { config.process_interval_secs = v; }
+                if let Some(v) = gs.pause_threshold_ms { config.pause_threshold_secs = v as f32 / 1000.0; }
+                if let Some(v) = gs.silence_energy_threshold { config.silence_energy_threshold = v; }
+            }
+        }
 
         eprintln!(
             "[Session {}] Creating TDT transcriber from {:?} (pause: {}ms)",
@@ -542,10 +566,21 @@ fn create_canary_qwen(
     exec_config: parakeet_rs::ExecutionConfig,
     mode: &str,
     language: &str,
+    gs_config: Option<&GrowingSegmentsConfig>,
 ) -> Option<Box<dyn StreamingTranscriber>> {
     use parakeet_rs::realtime_canary_qwen::RealtimeCanaryQwen;
 
-    let qwen_config = create_canary_qwen_config(mode, language.to_string());
+    let mut qwen_config = create_canary_qwen_config(mode, language.to_string());
+
+    // Apply growing segments overrides
+    if mode == "growing_segments" {
+        if let Some(gs) = gs_config {
+            if let Some(v) = gs.buffer_size_secs { qwen_config.buffer_size_secs = v; }
+            if let Some(v) = gs.process_interval_secs { qwen_config.process_interval_secs = v; }
+            if let Some(v) = gs.pause_threshold_ms { qwen_config.pause_threshold_secs = v as f32 / 1000.0; }
+            if let Some(v) = gs.silence_energy_threshold { qwen_config.silence_energy_threshold = v; }
+        }
+    }
 
     eprintln!(
         "[Session {}] Creating CanaryQwen transcriber from {:?} (language: {}, mode: {}, diar: {:?})",

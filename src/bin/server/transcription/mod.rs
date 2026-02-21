@@ -6,7 +6,7 @@ mod emitters;
 mod factory;
 mod vod;
 
-use crate::api::sessions::{ParallelConfig, PauseConfig};
+use crate::api::sessions::{GrowingSegmentsConfig, ParallelConfig, PauseConfig};
 use parakeet_rs::growing_text::GrowingTextMerger;
 use parakeet_rs::{SessionState, TranscriptionSession};
 use std::path::PathBuf;
@@ -50,6 +50,7 @@ pub fn run_session_transcription(
     ffmpeg_pid: Arc<AtomicU32>,
     parallel_config: Option<ParallelConfig>,
     pause_config: Option<PauseConfig>,
+    growing_segments_config: Option<GrowingSegmentsConfig>,
     sentence_completion: String,
 ) {
     use std::sync::mpsc as std_mpsc;
@@ -132,6 +133,7 @@ pub fn run_session_transcription(
                 transcription_running,
                 parallel_config,
                 pause_config,
+                growing_segments_config,
                 sentence_completion_clone,
             );
         }));
@@ -229,6 +231,7 @@ fn run_transcription_inner(
     transcription_running: Arc<AtomicBool>,
     parallel_config: Option<ParallelConfig>,
     pause_config: Option<PauseConfig>,
+    growing_segments_config: Option<GrowingSegmentsConfig>,
     sentence_completion: String,
 ) {
     use parakeet_rs::sentence_buffer::{SentenceBuffer, SentenceBufferMode};
@@ -255,6 +258,7 @@ fn run_transcription_inner(
             language,
             parallel_config,
             pause_config,
+            growing_segments_config,
         },
     ) {
         Some(t) => t,

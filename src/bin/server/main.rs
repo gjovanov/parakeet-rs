@@ -379,6 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_audio: RwLock::new(HashMap::new()),
         parallel_configs: RwLock::new(HashMap::new()),
         pause_configs: RwLock::new(HashMap::new()),
+        growing_segments_configs: RwLock::new(HashMap::new()),
         srt_config,
         fab_enabled,
         fab_send_type,

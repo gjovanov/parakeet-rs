@@ -89,6 +89,19 @@ impl Default for PauseConfig {
     }
 }
 
+/// Configuration for growing segments mode parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrowingSegmentsConfig {
+    #[serde(default)]
+    pub buffer_size_secs: Option<f32>,
+    #[serde(default)]
+    pub process_interval_secs: Option<f32>,
+    #[serde(default)]
+    pub pause_threshold_ms: Option<u32>,
+    #[serde(default)]
+    pub silence_energy_threshold: Option<f32>,
+}
+
 /// Request to create a new session
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
@@ -116,6 +129,9 @@ pub struct CreateSessionRequest {
     /// Pause detection configuration (only used for pause-related modes)
     #[serde(default)]
     pub pause_config: Option<PauseConfig>,
+    /// Growing segments configuration (only used for growing_segments mode)
+    #[serde(default)]
+    pub growing_segments_config: Option<GrowingSegmentsConfig>,
     /// Sentence completion mode ("off", "minimal", "balanced", "complete")
     #[serde(default = "default_sentence_completion")]
     pub sentence_completion: String,
@@ -308,6 +324,12 @@ pub async fn create_session(
                 configs.insert(session.id.clone(), pause_config);
             }
 
+            // Store growing segments config if provided
+            if let Some(gs_config) = req.growing_segments_config {
+                let mut configs = state.growing_segments_configs.write().await;
+                configs.insert(session.id.clone(), gs_config);
+            }
+
             // Store FAB config
             {
                 let fab_config = FabConfig {
@@ -381,6 +403,12 @@ pub async fn stop_session(
     // Clean up pause config
     {
         let mut configs = state.pause_configs.write().await;
+        configs.remove(&id);
+    }
+
+    // Clean up growing segments config
+    {
+        let mut configs = state.growing_segments_configs.write().await;
         configs.remove(&id);
     }
 
@@ -528,6 +556,12 @@ pub async fn start_session(
         configs.get(&id).cloned()
     };
 
+    // Get growing segments config if any
+    let growing_segments_config = {
+        let configs = state.growing_segments_configs.read().await;
+        configs.get(&id).cloned()
+    };
+
     // Start transcription thread
     session.start();
     session.set_state(SessionState::Running).await;
@@ -584,6 +618,7 @@ pub async fn start_session(
             ffmpeg_pid,
             parallel_config,
             pause_config,
+            growing_segments_config,
             sentence_completion,
         );
     });

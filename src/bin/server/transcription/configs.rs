@@ -509,4 +509,144 @@ mod tests {
         assert_eq!(config.buffer_size_secs, 10.0);
         assert!(config.pause_based_confirm);
     }
+
+    // ========================================================================
+    // Growing segments config override tests
+    // ========================================================================
+
+    use crate::api::sessions::GrowingSegmentsConfig;
+
+    /// Helper: apply growing segments overrides to a canary config (mirrors factory logic)
+    fn apply_gs_canary(mode: &str, gs: Option<&GrowingSegmentsConfig>) -> parakeet_rs::realtime_canary::RealtimeCanaryConfig {
+        let mut c = create_canary_config(mode, "de".to_string());
+        if mode == "growing_segments" {
+            if let Some(gs) = gs {
+                if let Some(v) = gs.buffer_size_secs { c.buffer_size_secs = v; }
+                if let Some(v) = gs.process_interval_secs { c.process_interval_secs = v; }
+                if let Some(v) = gs.pause_threshold_ms { c.pause_threshold_secs = v as f32 / 1000.0; }
+                if let Some(v) = gs.silence_energy_threshold { c.silence_energy_threshold = v; }
+            }
+        }
+        c
+    }
+
+    /// Helper: apply growing segments overrides to a TDT config (mirrors factory logic)
+    fn apply_gs_tdt(mode: &str, gs: Option<&GrowingSegmentsConfig>) -> parakeet_rs::RealtimeTDTConfig {
+        let mut c = create_transcription_config(mode, None);
+        if mode == "growing_segments" {
+            if let Some(gs) = gs {
+                if let Some(v) = gs.buffer_size_secs { c.buffer_size_secs = v; }
+                if let Some(v) = gs.process_interval_secs { c.process_interval_secs = v; }
+                if let Some(v) = gs.pause_threshold_ms { c.pause_threshold_secs = v as f32 / 1000.0; }
+                if let Some(v) = gs.silence_energy_threshold { c.silence_energy_threshold = v; }
+            }
+        }
+        c
+    }
+
+    /// Helper: apply growing segments overrides to a canary-qwen config (mirrors factory logic)
+    fn apply_gs_qwen(mode: &str, gs: Option<&GrowingSegmentsConfig>) -> parakeet_rs::realtime_canary_qwen::RealtimeCanaryQwenConfig {
+        let mut c = create_canary_qwen_config(mode, "en".to_string());
+        if mode == "growing_segments" {
+            if let Some(gs) = gs {
+                if let Some(v) = gs.buffer_size_secs { c.buffer_size_secs = v; }
+                if let Some(v) = gs.process_interval_secs { c.process_interval_secs = v; }
+                if let Some(v) = gs.pause_threshold_ms { c.pause_threshold_secs = v as f32 / 1000.0; }
+                if let Some(v) = gs.silence_energy_threshold { c.silence_energy_threshold = v; }
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn test_gs_canary_partial_override() {
+        let gs = GrowingSegmentsConfig {
+            buffer_size_secs: Some(12.0),
+            process_interval_secs: None,
+            pause_threshold_ms: Some(600),
+            silence_energy_threshold: None,
+        };
+        let config = apply_gs_canary("growing_segments", Some(&gs));
+        assert_eq!(config.buffer_size_secs, 12.0);
+        assert_eq!(config.process_interval_secs, 0.5); // unchanged default
+        assert_eq!(config.pause_threshold_secs, 0.6);
+        assert_eq!(config.silence_energy_threshold, 0.008); // unchanged default
+    }
+
+    #[test]
+    fn test_gs_canary_full_override() {
+        let gs = GrowingSegmentsConfig {
+            buffer_size_secs: Some(10.0),
+            process_interval_secs: Some(1.0),
+            pause_threshold_ms: Some(400),
+            silence_energy_threshold: Some(0.012),
+        };
+        let config = apply_gs_canary("growing_segments", Some(&gs));
+        assert_eq!(config.buffer_size_secs, 10.0);
+        assert_eq!(config.process_interval_secs, 1.0);
+        assert_eq!(config.pause_threshold_secs, 0.4);
+        assert_eq!(config.silence_energy_threshold, 0.012);
+    }
+
+    #[test]
+    fn test_gs_canary_non_growing_mode_ignores_config() {
+        let gs = GrowingSegmentsConfig {
+            buffer_size_secs: Some(99.0),
+            process_interval_secs: Some(99.0),
+            pause_threshold_ms: Some(9999),
+            silence_energy_threshold: Some(0.999),
+        };
+        let config = apply_gs_canary("speedy", Some(&gs));
+        assert_eq!(config.buffer_size_secs, 8.0); // speedy default, not 99
+        assert_eq!(config.process_interval_secs, 0.5);
+    }
+
+    #[test]
+    fn test_gs_tdt_partial_override() {
+        let gs = GrowingSegmentsConfig {
+            buffer_size_secs: Some(15.0),
+            process_interval_secs: None,
+            pause_threshold_ms: Some(700),
+            silence_energy_threshold: None,
+        };
+        let config = apply_gs_tdt("growing_segments", Some(&gs));
+        assert_eq!(config.buffer_size_secs, 15.0);
+        assert_eq!(config.process_interval_secs, 0.15); // unchanged default
+        assert_eq!(config.pause_threshold_secs, 0.7);
+    }
+
+    #[test]
+    fn test_gs_tdt_non_growing_mode_ignores_config() {
+        let gs = GrowingSegmentsConfig {
+            buffer_size_secs: Some(99.0),
+            process_interval_secs: None,
+            pause_threshold_ms: None,
+            silence_energy_threshold: None,
+        };
+        let config = apply_gs_tdt("speedy", Some(&gs));
+        assert_eq!(config.buffer_size_secs, 8.0); // speedy default
+    }
+
+    #[test]
+    fn test_gs_qwen_partial_override() {
+        let gs = GrowingSegmentsConfig {
+            buffer_size_secs: Some(8.0),
+            process_interval_secs: Some(2.0),
+            pause_threshold_ms: None,
+            silence_energy_threshold: Some(0.005),
+        };
+        let config = apply_gs_qwen("growing_segments", Some(&gs));
+        assert_eq!(config.buffer_size_secs, 8.0);
+        assert_eq!(config.process_interval_secs, 2.0);
+        assert_eq!(config.pause_threshold_secs, 0.6); // unchanged default
+        assert_eq!(config.silence_energy_threshold, 0.005);
+    }
+
+    #[test]
+    fn test_gs_none_config_uses_defaults() {
+        let config = apply_gs_canary("growing_segments", None);
+        assert_eq!(config.buffer_size_secs, 8.0);
+        assert_eq!(config.process_interval_secs, 0.5);
+        assert_eq!(config.pause_threshold_secs, 0.5);
+    }
 }
