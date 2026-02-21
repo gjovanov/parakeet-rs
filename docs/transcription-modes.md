@@ -20,6 +20,7 @@
 | `asr` | continuous | no | no | no | Raw streaming, custom post-processing |
 | `parallel` | sliding window | no | yes | no | High throughput, GPU-heavy |
 | `pause_parallel` | pause-triggered | yes | yes | no | Ordered output with parallelism |
+| `growing_segments` | ~0.3-1.5s | yes | no | no | Incrementally growing transcript, best for live display |
 | `vod` | batch | n/a | no | no | Pre-recorded files, offline processing |
 
 ## Mode Selection Guide
@@ -36,6 +37,7 @@ flowchart TD
     QUALITY -- accuracy --> LOOK{Have clean<br/>speech pauses?}
     QUALITY -- speed --> SPEEDY["speedy<br/>(~0.3-1.5s)"]
     QUALITY -- balanced --> ULL["ultra_low_latency<br/>(~2.5s)"]
+    QUALITY -- "live display" --> GS["growing_segments<br/>(incrementally growing)"]
 
     LOOK -- yes --> LA["lookahead<br/>(~1.0-3.0s)"]
     LOOK -- no --> PB["pause_based<br/>(~0.5-2.0s)"]
@@ -118,6 +120,52 @@ Best quality by using future context. The transcriber waits for additional audio
 | Process interval | 2.0s | 0.3s |
 | Pause detection | yes (0.6s) | yes (0.5s) |
 | Lookahead mode | — | yes (2 segments) |
+
+### `growing_segments`
+
+Incrementally growing transcript optimized for live display. Uses a `GrowingTextMerger` with anchor-based tail-overwrite to build a continuously growing sentence that is finalized at sentence boundaries. Includes multi-pronged deduplication (bag-of-words, content-word, contiguous sequence) to prevent repeated text.
+
+```mermaid
+flowchart LR
+    A["Audio Buffer<br/>(sliding window)"] --> INF["Inference<br/>(full buffer)"]
+    INF --> MERGE["GrowingTextMerger<br/>(anchor + tail-overwrite)"]
+    MERGE --> DEDUP["3-Pronged Dedup<br/>(BoW + content-word + seq)"]
+    DEDUP --> FINAL["Finalized Sentences"]
+    MERGE --> PARTIAL["Growing Partial<br/>(live display)"]
+```
+
+| Parameter | Canary 1B | Canary-Qwen 2B | TDT |
+|-----------|-----------|----------------|-----|
+| Buffer size | 8s | 12s | 10s |
+| Process interval | 0.5s | 1.5s | 0.15s |
+| Min audio | 1.0s | 1.5s | — |
+| Pause detection | yes (0.5s) | yes (0.6s) | yes (0.5s) |
+| Confirm threshold | — | — | 0.3s |
+
+For Canary models, this mode activates word-level confirmation (`emit_full_text: false`) with a `confirmed_accumulator` that tracks confirmed words across inference passes. Echo deduplication (bidirectional 50% bag-of-words + substring match) filters repeated FINALs.
+
+**Frontend configuration**: All four parameters are tunable via the Growing Segments config panel:
+
+| Slider | Range | Default | Backend field |
+|--------|-------|---------|---------------|
+| Buffer Size | 4-15s | 8s | `buffer_size_secs` |
+| Process Interval | 0.2-3.0s | 0.5s | `process_interval_secs` |
+| Pause Threshold | 200-800ms | 500ms | `pause_threshold_secs` (converted) |
+| Silence Sensitivity | 1-5 | 3 (Medium) | `silence_energy_threshold` (mapped) |
+
+Configure via `growing_segments_config`:
+```json
+{
+  "growing_segments_config": {
+    "buffer_size_secs": 8.0,
+    "process_interval_secs": 0.5,
+    "pause_threshold_ms": 500,
+    "silence_energy_threshold": 0.008
+  }
+}
+```
+
+All fields are optional — omitted fields use the model-specific defaults shown in the table above.
 
 ## VAD-Triggered Modes
 
