@@ -20,3 +20,6 @@ start.sh
 **.wav
 onnxruntime/
 node_modules
+canary-qwen
+canary
+tdt

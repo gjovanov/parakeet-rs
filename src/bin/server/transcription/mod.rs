@@ -289,6 +289,12 @@ fn run_transcription_inner(
         transcription_session.id
     );
 
+    // For canary growing_segments: accumulate confirmed words instead of pushing raw full-buffer text
+    let is_growing_canary = mode == "growing_segments" && is_canary && !is_canary_flash;
+    let mut confirmed_accumulator = String::new();
+    let mut finalized_word_count: usize = 0;
+    let mut recent_finals: Vec<String> = Vec::new(); // Track recent FINALs for dedup
+
     // Process audio samples as they arrive
     let mut chunks_processed = 0u64;
     while transcription_running.load(Ordering::SeqCst) {
@@ -355,35 +361,192 @@ fn run_transcription_inner(
                     segment.text = emitters::normalize_text(&segment.text);
                 }
 
-                for segment in result.segments {
-                    if segment.text.trim().is_empty() {
-                        continue;
-                    }
+                if is_growing_canary {
+                    // Canary growing_segments: accumulate confirmed words, push full growing
+                    // text (confirmed + unstable) to the merger once per inference pass.
+                    // Filter out fragment FINALs (< 4 words) to avoid noisy short emissions.
 
-                    let prev_finalized = growing_merger.get_finalized_sentences().len();
-                    let growing_result = growing_merger.push(&segment.text, segment.is_final);
-                    let new_finalized = growing_merger.get_finalized_sentences().len();
-
-                    // Emit FINAL for each newly finalized sentence
-                    for i in prev_finalized..new_finalized {
-                        let fs = &growing_merger.get_finalized_sentences()[i];
-                        let trimmed = fs.text.trim();
-                        if trimmed.len() <= 2 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
+                    // Phase 1: Accumulate confirmed words, capture unstable tail
+                    let mut unstable_text = String::new();
+                    let mut last_segment: Option<&parakeet_rs::streaming_transcriber::TranscriptionSegment> = None;
+                    for segment in &result.segments {
+                        let text = segment.text.trim();
+                        if text.is_empty() {
                             continue;
                         }
-                        let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
-                            text: fs.text.clone(),
-                            start_time: segment.start_time,
-                            end_time: segment.end_time,
-                            speaker: segment.speaker,
-                            confidence: None,
-                            is_final: true,
-                            inference_time_ms: segment.inference_time_ms,
-                        };
-                        emitters::emit_final_subtitle(&transcription_session, &final_segment, &growing_result);
+                        last_segment = Some(segment);
+                        if segment.is_final {
+                            if !confirmed_accumulator.is_empty() {
+                                confirmed_accumulator.push(' ');
+                            }
+                            confirmed_accumulator.push_str(text);
+                        } else {
+                            unstable_text = text.to_string();
+                        }
                     }
 
-                    emitters::emit_partial_subtitle(&transcription_session, &segment, &growing_result);
+                    // Need at least one non-empty segment to proceed
+                    let Some(ref_segment) = last_segment else {
+                        continue;
+                    };
+
+                    // Phase 2: Build full growing text from non-finalized confirmed + unstable
+                    let acc_words: Vec<&str> = confirmed_accumulator.split_whitespace().collect();
+                    let remaining: String = if finalized_word_count < acc_words.len() {
+                        acc_words[finalized_word_count..].join(" ")
+                    } else {
+                        String::new()
+                    };
+                    let full_text = match (remaining.is_empty(), unstable_text.is_empty()) {
+                        (true, true) => String::new(),
+                        (true, false) => unstable_text,
+                        (false, true) => remaining,
+                        (false, false) => format!("{} {}", remaining, unstable_text),
+                    };
+
+                    if !full_text.is_empty() {
+                        // Phase 3: Push once to growing_merger (as partial — let merger detect sentence boundaries)
+                        let prev_finalized = growing_merger.get_finalized_sentences().len();
+                        let growing_result = growing_merger.push(&full_text, false);
+                        let new_finalized = growing_merger.get_finalized_sentences().len();
+
+                        // Phase 4: Emit FINALs for newly finalized sentences
+                        // - Always advance finalized_word_count
+                        // - Strip trailing echo fragments (< 3 words after sentence boundary)
+                        // - Skip FINALs that overlap with recent emissions
+                        // - Suppress fragment FINALs (< 4 words AND < 15 chars)
+                        for i in prev_finalized..new_finalized {
+                            let fs = &growing_merger.get_finalized_sentences()[i];
+                            let trimmed = fs.text.trim();
+                            if trimmed.len() <= 2 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
+                                finalized_word_count += fs.text.split_whitespace().count();
+                                continue;
+                            }
+                            finalized_word_count += fs.text.split_whitespace().count();
+
+                            // Strip trailing echo fragments: split by sentence boundaries,
+                            // remove trailing parts with < 3 words (echoes from sliding window)
+                            let cleaned = {
+                                let parts: Vec<&str> = trimmed
+                                    .split_inclusive(|c: char| c == '.' || c == '!' || c == '?')
+                                    .collect();
+                                let count_words = |s: &str| -> usize {
+                                    s.trim().split_whitespace()
+                                        .filter(|w| w.len() > 1 || w.chars().any(|c| c.is_alphanumeric()))
+                                        .count()
+                                };
+                                let mut end = parts.len();
+                                while end > 1 && count_words(parts[end - 1]) < 3 {
+                                    end -= 1;
+                                }
+                                parts[..end].join("").trim().to_string()
+                            };
+
+                            // After stripping, re-check minimum length
+                            let clean_words = cleaned.split_whitespace().count();
+                            if clean_words < 4 && cleaned.len() < 15 {
+                                continue;
+                            }
+
+                            // Check overlap with recent FINALs (last 8):
+                            // - Bag-of-words: >50% overlap in either direction
+                            // - Substring: short FINALs that are substrings of recent ones (or vice versa)
+                            // - Exact duplicate: identical text
+                            let cleaned_lower = cleaned.to_lowercase();
+                            let curr_word_set: std::collections::HashSet<String> = cleaned_lower
+                                .split_whitespace()
+                                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+                                .filter(|w| !w.is_empty())
+                                .collect();
+                            let is_echo = recent_finals.iter().rev().take(8).any(|prev| {
+                                let prev_lower = prev.to_lowercase();
+                                // Exact duplicate
+                                if cleaned_lower == prev_lower { return true; }
+                                // Substring check for short FINALs
+                                if curr_word_set.len() < 4 && prev_lower.contains(&cleaned_lower) { return true; }
+                                if curr_word_set.len() < 4 && cleaned_lower.contains(&prev_lower) { return true; }
+                                // Bag-of-words overlap
+                                if curr_word_set.len() >= 3 {
+                                    let prev_words: std::collections::HashSet<String> = prev_lower
+                                        .split_whitespace()
+                                        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+                                        .filter(|w| !w.is_empty())
+                                        .collect();
+                                    if prev_words.is_empty() { return false; }
+                                    let common = curr_word_set.intersection(&prev_words).count();
+                                    let overlap_curr = common as f64 / curr_word_set.len() as f64;
+                                    let overlap_prev = common as f64 / prev_words.len() as f64;
+                                    if overlap_curr > 0.5 || overlap_prev > 0.5 { return true; }
+                                }
+                                false
+                            });
+
+                            if is_echo {
+                                continue;
+                            }
+
+                            recent_finals.push(cleaned.clone());
+                            // Keep only last 10 FINALs for dedup
+                            if recent_finals.len() > 10 {
+                                recent_finals.remove(0);
+                            }
+
+                            let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                                text: cleaned,
+                                start_time: ref_segment.start_time,
+                                end_time: ref_segment.end_time,
+                                speaker: ref_segment.speaker,
+                                confidence: None,
+                                is_final: true,
+                                inference_time_ms: ref_segment.inference_time_ms,
+                            };
+                            emitters::emit_final_subtitle(&transcription_session, &final_segment, &growing_result);
+                        }
+
+                        // Phase 5: Emit PARTIAL with full growing text
+                        let display_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                            text: full_text,
+                            start_time: ref_segment.start_time,
+                            end_time: ref_segment.end_time,
+                            speaker: ref_segment.speaker,
+                            confidence: None,
+                            is_final: false,
+                            inference_time_ms: ref_segment.inference_time_ms,
+                        };
+                        emitters::emit_partial_subtitle(&transcription_session, &display_segment, &growing_result);
+                    }
+                } else {
+                    // Standard path: TDT and non-growing canary modes
+                    for segment in result.segments {
+                        if segment.text.trim().is_empty() {
+                            continue;
+                        }
+
+                        let prev_finalized = growing_merger.get_finalized_sentences().len();
+                        let growing_result = growing_merger.push(&segment.text, segment.is_final);
+                        let new_finalized = growing_merger.get_finalized_sentences().len();
+
+                        // Emit FINAL for each newly finalized sentence
+                        for i in prev_finalized..new_finalized {
+                            let fs = &growing_merger.get_finalized_sentences()[i];
+                            let trimmed = fs.text.trim();
+                            if trimmed.len() <= 2 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
+                                continue;
+                            }
+                            let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                                text: fs.text.clone(),
+                                start_time: segment.start_time,
+                                end_time: segment.end_time,
+                                speaker: segment.speaker,
+                                confidence: None,
+                                is_final: true,
+                                inference_time_ms: segment.inference_time_ms,
+                            };
+                            emitters::emit_final_subtitle(&transcription_session, &final_segment, &growing_result);
+                        }
+
+                        emitters::emit_partial_subtitle(&transcription_session, &segment, &growing_result);
+                    }
                 }
             }
             Err(e) => {

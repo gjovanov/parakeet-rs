@@ -71,14 +71,14 @@ pub fn create_canary_config(
             emit_full_text: false,
         },
         "growing_segments" => RealtimeCanaryConfig {
-            buffer_size_secs: 5.0,          // Shorter buffer = less overlap with finalized content
+            buffer_size_secs: 8.0,          // Larger buffer = more time for word confirmation
             min_audio_secs: 1.0,
-            process_interval_secs: 1.5,     // Less frequent = less redundant transcription
+            process_interval_secs: 0.5,     // Faster processing for quicker word confirmation
             language,
             pause_based_confirm: true,
             pause_threshold_secs: 0.5,
             silence_energy_threshold: 0.008,
-            emit_full_text: true,
+            emit_full_text: false,          // Use word-level confirmation, not raw full-buffer text
         },
         _ => RealtimeCanaryConfig {
             buffer_size_secs: 8.0,
@@ -169,7 +169,7 @@ pub fn create_canary_qwen_config(
             pause_based_confirm: true,
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
-            emit_full_text: true,
+            emit_full_text: false,          // Use word-level confirmation, not raw full-buffer text
         },
         _ => RealtimeCanaryQwenConfig {
             buffer_size_secs: 10.0,
@@ -351,12 +351,12 @@ mod tests {
     #[test]
     fn test_canary_growing_segments() {
         let config = create_canary_config("growing_segments", "de".to_string());
-        assert_eq!(config.buffer_size_secs, 5.0);
+        assert_eq!(config.buffer_size_secs, 8.0);
         assert_eq!(config.min_audio_secs, 1.0);
-        assert_eq!(config.process_interval_secs, 1.5);
+        assert_eq!(config.process_interval_secs, 0.5);
         assert!(config.pause_based_confirm);
         assert_eq!(config.pause_threshold_secs, 0.5);
-        assert!(config.emit_full_text, "growing_segments should use emit_full_text");
+        assert!(!config.emit_full_text, "growing_segments should use word-level confirmation");
     }
 
     #[test]
@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(config.process_interval_secs, 1.5);
         assert!(config.pause_based_confirm);
         assert_eq!(config.pause_threshold_secs, 0.6);
-        assert!(config.emit_full_text, "growing_segments should use emit_full_text");
+        assert!(!config.emit_full_text, "growing_segments should use word-level confirmation");
     }
 
     #[test]
