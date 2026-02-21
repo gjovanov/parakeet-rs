@@ -350,10 +350,10 @@ export class SubtitleRenderer {
    */
   _processSegment(segment) {
     if (segment.isFinal) {
-      // Use growing text (current sentence from merger) for display — it's
-      // shorter and more appropriate for Teletext/subtitle display.
-      // Fall back to segment text if growing text is unavailable.
-      const displaySource = segment.growingText || segment.text;
+      // Use segment.text for FINAL entries — it's the confirmed finalized sentence.
+      // Do NOT use growingText here: in growing_segments mode, growingText is the
+      // working buffer (next sentence being built), not the finalized sentence.
+      const displaySource = segment.text;
 
       // Split for Teletext (≤84 chars per line) and deduplicate
       const lines = splitForTeletext(displaySource, MAX_TELETEXT_CHARS);

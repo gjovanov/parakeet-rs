@@ -132,4 +132,6 @@ pub struct RuntimeConfig {
     pub turn_server: String,
     pub turn_username: String,
     pub turn_password: String,
+    /// COTURN shared secret for ephemeral credentials (overrides username/password when set)
+    pub turn_shared_secret: String,
 }

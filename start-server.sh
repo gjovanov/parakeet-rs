@@ -65,4 +65,6 @@ if [ "$PORT" -le 1024 ] && [ "$(id -u)" -ne 0 ]; then
     exec sudo -E "$0" "$@"
 fi
 
-exec ./target/release/parakeet-server "${ARGS[@]}" "$@"
+LOG_FILE="${LOG_FILE:-/tmp/parakeet-server-${PORT}.log}"
+echo "Logging to: $LOG_FILE"
+exec ./target/release/parakeet-server "${ARGS[@]}" "$@" >> "$LOG_FILE" 2>&1

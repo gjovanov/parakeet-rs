@@ -312,6 +312,50 @@ pub fn normalize_text(text: &str) -> String {
     result
 }
 
+/// Check if a PARTIAL's growing text overlaps significantly with recently
+/// emitted FINALs. Used to suppress stale PARTIALs that echo confirmed text.
+pub fn is_stale_partial(growing_text: &str, recent_finals: &[String]) -> bool {
+    let trimmed = growing_text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let partial_words: std::collections::HashSet<&str> = trimmed
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    if partial_words.is_empty() {
+        return true;
+    }
+
+    // Check against last 5 FINALs
+    for prev in recent_finals.iter().rev().take(5) {
+        let prev_words: std::collections::HashSet<&str> = prev
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        if prev_words.is_empty() {
+            continue;
+        }
+
+        let common = partial_words
+            .iter()
+            .filter(|w| prev_words.contains(*w))
+            .count();
+        let overlap = common as f64 / partial_words.len() as f64;
+
+        if overlap >= 0.6 {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

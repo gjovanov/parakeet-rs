@@ -298,6 +298,7 @@ fn run_transcription_inner(
     let mut confirmed_accumulator = String::new();
     let mut finalized_word_count: usize = 0;
     let mut recent_finals: Vec<String> = Vec::new(); // Track recent FINALs for dedup
+    let mut last_growing_sentence = String::new(); // Track previous growing_text for sentence promotion
 
     // Process audio samples as they arrive
     let mut chunks_processed = 0u64;
@@ -505,19 +506,106 @@ fn run_transcription_inner(
                                 inference_time_ms: ref_segment.inference_time_ms,
                             };
                             emitters::emit_final_subtitle(&transcription_session, &final_segment, &growing_result);
+                            // Reset after emitting a real FINAL (prevents double-promotion)
+                            last_growing_sentence.clear();
                         }
 
-                        // Phase 5: Emit PARTIAL with full growing text
-                        let display_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
-                            text: full_text,
-                            start_time: ref_segment.start_time,
-                            end_time: ref_segment.end_time,
-                            speaker: ref_segment.speaker,
-                            confidence: None,
-                            is_final: false,
-                            inference_time_ms: ref_segment.inference_time_ms,
-                        };
-                        emitters::emit_partial_subtitle(&transcription_session, &display_segment, &growing_result);
+                        // Phase 4b: Promote unconfirmed sentences
+                        // If the growing sentence transitioned (previous ended with .!? and
+                        // current is different) but no FINAL was emitted, emit the previous
+                        // sentence as a promoted FINAL.
+                        if prev_finalized == new_finalized && !last_growing_sentence.is_empty() {
+                            let prev_trimmed = last_growing_sentence.trim();
+                            let curr_sentence = growing_result.current_sentence.trim();
+                            let prev_ends_sentence = prev_trimmed.ends_with('.')
+                                || prev_trimmed.ends_with('!')
+                                || prev_trimmed.ends_with('?');
+
+                            if prev_ends_sentence && !curr_sentence.is_empty() {
+                                // Check word overlap — low overlap means sentence transitioned
+                                let prev_words: std::collections::HashSet<&str> =
+                                    prev_trimmed.split_whitespace().collect();
+                                let curr_words: std::collections::HashSet<&str> =
+                                    curr_sentence.split_whitespace().collect();
+                                let common = prev_words.intersection(&curr_words).count();
+                                let overlap = if prev_words.is_empty() { 1.0 }
+                                    else { common as f64 / prev_words.len() as f64 };
+
+                                if overlap < 0.3 && prev_words.len() >= 4 {
+                                    // Transition detected — check not already in recent_finals (dedup)
+                                    let prev_lower = prev_trimmed.to_lowercase();
+                                    let already_emitted = recent_finals.iter().rev().take(8).any(|f| {
+                                        let f_lower = f.to_lowercase();
+                                        if f_lower == prev_lower { return true; }
+                                        // Bag-of-words check
+                                        let f_words: std::collections::HashSet<String> = f_lower
+                                            .split_whitespace()
+                                            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+                                            .filter(|w| !w.is_empty())
+                                            .collect();
+                                        let p_words: std::collections::HashSet<String> = prev_lower
+                                            .split_whitespace()
+                                            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+                                            .filter(|w| !w.is_empty())
+                                            .collect();
+                                        if f_words.is_empty() || p_words.is_empty() { return false; }
+                                        let c = f_words.intersection(&p_words).count();
+                                        c as f64 / p_words.len() as f64 > 0.5
+                                            || c as f64 / f_words.len() as f64 > 0.5
+                                    });
+
+                                    if !already_emitted {
+                                        let promoted_text = emitters::normalize_text(prev_trimmed);
+                                        eprintln!(
+                                            "[Session {} | PROMOTED | Speaker {}] \"{}\"",
+                                            transcription_session.id,
+                                            ref_segment.speaker.map(|s| s.to_string()).unwrap_or_else(|| "?".to_string()),
+                                            &promoted_text.chars().take(80).collect::<String>(),
+                                        );
+
+                                        recent_finals.push(promoted_text.clone());
+                                        if recent_finals.len() > 10 {
+                                            recent_finals.remove(0);
+                                        }
+
+                                        let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                                            text: promoted_text,
+                                            start_time: ref_segment.start_time,
+                                            end_time: ref_segment.end_time,
+                                            speaker: ref_segment.speaker,
+                                            confidence: None,
+                                            is_final: true,
+                                            inference_time_ms: ref_segment.inference_time_ms,
+                                        };
+                                        emitters::emit_final_subtitle(
+                                            &transcription_session, &final_segment, &growing_result
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // Update tracking
+                        last_growing_sentence = growing_result.current_sentence.clone();
+
+                        // Phase 5: Emit PARTIAL with full growing text (suppress if stale)
+                        let growing_text = &growing_result.current_sentence;
+                        let is_stale = emitters::is_stale_partial(growing_text, &recent_finals);
+
+                        if !is_stale {
+                            let display_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                                text: full_text,
+                                start_time: ref_segment.start_time,
+                                end_time: ref_segment.end_time,
+                                speaker: ref_segment.speaker,
+                                confidence: None,
+                                is_final: false,
+                                inference_time_ms: ref_segment.inference_time_ms,
+                            };
+                            emitters::emit_partial_subtitle(
+                                &transcription_session, &display_segment, &growing_result
+                            );
+                        }
                     }
                 } else {
                     // Standard path: TDT and non-growing canary modes

@@ -28,6 +28,7 @@ mod fab_forwarder;
 mod srt_config;
 mod state;
 mod transcription;
+mod turn_credentials;
 mod webrtc_handlers;
 
 use axum::{
@@ -317,6 +318,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let turn_server = std::env::var("TURN_SERVER").unwrap_or_default();
     let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
     let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
+    let turn_shared_secret = std::env::var("TURN_SHARED_SECRET").unwrap_or_default();
 
     let ws_host = std::env::var("WS_HOST")
         .ok()
@@ -326,11 +328,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ws_url = format!("ws://{}:{}/ws", ws_host, args.port);
 
+    if !turn_shared_secret.is_empty() {
+        eprintln!("TURN auth: ephemeral credentials (shared secret)");
+    } else if !turn_username.is_empty() {
+        eprintln!("TURN auth: static credentials (user: {})", turn_username);
+    }
+
     let runtime_config = RuntimeConfig {
         ws_url: ws_url.clone(),
         turn_server: turn_server.clone(),
         turn_username: turn_username.clone(),
         turn_password: turn_password.clone(),
+        turn_shared_secret: turn_shared_secret.clone(),
     };
 
     eprintln!("Frontend config: ws_url={}", ws_url);

@@ -74,6 +74,7 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
 
     // Create peer connection
     let turn_server = std::env::var("TURN_SERVER").unwrap_or_default();
+    let turn_shared_secret = std::env::var("TURN_SHARED_SECRET").unwrap_or_default();
     let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
     let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
     let force_relay = std::env::var("FORCE_RELAY")
@@ -91,11 +92,26 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
     };
 
     if !turn_server.is_empty() {
-        eprintln!("[WebRTC] Configuring TURN: {} (user: {})", turn_server, turn_username);
+        // Build TURN URLs: include both UDP and TCP variants
+        let mut turn_urls = vec![turn_server.clone()];
+        if !turn_server.contains("?transport=") {
+            turn_urls.push(format!("{}?transport=tcp", turn_server));
+        }
+
+        // Use ephemeral credentials (shared secret) if configured, otherwise static
+        let (username, credential) = if !turn_shared_secret.is_empty() {
+            let creds = crate::turn_credentials::generate_turn_credentials(&turn_shared_secret, 86400);
+            eprintln!("[WebRTC] Configuring TURN: {:?} (ephemeral user: {})", turn_urls, creds.0);
+            creds
+        } else {
+            eprintln!("[WebRTC] Configuring TURN: {:?} (static user: {})", turn_urls, turn_username);
+            (turn_username, turn_password)
+        };
+
         ice_servers.push(RTCIceServer {
-            urls: vec![turn_server.clone()],
-            username: turn_username,
-            credential: turn_password,
+            urls: turn_urls,
+            username,
+            credential,
             credential_type: RTCIceCredentialType::Password,
         });
     } else {
