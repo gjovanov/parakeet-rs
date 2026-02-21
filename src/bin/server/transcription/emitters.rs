@@ -11,13 +11,19 @@ pub fn emit_partial_subtitle(
     segment: &TranscriptionSegment,
     growing_result: &GrowingTextResult,
 ) {
+    // Normalize growing text outputs (the merger can re-introduce spacing issues
+    // when joining tokens from different segments, e.g. "EU" + "-Verfahren" → "EU -Verfahren")
+    let growing_text = normalize_text(&growing_result.current_sentence);
+    let full_transcript = normalize_text(&growing_result.buffer);
+    let delta = normalize_text(&growing_result.delta);
+
     let subtitle_msg = serde_json::json!({
         "type": "subtitle",
         "text": segment.text,
         "raw_text": segment.text,
-        "growing_text": growing_result.current_sentence,
-        "full_transcript": growing_result.buffer,
-        "delta": growing_result.delta,
+        "growing_text": growing_text,
+        "full_transcript": full_transcript,
+        "delta": delta,
         "tail_changed": growing_result.tail_changed,
         "speaker": segment.speaker,
         "start": segment.start_time,
@@ -52,21 +58,26 @@ pub fn emit_final_subtitle(
     merged: &TranscriptionSegment,
     growing_result: &GrowingTextResult,
 ) {
+    // Normalize the finalized text (growing merger can re-introduce spacing issues
+    // when joining tokens from different segments)
+    let final_text = normalize_text(&merged.text);
+
     // For FINAL messages, use the finalized text as growing_text so the live
     // subtitle display shows the completed sentence (not the working buffer
     // which may be just "." right after finalization).
     let growing_text = if growing_result.current_sentence.trim().len() <= 2 {
-        &merged.text
+        final_text.clone()
     } else {
-        &growing_result.current_sentence
+        normalize_text(&growing_result.current_sentence)
     };
+    let full_transcript = normalize_text(&growing_result.buffer);
 
     let subtitle_msg = serde_json::json!({
         "type": "subtitle",
-        "text": merged.text,
+        "text": final_text,
         "raw_text": merged.text,
         "growing_text": growing_text,
-        "full_transcript": growing_result.buffer,
+        "full_transcript": full_transcript,
         "delta": "",
         "tail_changed": false,
         "speaker": merged.speaker,
@@ -103,13 +114,19 @@ pub fn emit_streaming_segments(
     for segment in segments {
         let growing_result = growing_merger.push(&segment.text, segment.is_final);
 
+        // Normalize all text outputs
+        let normalized_text = normalize_text(&segment.text);
+        let growing_text = normalize_text(&growing_result.current_sentence);
+        let full_transcript = normalize_text(&growing_result.buffer);
+        let delta = normalize_text(&growing_result.delta);
+
         let subtitle_msg = serde_json::json!({
             "type": "subtitle",
-            "text": segment.text,
+            "text": normalized_text,
             "raw_text": segment.text,
-            "growing_text": growing_result.current_sentence,
-            "full_transcript": growing_result.buffer,
-            "delta": growing_result.delta,
+            "growing_text": growing_text,
+            "full_transcript": full_transcript,
+            "delta": delta,
             "tail_changed": growing_result.tail_changed,
             "speaker": segment.speaker,
             "start": segment.start_time,
@@ -196,6 +213,105 @@ pub fn truncate_hallucination_text(text: &str) -> String {
     text.to_string()
 }
 
+/// Normalize text spacing issues from ASR model output.
+///
+/// Fixes:
+/// 1. Missing space between letter and digit: "am5" → "am 5"
+/// 2. Missing space before uppercase start of compound: "kammerÖsterreich" → "kammer Österreich"
+/// 3. Spurious " -" hyphen: "EU -Kommission" → "EU-Kommission"
+/// 4. Spurious space before comma/period in numbers: "1 ,3" → "1,3"
+pub fn normalize_text(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    // Phase 1: Fix " -X" → "-X" (spurious space before hyphen-word)
+    // e.g. "EU -Kommission" → "EU-Kommission", "Kartell -Verfahren" → "Kartell-Verfahren"
+    let mut result = String::with_capacity(text.len() + 32);
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Pattern: "<letter> -<letter>" → "<letter>-<letter>"
+        if i + 2 < len && chars[i] == ' ' && chars[i + 1] == '-' && chars[i + 2].is_alphabetic() {
+            // Check preceding char is alphanumeric
+            if i > 0 && chars[i - 1].is_alphanumeric() {
+                result.push('-');
+                i += 2; // skip space and hyphen, next iteration picks up the letter
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    // Phase 2: Fix "digit ,digit" or "digit .digit" → "digit,digit" / "digit.digit"
+    // e.g. "1 ,3" → "1,3", "25 .000" → "25.000"
+    let input = result;
+    result = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    i = 0;
+
+    while i < len {
+        if i + 2 < len
+            && chars[i] == ' '
+            && (chars[i + 1] == ',' || chars[i + 1] == '.')
+            && chars[i + 2].is_ascii_digit()
+        {
+            // Check preceding char is a digit
+            if i > 0 && chars[i - 1].is_ascii_digit() {
+                // Skip the space, push the punct directly
+                result.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    // Phase 3: Insert space between lowercase letter and digit
+    // e.g. "am5" → "am 5", "ab2027" → "ab 2027"
+    // But NOT inside words like "h264" or after uppercase (acronyms)
+    let input = result;
+    result = String::with_capacity(input.len() + 16);
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+
+    for i in 0..len {
+        result.push(chars[i]);
+        if i + 1 < len && chars[i].is_alphabetic() && chars[i + 1].is_ascii_digit() {
+            // Insert space between letter and digit
+            // But skip if the letter is uppercase and previous is also uppercase (acronym like "A4")
+            let is_lowercase = chars[i].is_lowercase();
+            if is_lowercase {
+                result.push(' ');
+            }
+        }
+    }
+
+    // Phase 4: Insert space before uppercase Ö, Ä, Ü when preceded by lowercase letter
+    // e.g. "kammerÖsterreich" → "kammer Österreich", "inÖsterreich" → "in Österreich"
+    let input = result;
+    result = String::with_capacity(input.len() + 16);
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+
+    for i in 0..len {
+        if i > 0
+            && (chars[i] == 'Ö' || chars[i] == 'Ä' || chars[i] == 'Ü')
+            && chars[i - 1].is_lowercase()
+        {
+            result.push(' ');
+        }
+        result.push(chars[i]);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +395,84 @@ mod tests {
         let text = "das ist das ist weiter geht es";
         let result = truncate_hallucination_text(text);
         assert_eq!(result, text, "Two repetitions should be fine");
+    }
+
+    // ========================================================================
+    // normalize_text
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_empty() {
+        assert_eq!(normalize_text(""), "");
+    }
+
+    #[test]
+    fn test_normalize_no_changes() {
+        let text = "Dies ist ein normaler Satz.";
+        assert_eq!(normalize_text(text), text);
+    }
+
+    #[test]
+    fn test_normalize_letter_digit_spacing() {
+        assert_eq!(normalize_text("am5."), "am 5.");
+        assert_eq!(normalize_text("am17."), "am 17.");
+        assert_eq!(normalize_text("ab2027"), "ab 2027");
+        assert_eq!(normalize_text("um1,3 Millionen"), "um 1,3 Millionen");
+        assert_eq!(normalize_text("fast1,4 Milliarden"), "fast 1,4 Milliarden");
+        assert_eq!(normalize_text("Pertutti am5."), "Pertutti am 5.");
+    }
+
+    #[test]
+    fn test_normalize_hyphen_spacing() {
+        assert_eq!(normalize_text("EU -Kommission"), "EU-Kommission");
+        assert_eq!(normalize_text("Kartell -Verfahren"), "Kartell-Verfahren");
+        assert_eq!(normalize_text("EU -Verfahren gegen"), "EU-Verfahren gegen");
+        assert_eq!(normalize_text("All -in -One"), "All-in-One");
+    }
+
+    #[test]
+    fn test_normalize_comma_period_spacing() {
+        assert_eq!(normalize_text("1 ,3 Millionen"), "1,3 Millionen");
+        assert_eq!(normalize_text("25 .000 Fahrzeuge"), "25.000 Fahrzeuge");
+        assert_eq!(normalize_text("um1 ,3"), "um 1,3");
+    }
+
+    #[test]
+    fn test_normalize_umlaut_spacing() {
+        assert_eq!(normalize_text("kammerÖsterreich"), "kammer Österreich");
+        assert_eq!(normalize_text("inÖsterreich"), "in Österreich");
+        assert_eq!(normalize_text("gegenÖsterreich"), "gegen Österreich");
+        assert_eq!(normalize_text("UVP inÖsterreich"), "UVP in Österreich");
+        assert_eq!(normalize_text("spartÖsterreich"), "spart Österreich");
+    }
+
+    #[test]
+    fn test_normalize_preserves_normal_uppercase() {
+        // Don't insert space before regular uppercase in middle of sentence
+        let text = "Hallo Welt";
+        assert_eq!(normalize_text(text), text);
+    }
+
+    #[test]
+    fn test_normalize_combined_issues() {
+        assert_eq!(
+            normalize_text("EU -Kommission leitet Kartell -Verfahren gegen Red Bull ein"),
+            "EU-Kommission leitet Kartell-Verfahren gegen Red Bull ein"
+        );
+        assert_eq!(
+            normalize_text("WirtschaftskammerÖsterreich"),
+            "Wirtschaftskammer Österreich"
+        );
+        assert_eq!(
+            normalize_text("Paket um1 ,3 Millionen"),
+            "Paket um 1,3 Millionen"
+        );
+    }
+
+    #[test]
+    fn test_normalize_digit_preserves_acronyms() {
+        // Uppercase letter + digit should NOT get space (e.g. "A4", "B2")
+        assert_eq!(normalize_text("A4 Papier"), "A4 Papier");
+        assert_eq!(normalize_text("ORF2"), "ORF2");
     }
 }

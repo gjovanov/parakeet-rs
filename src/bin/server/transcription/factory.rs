@@ -4,7 +4,7 @@ use crate::api::sessions::{ParallelConfig, PauseConfig};
 use parakeet_rs::streaming_transcriber::StreamingTranscriber;
 use std::path::PathBuf;
 
-use super::configs::{create_canary_config, create_transcription_config};
+use super::configs::{create_canary_config, create_canary_qwen_config, create_transcription_config};
 
 /// Parameters for creating a transcriber
 pub struct TranscriberParams {
@@ -14,6 +14,7 @@ pub struct TranscriberParams {
     pub exec_config: parakeet_rs::ExecutionConfig,
     pub is_canary: bool,
     pub is_canary_flash: bool,
+    pub is_canary_qwen: bool,
     pub is_vad_mode: bool,
     pub mode: String,
     pub vad_base_mode: String,
@@ -33,6 +34,7 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
         exec_config,
         is_canary,
         is_canary_flash,
+        is_canary_qwen,
         is_vad_mode,
         mode,
         vad_base_mode,
@@ -45,7 +47,27 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
     let is_parallel_mode = mode == "parallel";
     let is_pause_parallel_mode = mode == "pause_parallel";
 
-    if is_pause_parallel_mode {
+    if is_canary_qwen && is_pause_parallel_mode {
+        create_canary_qwen_pause_parallel(
+            &session_id, &model_path, diar_path.as_ref(), exec_config,
+            &language, &parallel_config, &pause_config,
+        )
+    } else if is_canary_qwen && is_parallel_mode {
+        create_canary_qwen_parallel(
+            &session_id, &model_path, diar_path.as_ref(), exec_config,
+            &language, &parallel_config,
+        )
+    } else if is_canary_qwen && is_vad_mode {
+        create_canary_qwen_vad(
+            &session_id, &model_path, diar_path, exec_config,
+            &vad_base_mode, &vad_model_path, &language,
+        )
+    } else if is_canary_qwen {
+        create_canary_qwen(
+            &session_id, &model_path, diar_path.as_ref(), exec_config,
+            &mode, &language,
+        )
+    } else if is_pause_parallel_mode {
         create_pause_parallel(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
             is_canary, &language, &parallel_config, &pause_config,
@@ -83,10 +105,16 @@ pub fn model_type_name(
     is_pause_parallel_mode: bool,
     is_parallel_mode: bool,
     is_vad_mode: bool,
+    is_canary_qwen: bool,
     is_canary_flash: bool,
     is_canary: bool,
 ) -> &'static str {
-    if is_pause_parallel_mode {
+    if is_canary_qwen {
+        if is_pause_parallel_mode { "PauseParallelCanaryQwen" }
+        else if is_parallel_mode { "ParallelCanaryQwen" }
+        else if is_vad_mode { "VAD+CanaryQwen" }
+        else { "CanaryQwen" }
+    } else if is_pause_parallel_mode {
         if is_canary { "PauseParallelCanary" } else { "PauseParallelTDT" }
     } else if is_parallel_mode {
         if is_canary { "ParallelCanary" } else { "ParallelTDT" }
@@ -507,52 +535,255 @@ fn create_tdt(
     }
 }
 
+fn create_canary_qwen(
+    session_id: &str,
+    model_path: &PathBuf,
+    diar_path: Option<&PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    mode: &str,
+    language: &str,
+) -> Option<Box<dyn StreamingTranscriber>> {
+    use parakeet_rs::realtime_canary_qwen::RealtimeCanaryQwen;
+
+    let qwen_config = create_canary_qwen_config(mode, language.to_string());
+
+    eprintln!(
+        "[Session {}] Creating CanaryQwen transcriber from {:?} (language: {}, mode: {}, diar: {:?})",
+        session_id, model_path, language, mode, diar_path
+    );
+
+    #[cfg(feature = "sortformer")]
+    let result = if diar_path.is_some() {
+        RealtimeCanaryQwen::new_with_diarization(
+            model_path, diar_path, Some(exec_config), Some(qwen_config),
+        )
+    } else {
+        RealtimeCanaryQwen::new(model_path, Some(exec_config), Some(qwen_config))
+    };
+
+    #[cfg(not(feature = "sortformer"))]
+    let result = RealtimeCanaryQwen::new(model_path, Some(exec_config), Some(qwen_config));
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => {
+            eprintln!("[Session {}] Failed to create CanaryQwen transcriber: {}", session_id, e);
+            None
+        }
+    }
+}
+
+fn create_canary_qwen_vad(
+    session_id: &str,
+    model_path: &PathBuf,
+    diar_path: Option<PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    vad_base_mode: &str,
+    vad_model_path: &str,
+    language: &str,
+) -> Option<Box<dyn StreamingTranscriber>> {
+    use parakeet_rs::realtime_canary_qwen_vad::{RealtimeCanaryQwenVad, RealtimeCanaryQwenVadConfig};
+
+    let config = if vad_base_mode == "sliding_window" {
+        RealtimeCanaryQwenVadConfig::sliding_window(language.to_string())
+    } else {
+        RealtimeCanaryQwenVadConfig::buffered(language.to_string())
+    };
+
+    eprintln!(
+        "[Session {}] Creating VAD+CanaryQwen transcriber from {:?} (language: {}, vad_mode: {}, diar: {:?})",
+        session_id, model_path, language, vad_base_mode, diar_path
+    );
+
+    #[cfg(feature = "sortformer")]
+    let result = RealtimeCanaryQwenVad::new(
+        model_path, diar_path.as_ref(), vad_model_path,
+        Some(exec_config), Some(config),
+    );
+    #[cfg(not(feature = "sortformer"))]
+    let result = RealtimeCanaryQwenVad::new(
+        model_path, vad_model_path, Some(exec_config), Some(config),
+    );
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => {
+            eprintln!("[Session {}] Failed to create VAD+CanaryQwen transcriber: {}", session_id, e);
+            None
+        }
+    }
+}
+
+fn create_canary_qwen_parallel(
+    session_id: &str,
+    model_path: &PathBuf,
+    diar_path: Option<&PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    language: &str,
+    parallel_config: &Option<ParallelConfig>,
+) -> Option<Box<dyn StreamingTranscriber>> {
+    use parakeet_rs::parallel_canary_qwen::{ParallelCanaryQwen, ParallelCanaryQwenConfig};
+
+    let (num_threads, buffer_size) = match parallel_config {
+        Some(cfg) => (cfg.num_threads, cfg.buffer_size_secs),
+        None => (4, 6),
+    };
+
+    let config = ParallelCanaryQwenConfig {
+        num_threads,
+        buffer_size_chunks: buffer_size,
+        chunk_duration_secs: 1.0,
+        language: language.to_string(),
+        intra_threads: 1,
+    };
+
+    eprintln!(
+        "[Session {}] Creating ParallelCanaryQwen transcriber with {} threads, {}s buffer (diar: {:?})",
+        session_id, config.num_threads, config.buffer_size_chunks, diar_path
+    );
+
+    #[cfg(feature = "sortformer")]
+    let result = ParallelCanaryQwen::new_with_diarization(
+        model_path, diar_path, Some(exec_config), Some(config),
+    );
+    #[cfg(not(feature = "sortformer"))]
+    let result = ParallelCanaryQwen::new(model_path, Some(exec_config), Some(config));
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => {
+            eprintln!("[Session {}] Failed to create ParallelCanaryQwen transcriber: {}", session_id, e);
+            None
+        }
+    }
+}
+
+fn create_canary_qwen_pause_parallel(
+    session_id: &str,
+    model_path: &PathBuf,
+    diar_path: Option<&PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    language: &str,
+    parallel_config: &Option<ParallelConfig>,
+    pause_config: &Option<PauseConfig>,
+) -> Option<Box<dyn StreamingTranscriber>> {
+    use parakeet_rs::pause_parallel_canary_qwen::{PauseParallelCanaryQwen, PauseParallelCanaryQwenConfig};
+
+    let num_threads = match parallel_config {
+        Some(cfg) => cfg.num_threads,
+        None => 4,
+    };
+
+    let pause_threshold_secs = pause_config.as_ref()
+        .map(|p| p.pause_threshold_ms as f32 / 1000.0)
+        .unwrap_or(0.5);
+    let silence_energy = pause_config.as_ref()
+        .map(|p| p.silence_energy_threshold)
+        .unwrap_or(0.008);
+    let max_segment_secs = pause_config.as_ref()
+        .map(|p| p.max_segment_secs)
+        .unwrap_or(6.0);
+    let context_buffer = pause_config.as_ref()
+        .map(|p| p.context_buffer_secs)
+        .unwrap_or(2.0);
+
+    let config = PauseParallelCanaryQwenConfig {
+        num_threads,
+        language: language.to_string(),
+        intra_threads: 1,
+        pause_threshold_secs,
+        silence_energy_threshold: silence_energy,
+        max_segment_duration_secs: max_segment_secs,
+        context_buffer_secs: context_buffer,
+    };
+
+    eprintln!(
+        "[Session {}] Creating PauseParallelCanaryQwen transcriber with {} threads, {}ms pause (diar: {:?})",
+        session_id, config.num_threads, (config.pause_threshold_secs * 1000.0) as u32, diar_path
+    );
+
+    #[cfg(feature = "sortformer")]
+    let result = PauseParallelCanaryQwen::new_with_diarization(
+        model_path, diar_path, Some(exec_config), Some(config),
+    );
+    #[cfg(not(feature = "sortformer"))]
+    let result = PauseParallelCanaryQwen::new(model_path, Some(exec_config), Some(config));
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => {
+            eprintln!("[Session {}] Failed to create PauseParallelCanaryQwen transcriber: {}", session_id, e);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn test_model_type_name_canary_qwen() {
+        assert_eq!(model_type_name(false, false, false, true, false, false), "CanaryQwen");
+    }
+
+    #[test]
+    fn test_model_type_name_canary_qwen_vad() {
+        assert_eq!(model_type_name(false, false, true, true, false, false), "VAD+CanaryQwen");
+    }
+
+    #[test]
+    fn test_model_type_name_canary_qwen_parallel() {
+        assert_eq!(model_type_name(false, true, false, true, false, false), "ParallelCanaryQwen");
+    }
+
+    #[test]
+    fn test_model_type_name_canary_qwen_pause_parallel() {
+        assert_eq!(model_type_name(true, false, false, true, false, false), "PauseParallelCanaryQwen");
+    }
+
+    #[test]
     fn test_model_type_name_pause_parallel_canary() {
-        assert_eq!(model_type_name(true, false, false, false, true), "PauseParallelCanary");
+        assert_eq!(model_type_name(true, false, false, false, false, true), "PauseParallelCanary");
     }
 
     #[test]
     fn test_model_type_name_pause_parallel_tdt() {
-        assert_eq!(model_type_name(true, false, false, false, false), "PauseParallelTDT");
+        assert_eq!(model_type_name(true, false, false, false, false, false), "PauseParallelTDT");
     }
 
     #[test]
     fn test_model_type_name_parallel_canary() {
-        assert_eq!(model_type_name(false, true, false, false, true), "ParallelCanary");
+        assert_eq!(model_type_name(false, true, false, false, false, true), "ParallelCanary");
     }
 
     #[test]
     fn test_model_type_name_parallel_tdt() {
-        assert_eq!(model_type_name(false, true, false, false, false), "ParallelTDT");
+        assert_eq!(model_type_name(false, true, false, false, false, false), "ParallelTDT");
     }
 
     #[test]
     fn test_model_type_name_vad_canary() {
-        assert_eq!(model_type_name(false, false, true, false, true), "VAD+Canary");
+        assert_eq!(model_type_name(false, false, true, false, false, true), "VAD+Canary");
     }
 
     #[test]
     fn test_model_type_name_vad_tdt() {
-        assert_eq!(model_type_name(false, false, true, false, false), "VAD+TDT");
+        assert_eq!(model_type_name(false, false, true, false, false, false), "VAD+TDT");
     }
 
     #[test]
     fn test_model_type_name_canary_flash() {
-        assert_eq!(model_type_name(false, false, false, true, false), "CanaryFlash");
+        assert_eq!(model_type_name(false, false, false, false, true, false), "CanaryFlash");
     }
 
     #[test]
     fn test_model_type_name_canary() {
-        assert_eq!(model_type_name(false, false, false, false, true), "Canary");
+        assert_eq!(model_type_name(false, false, false, false, false, true), "Canary");
     }
 
     #[test]
     fn test_model_type_name_tdt() {
-        assert_eq!(model_type_name(false, false, false, false, false), "TDT");
+        assert_eq!(model_type_name(false, false, false, false, false, false), "TDT");
     }
 }

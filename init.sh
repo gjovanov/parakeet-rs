@@ -140,21 +140,33 @@ download_models() {
     download_file \
         "https://huggingface.co/snakers4/silero-vad/resolve/master/files/silero_vad.onnx" \
         "silero_vad.onnx"
+
+    # Canary-Qwen 2.5B (optional - large model, requires separate ONNX export)
+    # Uncomment below after running scripts/export_canary_qwen.py
+    # echo "  --- Canary-Qwen 2.5B (English SALM ASR) ---"
+    # mkdir -p canary-qwen
+    # local cq_url="https://huggingface.co/your-org/canary-qwen-2.5b-onnx/resolve/main"
+    # download_file "$cq_url/encoder.onnx" "canary-qwen/encoder.onnx"
+    # download_file "$cq_url/projection.onnx" "canary-qwen/projection.onnx"
+    # download_file "$cq_url/embed_tokens.onnx" "canary-qwen/embed_tokens.onnx"
+    # download_file "$cq_url/decoder_model_merged_q4.onnx" "canary-qwen/decoder_model_merged_q4.onnx"
+    # download_file "$cq_url/tokenizer.json" "canary-qwen/tokenizer.json"
+    # download_file "$cq_url/config.json" "canary-qwen/config.json"
 }
 
 # ─── 4. Build binary ─────────────────────────────────────────────────
 
 build_binary() {
-    local bin="target/release/examples/webrtc_transcriber"
+    local bin="target/release/parakeet-server"
 
     if [ -f "$bin" ]; then
         echo "[4/5] Binary already built at $bin"
         return 0
     fi
 
-    echo "[4/5] Building webrtc_transcriber (release, sortformer)..."
+    echo "[4/5] Building parakeet-server (release, server+sortformer)..."
     export ORT_DYLIB_PATH="$ORT_LIB"
-    cargo build --release --example webrtc_transcriber --features sortformer
+    cargo build --release --bin parakeet-server --features "server,sortformer"
     echo "  [DONE] Built $bin"
 }
 

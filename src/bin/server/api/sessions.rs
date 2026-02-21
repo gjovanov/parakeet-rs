@@ -401,7 +401,6 @@ pub async fn get_transcript(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    use axum::body::Body;
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 

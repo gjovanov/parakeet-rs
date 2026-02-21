@@ -28,6 +28,8 @@ pub enum LatencyMode {
     Confidence,
     /// VoD batch mode: process entire file in 10-min chunks with deduplication
     Vod,
+    /// Growing segments: word-by-word PARTIAL updates building toward FINAL sentences
+    GrowingSegments,
 }
 
 impl LatencyMode {
@@ -47,9 +49,11 @@ impl LatencyMode {
             LatencyMode::PauseParallel => "pause_parallel",
             LatencyMode::Confidence => "confidence",
             LatencyMode::Vod => "vod",
+            LatencyMode::GrowingSegments => "growing_segments",
         }
     }
 
+    #[allow(dead_code)]
     pub fn display_name(&self) -> &'static str {
         match self {
             LatencyMode::Speedy => "Speedy (~0.3-1.5s)",
@@ -66,15 +70,18 @@ impl LatencyMode {
             LatencyMode::PauseParallel => "Pause-Parallel (8 threads, ordered)",
             LatencyMode::Confidence => "Confidence (AWS-style streaming)",
             LatencyMode::Vod => "VoD Batch (10-min chunks)",
+            LatencyMode::GrowingSegments => "Growing Segments (word-by-word)",
         }
     }
 
     /// Check if this mode uses VAD-triggered transcription
+    #[allow(dead_code)]
     pub fn is_vad_mode(&self) -> bool {
         matches!(self, LatencyMode::VadSpeedy | LatencyMode::VadPauseBased | LatencyMode::VadSlidingWindow)
     }
 
     /// Get the underlying VAD mode string for VadConfig::from_mode()
+    #[allow(dead_code)]
     pub fn vad_mode_str(&self) -> &'static str {
         match self {
             LatencyMode::VadSpeedy => "speedy",
@@ -84,6 +91,7 @@ impl LatencyMode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn all() -> &'static [LatencyMode] {
         &[
             LatencyMode::Speedy,
@@ -100,15 +108,18 @@ impl LatencyMode {
             LatencyMode::PauseParallel,
             LatencyMode::Confidence,
             LatencyMode::Vod,
+            LatencyMode::GrowingSegments,
         ]
     }
 
     /// Check if this mode is confidence-based
+    #[allow(dead_code)]
     pub fn is_confidence_mode(&self) -> bool {
         matches!(self, LatencyMode::Confidence)
     }
 
     /// Check if this mode is VoD batch mode
+    #[allow(dead_code)]
     pub fn is_vod_mode(&self) -> bool {
         matches!(self, LatencyMode::Vod)
     }

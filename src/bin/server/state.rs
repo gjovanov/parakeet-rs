@@ -20,6 +20,7 @@ pub struct FabConfig {
 }
 
 /// Client connection with WebRTC peer connection
+#[allow(dead_code)]
 pub struct ClientConnection {
     pub id: String,
     pub session_id: String,

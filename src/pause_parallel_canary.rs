@@ -104,6 +104,7 @@ struct TranscriptionJob {
     /// End time of segment
     segment_end_time: f32,
     /// Duration of prepended context
+    #[allow(dead_code)]
     context_duration: f32,
 }
 

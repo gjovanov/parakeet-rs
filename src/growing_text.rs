@@ -75,6 +75,12 @@ pub struct GrowingTextMerger {
     // Stability tracking for trailing sentence finalization
     last_stable_buffer: String,
     stable_count: usize,
+
+    // Anchor context: tokens from recently finalized text, used for overlap
+    // detection when working_tokens is empty/small after finalization.
+    // This prevents sliding-buffer models (like Canary) from re-introducing
+    // already-finalized content.
+    anchor_context: Vec<String>,
 }
 
 impl GrowingTextMerger {
@@ -93,6 +99,7 @@ impl GrowingTextMerger {
             previous_buffer: String::new(),
             last_stable_buffer: String::new(),
             stable_count: 0,
+            anchor_context: Vec::new(),
         }
     }
 
@@ -100,9 +107,10 @@ impl GrowingTextMerger {
     ///
     /// The algorithm:
     /// 1. Tokenize new text
-    /// 2. Find best anchor point in working buffer tail
-    /// 3. Merge: keep buffer up to anchor, append new text from anchor
-    /// 4. If is_final and ends with sentence terminator, finalize the sentence
+    /// 2. Strip any overlap with recently finalized content (anchor_context)
+    /// 3. Find best anchor point in working buffer tail
+    /// 4. Merge: keep buffer up to anchor, append new text from anchor
+    /// 5. If is_final and ends with sentence terminator, finalize the sentence
     pub fn push(&mut self, text: &str, is_final: bool) -> GrowingTextResult {
         let text = text.trim();
         if text.is_empty() {
@@ -115,21 +123,49 @@ impl GrowingTextMerger {
             return self.current_result(false);
         }
 
-        // Find best anchor point
-        let (anchor_idx, match_len, _score) = self.find_best_anchor(&new_tokens);
+        // Step 1: Strip any overlap with recently finalized content BEFORE anchor search.
+        // This is critical for sliding-buffer models (Canary) where new transcriptions
+        // contain: [already-finalized prefix] + [working buffer overlap] + [new content].
+        // Without stripping first, the anchor search would find the working buffer overlap
+        // but include the finalized prefix in the tail-overwrite.
+        let context_skip = self.find_context_overlap(&new_tokens);
+        let effective_tokens: Vec<&str> = if context_skip > 0 {
+            eprintln!(
+                "[GrowingTextMerger] Stripped {} overlapping tokens from finalized context",
+                context_skip
+            );
+            new_tokens[context_skip..].to_vec()
+        } else {
+            new_tokens.clone()
+        };
+        let effective_text = if context_skip > 0 {
+            effective_tokens.join(" ")
+        } else {
+            text.to_string()
+        };
+
+        if effective_tokens.is_empty() {
+            // Entire input was finalized overlap — skip
+            return self.current_result(false);
+        }
+
+        // Step 2: Find best anchor point using the (possibly stripped) effective tokens
+        let (anchor_idx, match_len, _score) = self.find_best_anchor(&effective_tokens);
 
         let tail_changed;
 
         let mut divergence_fired = false;
 
         if anchor_idx == self.working_tokens.len() || match_len == 0 {
-            // No anchor found - check for divergence (complete restart detection)
+            // No anchor found in working tokens.
+
+            // Check for divergence (complete restart detection)
             // If the new text's first 5 tokens share < 30% similarity with the
             // last 5 working tokens, this looks like a complete restart
-            if self.working_tokens.len() >= 5 && new_tokens.len() >= 5 {
+            if self.working_tokens.len() >= 5 && effective_tokens.len() >= 5 {
                 let tail_start = self.working_tokens.len() - 5;
                 let tail_slice = &self.working_tokens[tail_start..];
-                let new_head: Vec<String> = new_tokens[..5].iter().map(|s| s.to_string()).collect();
+                let new_head: Vec<String> = effective_tokens[..5].iter().map(|s| s.to_string()).collect();
                 let matching = tail_slice.iter().zip(new_head.iter())
                     .filter(|(a, b)| Self::token_similarity(a, b) > 0.7)
                     .count();
@@ -148,29 +184,38 @@ impl GrowingTextMerger {
             if !self.working_buffer.is_empty() {
                 self.working_buffer.push(' ');
             }
-            self.working_buffer.push_str(text);
+            self.working_buffer.push_str(&effective_text);
             self.working_tokens
-                .extend(new_tokens.iter().map(|s| s.to_string()));
+                .extend(effective_tokens.iter().map(|s| s.to_string()));
             tail_changed = false;
         } else {
             // Anchor found - tail overwrite
-            // The anchor tells us: existing[anchor_idx..anchor_idx+match_len] overlaps with new[0..match_len]
-            // Strategy: Keep existing[..anchor_idx], then append the FULL new text
-            // This replaces the overlapping part with the new version (which includes corrections)
+            // The anchor tells us: existing[anchor_idx..anchor_idx+match_len] overlaps
+            // with effective[0..match_len].
+            // Strategy: Keep existing[..anchor_idx], then append the effective text
+            // (which already has finalized prefix stripped).
             self.working_tokens.truncate(anchor_idx);
 
-            // Rebuild working buffer from kept tokens + full new text
+            // Rebuild working buffer from kept tokens + effective text
             self.working_buffer = self.working_tokens.join(" ");
             if !self.working_buffer.is_empty() {
                 self.working_buffer.push(' ');
             }
-            self.working_buffer.push_str(text);
+            self.working_buffer.push_str(&effective_text);
 
-            // Update working tokens with full new tokens
+            // Update working tokens with effective tokens (finalized prefix already stripped)
             self.working_tokens
-                .extend(new_tokens.iter().map(|s| s.to_string()));
+                .extend(effective_tokens.iter().map(|s| s.to_string()));
 
             tail_changed = true;
+        }
+
+        // Expire anchor_context when working buffer is substantial enough for reliable
+        // anchoring (prevents stale context from causing false positive stripping).
+        // Using 60 tokens (was 30) to give sliding-buffer models more time to process
+        // overlapping content before the context is discarded.
+        if self.working_tokens.len() > 60 && !self.anchor_context.is_empty() {
+            self.anchor_context.clear();
         }
 
         // Detect and clean up any repetition corruption in working tokens
@@ -283,7 +328,7 @@ impl GrowingTextMerger {
             }
         }
 
-        // Check for repeated phrases (2-3 word patterns)
+        // Check for repeated phrases (2-3 word patterns, 3+ repetitions)
         for pattern_len in 2..=3usize {
             if self.working_tokens.len() < pattern_len * 3 {
                 continue;
@@ -319,6 +364,124 @@ impl GrowingTextMerger {
                     }
                 }
             }
+        }
+
+        // Check for longer phrases (3-5 words) repeated 2+ times.
+        // These indicate model stuttering, e.g. "Der Kalender präsentiert. X. Der Kalender präsentiert."
+        // Truncate at the start of the second occurrence.
+        for pattern_len in 3..=5usize {
+            if self.working_tokens.len() < pattern_len * 2 {
+                continue;
+            }
+            for i in 0..=(self.working_tokens.len() - pattern_len * 2) {
+                // Search for a second occurrence of the pattern after position i
+                for j in (i + pattern_len)..=(self.working_tokens.len() - pattern_len) {
+                    let matches = (0..pattern_len).all(|k| {
+                        self.working_tokens[i + k].to_lowercase()
+                            == self.working_tokens[j + k].to_lowercase()
+                    });
+                    if matches {
+                        // Ensure at least one word in the pattern is a content word (not a trivial
+                        // function word), to avoid false positives on "in der Stadt" etc.
+                        let has_content = (0..pattern_len).any(|k| {
+                            let w = self.working_tokens[i + k].to_lowercase();
+                            !Self::is_dedup_stopword(&w) && w.len() > 2
+                        });
+                        if has_content {
+                            eprintln!(
+                                "[GrowingTextMerger] Long phrase repeated (2x) at {}: '{}'",
+                                i,
+                                self.working_tokens[i..i + pattern_len].join(" ")
+                            );
+                            // Truncate at the second occurrence
+                            self.working_tokens.truncate(j);
+                            self.working_buffer = self.working_tokens.join(" ");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Find overlap between new tokens and anchor_context (recently finalized tokens).
+    /// Returns the number of leading tokens from `new_tokens` that overlap with
+    /// finalized content and should be stripped.
+    ///
+    /// Also checks for overlap in the MIDDLE/END of new_tokens (when the sliding
+    /// buffer re-transcribes content that was already finalized).
+    fn find_context_overlap(&self, new_tokens: &[&str]) -> usize {
+        if self.anchor_context.is_empty() || new_tokens.len() < 3 {
+            return 0;
+        }
+
+        // Strategy: find the longest run of new_tokens that matches a subsequence
+        // of anchor_context. We use a more lenient threshold (0.6) than the normal
+        // anchor search because sliding-buffer models produce varied re-transcriptions.
+        // We also allow up to 1 non-matching token in a window (gap tolerance).
+        //
+        // We search ALL starting positions in new_tokens, not just the beginning,
+        // because the overlap may be embedded in the middle of the new text.
+
+        let ctx_len = self.anchor_context.len();
+        let context_sim_threshold = 0.6; // More lenient than config.min_each_sim
+        let mut best_new_start = 0usize;
+        let mut best_match_len = 0usize;
+
+        for new_start in 0..new_tokens.len() {
+            let max_new_remaining = new_tokens.len() - new_start;
+            if max_new_remaining < 3 {
+                break;
+            }
+
+            for ctx_start in 0..ctx_len {
+                let max_match = std::cmp::min(ctx_len - ctx_start, max_new_remaining);
+                if max_match < 3 {
+                    continue;
+                }
+
+                // Count matching tokens with gap tolerance (allow 1 mismatch)
+                let mut match_len = 0;
+                let mut mismatches = 0;
+                for j in 0..max_match {
+                    let sim = Self::token_similarity(
+                        &self.anchor_context[ctx_start + j],
+                        new_tokens[new_start + j],
+                    );
+                    if sim >= context_sim_threshold {
+                        match_len = j + 1;
+                    } else {
+                        mismatches += 1;
+                        if mismatches > 1 {
+                            break;
+                        }
+                        // Allow 1 gap — still count position but don't reset
+                        match_len = j + 1;
+                    }
+                }
+
+                // Subtract trailing mismatches
+                let effective_len = match_len.saturating_sub(mismatches);
+
+                // Accept if:
+                // 1. Effective match is at least 3 tokens long
+                // 2. Match extends to within 3 tokens of the end of anchor_context
+                //    (meaning these tokens were near the tail of finalized content)
+                if effective_len >= 3 && (ctx_start + match_len + 3 >= ctx_len) {
+                    let total_strip = new_start + match_len;
+                    if total_strip > best_new_start + best_match_len {
+                        best_new_start = new_start;
+                        best_match_len = match_len;
+                    }
+                }
+            }
+        }
+
+        if best_match_len >= 3 {
+            // Strip everything from the beginning up to and including the overlap
+            best_new_start + best_match_len
+        } else {
+            0
         }
     }
 
@@ -565,9 +728,27 @@ impl GrowingTextMerger {
         // Dedup: skip if this text heavily overlaps with a recent finalized entry
         if self.is_duplicate_of_recent(&self.working_buffer) {
             // Don't finalize — just clear the working buffer to avoid re-processing
+            // But accumulate tokens as anchor context so overlap detection still works
+            self.anchor_context.extend(self.working_tokens.iter().cloned());
+            let max_context = 100;
+            if self.anchor_context.len() > max_context {
+                let start = self.anchor_context.len() - max_context;
+                self.anchor_context = self.anchor_context[start..].to_vec();
+            }
             self.working_buffer.clear();
             self.working_tokens.clear();
             return;
+        }
+
+        // Accumulate anchor context for future overlap detection.
+        // This is critical for sliding-buffer models (Canary) where the next
+        // transcription will overlap with just-finalized content.
+        // We EXTEND (not replace) to cover multiple consecutive finalizations.
+        self.anchor_context.extend(self.working_tokens.iter().cloned());
+        let max_context = 100;
+        if self.anchor_context.len() > max_context {
+            let start = self.anchor_context.len() - max_context;
+            self.anchor_context = self.anchor_context[start..].to_vec();
         }
 
         let sentence = FinalizedSentence {
@@ -611,6 +792,18 @@ impl GrowingTextMerger {
                 && to_finalize.chars().any(|c| c.is_alphanumeric())
                 && !self.is_duplicate_of_recent(&to_finalize)
             {
+                // Accumulate finalized tokens as anchor context for overlap detection
+                let finalized_tokens: Vec<String> = to_finalize
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                self.anchor_context.extend(finalized_tokens.iter().cloned());
+                let max_context = 100;
+                if self.anchor_context.len() > max_context {
+                    let start = self.anchor_context.len() - max_context;
+                    self.anchor_context = self.anchor_context[start..].to_vec();
+                }
+
                 self.finalized_sentences.push(FinalizedSentence {
                     text: to_finalize,
                     start_time: 0.0,
@@ -634,9 +827,46 @@ impl GrowingTextMerger {
             .to_lowercase()
     }
 
+    /// Common function words excluded from content-word overlap calculation.
+    /// These appear frequently across unrelated sentences and inflate bag-of-words scores.
+    const DEDUP_STOPWORDS: &'static [&'static str] = &[
+        // German articles
+        "der", "die", "das", "den", "dem", "des",
+        "ein", "eine", "einen", "einem", "eines",
+        // German prepositions
+        "in", "im", "am", "an", "auf", "aus", "bei", "mit", "nach", "von",
+        "zu", "zum", "zur", "für", "über", "unter", "vor", "durch", "gegen", "um", "bis",
+        // German conjunctions/particles
+        "und", "oder", "aber", "doch", "sondern", "dass", "wenn", "weil", "ob",
+        "ja", "nein", "na", "auch", "noch", "nur", "schon", "nicht", "denn", "mal",
+        // German pronouns
+        "ich", "du", "er", "sie", "es", "wir", "ihr", "mich", "mir", "dich", "dir",
+        "sich", "uns", "euch", "ihm", "ihn", "ihnen", "man",
+        // German auxiliary/modal verbs
+        "ist", "sind", "war", "hat", "haben", "habe", "hatte",
+        "wird", "werden", "wurde", "kann", "soll", "muss", "darf",
+        // English articles/prepositions
+        "the", "a", "an", "on", "at", "by", "for", "of", "to", "from", "with",
+        "out", "up", "into", "about", "over",
+        // English conjunctions/pronouns
+        "and", "or", "but", "so", "as", "if", "that", "this", "than",
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "them",
+        // English auxiliary verbs
+        "is", "are", "was", "were", "be", "been", "has", "have", "had",
+        "do", "does", "did", "will", "would", "can", "could", "may", "not", "no",
+    ];
+
+    /// Check if a normalized word is a common function word (stopword).
+    fn is_dedup_stopword(word: &str) -> bool {
+        Self::DEDUP_STOPWORDS.contains(&word)
+    }
+
     /// Check if text is a near-duplicate of any of the last N finalized entries.
-    /// Uses word-level overlap (case-insensitive, punctuation-stripped): if ≥ 60%
-    /// of the candidate's words appear in a recent entry (or vice versa), it's a duplicate.
+    ///
+    /// Uses three complementary checks:
+    /// 1. All-word bag-of-words overlap (original, with tighter asymmetric threshold)
+    /// 2. Content-word overlap (stopwords removed, fuzzy matching, lower thresholds)
+    /// 3. Contiguous sequence match (4+ consecutive words matching with fuzzy similarity)
     fn is_duplicate_of_recent(&self, text: &str) -> bool {
         let candidate_words: Vec<String> = text.split_whitespace()
             .map(Self::normalize_word_for_dedup)
@@ -645,6 +875,11 @@ impl GrowingTextMerger {
         if candidate_words.len() < 3 {
             return false; // Too short to meaningfully dedup
         }
+
+        // Pre-compute content words (non-stopwords) for the candidate
+        let candidate_content: Vec<&String> = candidate_words.iter()
+            .filter(|w| !Self::is_dedup_stopword(w))
+            .collect();
 
         // Check against last 5 finalized entries
         let check_count = std::cmp::min(5, self.finalized_sentences.len());
@@ -658,17 +893,85 @@ impl GrowingTextMerger {
                 continue;
             }
 
-            // Count how many candidate words appear in the existing entry
-            let matching = candidate_words.iter()
+            // --- Check 1: All-word bag-of-words overlap ---
+            let matching_all = candidate_words.iter()
                 .filter(|w| existing_words.contains(w))
                 .count();
+            let o_cand_all = matching_all as f32 / candidate_words.len() as f32;
+            let o_exist_all = matching_all as f32 / existing_words.len() as f32;
 
-            let overlap_of_candidate = matching as f32 / candidate_words.len() as f32;
-            let overlap_of_existing = matching as f32 / existing_words.len() as f32;
-
-            // Duplicate if BOTH directions have ≥ 80% overlap
-            if overlap_of_candidate >= 0.8 && overlap_of_existing >= 0.8 {
+            // Symmetric: both directions have high overlap
+            if o_cand_all >= 0.7 && o_exist_all >= 0.7 {
                 return true;
+            }
+            // Asymmetric: one text is a near-complete subset of the other
+            if (o_cand_all >= 0.80 && o_exist_all >= 0.40)
+                || (o_exist_all >= 0.80 && o_cand_all >= 0.40)
+            {
+                return true;
+            }
+
+            // --- Check 2: Content-word overlap (stopwords removed, fuzzy matching) ---
+            let existing_content: Vec<&String> = existing_words.iter()
+                .filter(|w| !Self::is_dedup_stopword(w))
+                .collect();
+
+            if candidate_content.len() >= 2 && existing_content.len() >= 2 {
+                let matching_content = candidate_content.iter()
+                    .filter(|cw| {
+                        existing_content.iter()
+                            .any(|ew| Self::token_similarity(cw, ew) >= 0.8)
+                    })
+                    .count();
+                let o_cand_content = matching_content as f32 / candidate_content.len() as f32;
+                let o_exist_content = matching_content as f32 / existing_content.len() as f32;
+
+                if o_cand_content >= 0.55 && o_exist_content >= 0.55 {
+                    return true;
+                }
+                if (o_cand_content >= 0.70 && o_exist_content >= 0.35)
+                    || (o_exist_content >= 0.70 && o_cand_content >= 0.35)
+                {
+                    return true;
+                }
+            }
+
+            // --- Check 3: Contiguous sequence match (4+ consecutive words) ---
+            // If 4+ consecutive words from the candidate appear in the same order
+            // in the existing text (with fuzzy matching), it's a strong overlap signal.
+            let min_contiguous = 4;
+            if candidate_words.len() >= min_contiguous && existing_words.len() >= min_contiguous {
+                let found_contiguous = Self::has_contiguous_match(
+                    &candidate_words, &existing_words, min_contiguous,
+                );
+                if found_contiguous {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if two word sequences share a contiguous subsequence of `min_len` or more words,
+    /// using fuzzy token matching (similarity >= 0.8).
+    fn has_contiguous_match(a: &[String], b: &[String], min_len: usize) -> bool {
+        if a.len() < min_len || b.len() < min_len {
+            return false;
+        }
+        for a_start in 0..=(a.len() - min_len) {
+            for b_start in 0..=(b.len() - min_len) {
+                let max_match = std::cmp::min(a.len() - a_start, b.len() - b_start);
+                let mut match_len = 0;
+                for k in 0..max_match {
+                    if Self::token_similarity(&a[a_start + k], &b[b_start + k]) >= 0.8 {
+                        match_len += 1;
+                        if match_len >= min_len {
+                            return true;
+                        }
+                    } else {
+                        break;
+                    }
+                }
             }
         }
         false
@@ -686,7 +989,23 @@ impl GrowingTextMerger {
                 let to_finalize = self.working_buffer[..split_pos].trim().to_string();
                 let to_keep = self.working_buffer[split_pos..].trim().to_string();
 
-                if !to_finalize.is_empty() {
+                if !to_finalize.is_empty()
+                    && to_finalize.len() > 2
+                    && to_finalize.chars().any(|c| c.is_alphanumeric())
+                    && !self.is_duplicate_of_recent(&to_finalize)
+                {
+                    // Accumulate finalized tokens as anchor context for overlap detection
+                    let finalized_tokens: Vec<String> = to_finalize
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect();
+                    self.anchor_context.extend(finalized_tokens.iter().cloned());
+                    let max_context = 100;
+                    if self.anchor_context.len() > max_context {
+                        let start = self.anchor_context.len() - max_context;
+                        self.anchor_context = self.anchor_context[start..].to_vec();
+                    }
+
                     self.finalized_sentences.push(FinalizedSentence {
                         text: to_finalize,
                         start_time: 0.0,
@@ -890,6 +1209,7 @@ impl GrowingTextMerger {
         self.previous_buffer.clear();
         self.last_stable_buffer.clear();
         self.stable_count = 0;
+        self.anchor_context.clear();
     }
 }
 
@@ -1399,5 +1719,104 @@ mod tests {
         // Inner finalization should have finalized "First sentence."
         // and current_sentence should be something about the partial
         assert!(finalized.len() >= 1);
+    }
+
+    // ========================================================================
+    // Anchor context (sliding-buffer overlap stripping)
+    // ========================================================================
+
+    #[test]
+    fn test_anchor_context_strips_finalized_overlap() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Simulate canary sliding buffer: first transcription
+        merger.push("Ein Wort zum Thema Ortszentren lädt der ORF am 19.", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+
+        // Next canary transcription overlaps: starts with old content
+        let result = merger.push(
+            "Wort zum Thema Ortszentren lädt der ORF am 19. November nach Bischofshofen.",
+            false,
+        );
+
+        // The overlapping prefix should be stripped; only new content remains
+        let transcript = merger.get_full_transcript();
+        // Should NOT contain the old content duplicated
+        let count = transcript.matches("Ortszentren").count();
+        assert!(
+            count <= 1,
+            "Expected at most 1 occurrence of 'Ortszentren', got {}: {}",
+            count,
+            transcript
+        );
+        // New content should be present
+        assert!(
+            result.buffer.contains("November") || result.buffer.contains("Bischofshofen"),
+            "New content should be present: {}",
+            result.buffer
+        );
+    }
+
+    #[test]
+    fn test_anchor_context_strips_middle_overlap() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Finalize a sentence
+        merger.push("Der ORF lädt am 19 November nach Bischofshofen.", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+
+        // New input has NEW content first, then repeats finalized content
+        let result = merger.push(
+            "Meine Anmeldung ist erforderlich. Der ORF lädt am 19 November nach Bischofshofen.",
+            false,
+        );
+
+        // The working buffer should contain only the new content
+        let transcript = merger.get_full_transcript();
+        let count = transcript.matches("Bischofshofen").count();
+        assert!(
+            count <= 1,
+            "Expected at most 1 occurrence of 'Bischofshofen', got {}: {}",
+            count,
+            transcript
+        );
+    }
+
+    #[test]
+    fn test_anchor_context_no_false_strip() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Finalize a sentence
+        merger.push("Heute ist ein schöner Tag.", true);
+        assert_eq!(merger.get_finalized_sentences().len(), 1);
+
+        // New input with completely different content (no overlap)
+        let result = merger.push("Morgen wird es regnen und kalt sein.", false);
+
+        // All new content should be preserved
+        assert!(
+            result.buffer.contains("Morgen wird es regnen"),
+            "New content should not be stripped: {}",
+            result.buffer
+        );
+    }
+
+    #[test]
+    fn test_anchor_context_cleared_after_use() {
+        let mut merger = GrowingTextMerger::new();
+
+        // Finalize
+        merger.push("Erster Satz hier ist lang genug.", true);
+
+        // Push with overlap — uses anchor_context
+        merger.push("Satz hier ist lang genug. Zweiter Satz kommt jetzt.", false);
+
+        // Push again with completely new content — anchor_context should be cleared
+        let result = merger.push("Dritter Satz ist anders.", false);
+        assert!(
+            result.buffer.contains("Dritter Satz"),
+            "Content should not be falsely stripped after context is cleared: {}",
+            result.buffer
+        );
     }
 }

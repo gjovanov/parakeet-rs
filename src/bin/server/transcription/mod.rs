@@ -88,7 +88,8 @@ pub fn run_session_transcription(
         eprintln!("[Session {}] Live stream (duration unknown)", session.id);
     }
 
-    let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash";
+    let is_canary_qwen = model_id == "canary-qwen-2b";
+    let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash" || is_canary_qwen;
     let is_canary_flash = model_id == "canary-180m-flash";
 
     // Channel to send audio samples to transcription thread
@@ -122,6 +123,7 @@ pub fn run_session_transcription(
                 exec_config,
                 is_canary,
                 is_canary_flash,
+                is_canary_qwen,
                 is_vad_mode,
                 mode,
                 vad_base_mode,
@@ -218,6 +220,7 @@ fn run_transcription_inner(
     exec_config: parakeet_rs::ExecutionConfig,
     is_canary: bool,
     is_canary_flash: bool,
+    is_canary_qwen: bool,
     is_vad_mode: bool,
     mode: String,
     vad_base_mode: String,
@@ -244,6 +247,7 @@ fn run_transcription_inner(
             exec_config,
             is_canary,
             is_canary_flash,
+            is_canary_qwen,
             is_vad_mode,
             mode: mode.clone(),
             vad_base_mode,
@@ -261,6 +265,7 @@ fn run_transcription_inner(
         is_pause_parallel_mode,
         is_parallel_mode,
         is_vad_mode,
+        is_canary_qwen,
         is_canary_flash,
         is_canary,
     );
@@ -315,8 +320,15 @@ fn run_transcription_inner(
                     }
                 }
 
-                // Hallucination rejection: skip results from extremely slow inference (>10s)
-                if inference_time.as_secs() > 10 && !is_parallel_mode && !is_pause_parallel_mode {
+                // Hallucination rejection: skip results from extremely slow inference
+                // Large models (canary-qwen 2.5B) legitimately need 30-60s on CPU,
+                // so use a higher threshold for them.
+                let hallucination_threshold_secs = if is_canary_qwen { 120 } else { 10 };
+                let slow_threshold_secs = if is_canary_qwen { 60 } else { 5 };
+                if inference_time.as_secs() > hallucination_threshold_secs
+                    && !is_parallel_mode
+                    && !is_pause_parallel_mode
+                {
                     eprintln!(
                         "[Session {}] HALLUCINATION GUARD: inference took {:.1}s, skipping result",
                         transcription_session.id,
@@ -325,7 +337,10 @@ fn run_transcription_inner(
                     continue;
                 }
 
-                if inference_time.as_secs() > 5 && !is_parallel_mode && !is_pause_parallel_mode {
+                if inference_time.as_secs() > slow_threshold_secs
+                    && !is_parallel_mode
+                    && !is_pause_parallel_mode
+                {
                     eprintln!(
                         "[Session {}] SLOW inference: {:.1}s for {} samples",
                         transcription_session.id,
@@ -334,9 +349,10 @@ fn run_transcription_inner(
                     );
                 }
 
-                // Apply hallucination truncation
+                // Apply hallucination truncation and text normalization
                 for segment in &mut result.segments {
                     segment.text = emitters::truncate_hallucination_text(&segment.text);
+                    segment.text = emitters::normalize_text(&segment.text);
                 }
 
                 for segment in result.segments {

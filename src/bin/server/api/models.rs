@@ -115,6 +115,12 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
             name: "VoD Batch (10-min chunks)",
             description: "Batch transcription for pre-recorded files. Processes in 10-minute chunks with overlap and deduplication. Generates downloadable transcript.json.",
         },
+        ModeInfo {
+            id: "growing_segments",
+            name: "Growing Segments (word-by-word)",
+            description: "Real-time growing transcription. Shows words appearing one by one (PARTIAL) \
+                          until sentence completion (FINAL). Best for live subtitle display.",
+        },
     ];
     Json(ApiResponse::success(modes))
 }

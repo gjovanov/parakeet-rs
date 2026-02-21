@@ -18,6 +18,7 @@ pub fn create_canary_config(
             pause_based_confirm: true,
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
+            emit_full_text: false,
         },
         "pause_based" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
@@ -27,6 +28,7 @@ pub fn create_canary_config(
             pause_based_confirm: true,
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
+            emit_full_text: false,
         },
         "low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
@@ -36,6 +38,7 @@ pub fn create_canary_config(
             pause_based_confirm: false,
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
+            emit_full_text: false,
         },
         "ultra_low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 6.0,
@@ -45,6 +48,7 @@ pub fn create_canary_config(
             pause_based_confirm: true,
             pause_threshold_secs: 0.5,
             silence_energy_threshold: 0.008,
+            emit_full_text: false,
         },
         "extreme_low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 4.0,
@@ -54,6 +58,7 @@ pub fn create_canary_config(
             pause_based_confirm: true,
             pause_threshold_secs: 0.4,
             silence_energy_threshold: 0.008,
+            emit_full_text: false,
         },
         "lookahead" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
@@ -63,6 +68,17 @@ pub fn create_canary_config(
             pause_based_confirm: true,
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+        "growing_segments" => RealtimeCanaryConfig {
+            buffer_size_secs: 5.0,          // Shorter buffer = less overlap with finalized content
+            min_audio_secs: 1.0,
+            process_interval_secs: 1.5,     // Less frequent = less redundant transcription
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.5,
+            silence_energy_threshold: 0.008,
+            emit_full_text: true,
         },
         _ => RealtimeCanaryConfig {
             buffer_size_secs: 8.0,
@@ -72,6 +88,98 @@ pub fn create_canary_config(
             pause_based_confirm: true,
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+    }
+}
+
+/// Create RealtimeCanaryQwenConfig based on latency mode
+pub fn create_canary_qwen_config(
+    mode: &str,
+    language: String,
+) -> parakeet_rs::realtime_canary_qwen::RealtimeCanaryQwenConfig {
+    use parakeet_rs::realtime_canary_qwen::RealtimeCanaryQwenConfig;
+
+    match mode {
+        "speedy" => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 10.0,
+            min_audio_secs: 2.0,
+            process_interval_secs: 2.0,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+        "pause_based" => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 15.0,
+            min_audio_secs: 3.0,
+            process_interval_secs: 3.0,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.8,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+        "low_latency" => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 15.0,
+            min_audio_secs: 2.0,
+            process_interval_secs: 2.5,
+            language,
+            pause_based_confirm: false,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+        "ultra_low_latency" => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 10.0,
+            min_audio_secs: 1.5,
+            process_interval_secs: 2.0,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.5,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+        "extreme_low_latency" => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 8.0,
+            min_audio_secs: 1.0,
+            process_interval_secs: 1.5,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.4,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+        "lookahead" => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 15.0,
+            min_audio_secs: 3.0,
+            process_interval_secs: 3.0,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+        },
+        "growing_segments" => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 12.0,
+            min_audio_secs: 1.5,
+            process_interval_secs: 1.5,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: true,
+        },
+        _ => RealtimeCanaryQwenConfig {
+            buffer_size_secs: 10.0,
+            min_audio_secs: 2.0,
+            process_interval_secs: 2.0,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
         },
     }
 }
@@ -156,6 +264,16 @@ pub fn create_transcription_config(
             lookahead_mode: true,
             lookahead_segments: 2,
         },
+        "growing_segments" => RealtimeTDTConfig {
+            buffer_size_secs: 10.0,
+            process_interval_secs: 0.15,
+            confirm_threshold_secs: 0.3,
+            pause_based_confirm: true,
+            pause_threshold_secs: pause_threshold,
+            silence_energy_threshold: silence_energy,
+            lookahead_mode: false,
+            lookahead_segments: 2,
+        },
         _ => RealtimeTDTConfig {
             buffer_size_secs: 8.0,
             process_interval_secs: 0.2,
@@ -231,9 +349,28 @@ mod tests {
     }
 
     #[test]
+    fn test_canary_growing_segments() {
+        let config = create_canary_config("growing_segments", "de".to_string());
+        assert_eq!(config.buffer_size_secs, 5.0);
+        assert_eq!(config.min_audio_secs, 1.0);
+        assert_eq!(config.process_interval_secs, 1.5);
+        assert!(config.pause_based_confirm);
+        assert_eq!(config.pause_threshold_secs, 0.5);
+        assert!(config.emit_full_text, "growing_segments should use emit_full_text");
+    }
+
+    #[test]
+    fn test_canary_non_growing_modes_no_emit_full() {
+        for mode in ["speedy", "pause_based", "low_latency", "ultra_low_latency", "extreme_low_latency", "lookahead"] {
+            let config = create_canary_config(mode, "de".to_string());
+            assert!(!config.emit_full_text, "Mode {} should not use emit_full_text", mode);
+        }
+    }
+
+    #[test]
     fn test_canary_all_modes_have_valid_intervals() {
         let modes = ["speedy", "pause_based", "low_latency", "ultra_low_latency",
-                      "extreme_low_latency", "lookahead"];
+                      "extreme_low_latency", "lookahead", "growing_segments"];
         for mode in modes {
             let config = create_canary_config(mode, "de".to_string());
             assert!(config.process_interval_secs > 0.0, "Mode {} has invalid interval", mode);
@@ -285,9 +422,19 @@ mod tests {
     }
 
     #[test]
+    fn test_tdt_growing_segments() {
+        let config = create_transcription_config("growing_segments", None);
+        assert_eq!(config.buffer_size_secs, 10.0);
+        assert_eq!(config.process_interval_secs, 0.15);
+        assert_eq!(config.confirm_threshold_secs, 0.3);
+        assert!(config.pause_based_confirm);
+        assert!(!config.lookahead_mode);
+    }
+
+    #[test]
     fn test_tdt_all_modes_consistency() {
         let modes = ["speedy", "pause_based", "low_latency", "ultra_low_latency",
-                      "extreme_low_latency", "lookahead"];
+                      "extreme_low_latency", "lookahead", "growing_segments"];
         for mode in modes {
             let config = create_transcription_config(mode, None);
             assert!(config.process_interval_secs > 0.0, "Mode {} has invalid interval", mode);
@@ -301,5 +448,65 @@ mod tests {
         let speedy = create_transcription_config("speedy", None);
         let extreme = create_transcription_config("extreme_low_latency", None);
         assert!(extreme.buffer_size_secs <= speedy.buffer_size_secs);
+    }
+
+    // ========================================================================
+    // Canary-Qwen config
+    // ========================================================================
+
+    #[test]
+    fn test_canary_qwen_speedy() {
+        let config = create_canary_qwen_config("speedy", "en".to_string());
+        assert_eq!(config.language, "en");
+        assert_eq!(config.buffer_size_secs, 10.0);
+        assert!(config.pause_based_confirm);
+        assert_eq!(config.process_interval_secs, 2.0);
+    }
+
+    #[test]
+    fn test_canary_qwen_pause_based() {
+        let config = create_canary_qwen_config("pause_based", "en".to_string());
+        assert_eq!(config.buffer_size_secs, 15.0);
+        assert_eq!(config.pause_threshold_secs, 0.8);
+        assert!(config.pause_based_confirm);
+    }
+
+    #[test]
+    fn test_canary_qwen_extreme_low_latency() {
+        let config = create_canary_qwen_config("extreme_low_latency", "en".to_string());
+        assert_eq!(config.buffer_size_secs, 8.0);
+        assert_eq!(config.process_interval_secs, 1.5);
+        assert_eq!(config.pause_threshold_secs, 0.4);
+    }
+
+    #[test]
+    fn test_canary_qwen_growing_segments() {
+        let config = create_canary_qwen_config("growing_segments", "en".to_string());
+        assert_eq!(config.buffer_size_secs, 12.0);
+        assert_eq!(config.min_audio_secs, 1.5);
+        assert_eq!(config.process_interval_secs, 1.5);
+        assert!(config.pause_based_confirm);
+        assert_eq!(config.pause_threshold_secs, 0.6);
+        assert!(config.emit_full_text, "growing_segments should use emit_full_text");
+    }
+
+    #[test]
+    fn test_canary_qwen_all_modes_valid() {
+        let modes = ["speedy", "pause_based", "low_latency", "ultra_low_latency",
+                      "extreme_low_latency", "lookahead", "growing_segments"];
+        for mode in modes {
+            let config = create_canary_qwen_config(mode, "en".to_string());
+            assert!(config.process_interval_secs > 0.0, "Mode {} has invalid interval", mode);
+            assert!(config.buffer_size_secs > 0.0, "Mode {} has invalid buffer", mode);
+            assert!(config.buffer_size_secs <= 40.0, "Mode {} exceeds 40s buffer limit", mode);
+            assert!(config.min_audio_secs > 0.0, "Mode {} has invalid min_audio", mode);
+        }
+    }
+
+    #[test]
+    fn test_canary_qwen_default_fallback() {
+        let config = create_canary_qwen_config("unknown_mode", "en".to_string());
+        assert_eq!(config.buffer_size_secs, 10.0);
+        assert!(config.pause_based_confirm);
     }
 }

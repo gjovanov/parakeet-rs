@@ -11,19 +11,27 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Load .env if present
+# Save caller's overrides before sourcing .env
+_PORT="${PORT:-}"
+_MAX="${MAX_CONCURRENT_SESSIONS:-}"
+
+# Load .env if present (caller env vars take precedence below)
 if [ -f ".env" ]; then
     set -a
     source .env
     set +a
 fi
 
+# Restore caller overrides (.env must not clobber explicit env vars)
+[ -n "$_PORT" ] && PORT="$_PORT"
+[ -n "$_MAX" ] && MAX_CONCURRENT_SESSIONS="$_MAX"
+
 # CPU mode: force correct values (override stale .env entries)
 export ORT_DYLIB_PATH="/usr/local/lib/libonnxruntime.so"
 export USE_GPU="false"
 export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
-PORT="${PORT:-80}"
+PORT="${PORT:-8080}"
 MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-10}"
 
 # Build command args

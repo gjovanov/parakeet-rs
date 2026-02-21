@@ -136,6 +136,7 @@ struct Args {
 }
 
 impl Args {
+    #[allow(dead_code)]
     fn latency_mode(&self) -> LatencyMode {
         if self.lookahead {
             LatencyMode::Lookahead

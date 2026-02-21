@@ -118,6 +118,7 @@ impl SrtConfig {
     }
 
     /// Check if SRT is configured
+    #[allow(dead_code)]
     pub fn is_configured(&self) -> bool {
         !self.encoder_ip.is_empty() && !self.channels.is_empty()
     }

@@ -46,6 +46,7 @@
 mod audio;
 pub mod canary;
 pub mod canary_flash;
+pub mod canary_qwen;
 mod config;
 mod decoder;
 mod decoder_tdt;
@@ -66,9 +67,13 @@ pub mod sortformer_stream;
 pub mod realtime;
 pub mod realtime_canary;
 pub mod realtime_canary_flash;
+pub mod realtime_canary_qwen;
+pub mod realtime_canary_qwen_vad;
 pub mod realtime_tdt;
 pub mod parallel_canary;
+pub mod parallel_canary_qwen;
 pub mod pause_parallel_canary;
+pub mod pause_parallel_canary_qwen;
 pub mod parallel_tdt;
 pub mod pause_parallel_tdt;
 pub mod streaming_transcriber;
@@ -163,10 +168,15 @@ pub use session::{
 
 pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};
 pub use canary_flash::{CanaryFlashConfig, CanaryFlashModel, DecoderKVCache};
+pub use canary_qwen::{CanaryQwenConfig, CanaryQwenModel, QwenTokenizer, QwenKVCache};
 pub use realtime_canary::{CanaryChunkResult, RealtimeCanary, RealtimeCanaryConfig};
 pub use realtime_canary_flash::{CanaryFlashChunkResult, RealtimeCanaryFlash, RealtimeCanaryFlashConfig};
+pub use realtime_canary_qwen::{CanaryQwenChunkResult, RealtimeCanaryQwen, RealtimeCanaryQwenConfig};
+pub use realtime_canary_qwen_vad::{CanaryQwenVadResult, RealtimeCanaryQwenVad, RealtimeCanaryQwenVadConfig};
 pub use parallel_canary::{ParallelCanary, ParallelCanaryConfig};
+pub use parallel_canary_qwen::{ParallelCanaryQwen, ParallelCanaryQwenConfig};
 pub use pause_parallel_canary::{PauseParallelCanary, PauseParallelConfig};
+pub use pause_parallel_canary_qwen::{PauseParallelCanaryQwen, PauseParallelCanaryQwenConfig};
 pub use parallel_tdt::{ParallelTDT, ParallelTDTConfig};
 pub use pause_parallel_tdt::{PauseParallelTDT, PauseParallelTDTConfig};
 
@@ -188,7 +198,7 @@ pub use growing_text::{
 // VoD transcriber exports
 pub use vod_transcriber::{
     SegmentCallback, VodConfig, VodProgress, VodSegment, VodTranscript, VodTranscriberCanary,
-    VodTranscriberTDT, VodWord,
+    VodTranscriberCanaryQwen, VodTranscriberTDT, VodWord,
 };
 
 // Noise cancellation exports

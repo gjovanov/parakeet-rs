@@ -3,7 +3,7 @@
 use super::AudioSource;
 use crate::webrtc_handlers::audio::OpusEncoder;
 use parakeet_rs::noise_cancellation::{create_noise_canceller, NoiseCancellationType};
-use parakeet_rs::{SessionState, TranscriptionSession};
+use parakeet_rs::TranscriptionSession;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
@@ -203,7 +203,7 @@ pub fn run_audio_pipeline(
                         }
 
                         match spawn_ffmpeg(audio_source) {
-                            Ok(mut child) => {
+                            Ok(child) => {
                                 ffmpeg_pid.store(child.id(), Ordering::SeqCst);
                                 eprintln!(
                                     "[Session {}] ffmpeg reconnected with pid {}",

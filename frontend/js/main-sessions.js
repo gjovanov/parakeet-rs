@@ -524,9 +524,15 @@ function showTab(tabName) {
 
 function renderModelSelect() {
   const models = sessionManager.models;
-  elements.modelSelect.innerHTML = models.length
-    ? models.map(m => `<option value="${m.id}">${m.display_name}</option>`).join('')
-    : '<option value="">No models available</option>';
+  const available = models.filter(m => m.is_loaded);
+  const unavailable = models.filter(m => !m.is_loaded);
+  if (available.length === 0 && unavailable.length === 0) {
+    elements.modelSelect.innerHTML = '<option value="">No models available</option>';
+  } else {
+    elements.modelSelect.innerHTML =
+      available.map(m => `<option value="${m.id}">${m.display_name}</option>`).join('') +
+      unavailable.map(m => `<option value="${m.id}" disabled>${m.display_name} (not installed)</option>`).join('');
+  }
 }
 
 function renderMediaSelect() {

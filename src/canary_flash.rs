@@ -90,6 +90,7 @@ pub struct DecoderKVCache {
     /// Configuration
     num_layers: usize,
     num_heads: usize,
+    #[allow(dead_code)]
     head_dim: usize,
 }
 
@@ -247,13 +248,12 @@ impl CanaryFlashModel {
         let mel_filterbank = self.create_mel_filterbank();
         let mel_spectrogram = mel_filterbank.dot(&spectrogram);
         let mel_spectrogram = mel_spectrogram.mapv(|x| (x.max(1e-10)).ln());
-        let mel_spectrogram = mel_spectrogram.t().to_owned();
+        let mel_spectrogram = mel_spectrogram.t().as_standard_layout().into_owned();
         let mel_spectrogram = self.normalize_features(mel_spectrogram)?;
-
         let time_steps = mel_spectrogram.shape()[0];
         let n_mels = mel_spectrogram.shape()[1];
         let mel_3d = mel_spectrogram
-            .into_shape((1, time_steps, n_mels))
+            .into_shape_with_order((1, time_steps, n_mels))
             .map_err(|e| Error::Audio(format!("Failed to reshape features: {}", e)))?;
 
         Ok(mel_3d)
@@ -330,7 +330,7 @@ impl CanaryFlashModel {
 
         let features_transposed = features
             .clone()
-            .into_shape((batch_size, time_steps, n_mels))
+            .into_shape_with_order((batch_size, time_steps, n_mels))
             .map_err(|e| Error::Model(format!("Failed to reshape: {}", e)))?;
 
         let mut transposed = Array3::<f32>::zeros((batch_size, n_mels, time_steps));
@@ -639,12 +639,26 @@ fn extract_next_token(outputs: &SessionOutputs<'_>) -> Result<i64> {
         .map_err(|e| Error::Model(format!("Failed to extract logits: {}", e)))?;
 
     let logits_dims: &[i64] = logits_shape.as_ref();
-    let vocab_size = logits_dims[2] as usize;
-    let seq_len = logits_dims[1] as usize;
 
-    // Get logits from the last sequence position
-    let last_pos_start = (seq_len - 1) * vocab_size;
-    let last_logits = &logits_data[last_pos_start..last_pos_start + vocab_size];
+    // Handle both 2D [batch, vocab_size] (KV-cached single-token step)
+    // and 3D [batch, seq_len, vocab_size] (multi-token / full decode step)
+    let last_logits: &[f32] = match logits_dims.len() {
+        2 => {
+            let vocab_size = logits_dims[1] as usize;
+            &logits_data[..vocab_size]
+        }
+        3 => {
+            let vocab_size = logits_dims[2] as usize;
+            let seq_len = logits_dims[1] as usize;
+            let last_pos_start = (seq_len - 1) * vocab_size;
+            &logits_data[last_pos_start..last_pos_start + vocab_size]
+        }
+        _ => {
+            return Err(Error::Model(format!(
+                "Unexpected logits dimensions: {:?}", logits_dims
+            )));
+        }
+    };
 
     // Greedy decoding: select token with highest logit
     let next_token: i64 = last_logits
