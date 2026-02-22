@@ -415,11 +415,25 @@ fn run_transcription_inner(
                         let growing_result = growing_merger.push(&full_text, false);
                         let new_finalized = growing_merger.get_finalized_sentences().len();
 
-                        // Phase 4: Emit FINALs for newly finalized sentences
+                        // Phase 4: Collect FINALs for newly finalized sentences
                         // - Always advance finalized_word_count
                         // - Strip trailing echo fragments (< 3 words after sentence boundary)
-                        // - Skip FINALs that overlap with recent emissions
+                        // - Skip FINALs that overlap with recent emissions (stopword-filtered)
                         // - Suppress fragment FINALs (< 4 words AND < 15 chars)
+                        // - Merge consecutive short FINALs (< 5 words) into one
+                        let mut collected_finals: Vec<String> = Vec::new();
+
+                        // Stopwords for content-word echo dedup (German + English)
+                        let stopwords: std::collections::HashSet<&str> = [
+                            "der", "die", "das", "und", "ist", "in", "von", "zu", "mit",
+                            "für", "auf", "ein", "eine", "es", "sie", "er", "wir", "ich",
+                            "nicht", "auch", "den", "dem", "des", "am", "im", "an", "um",
+                            "nach", "bei", "aus", "wie", "oder", "aber", "noch", "wird",
+                            "hat", "sind", "war", "dass", "sich", "nur", "so", "vor",
+                            "the", "a", "an", "and", "is", "in", "of", "to", "with",
+                            "for", "on", "it", "he", "she", "we", "i", "not", "also",
+                        ].iter().copied().collect();
+
                         for i in prev_finalized..new_finalized {
                             let fs = &growing_merger.get_finalized_sentences()[i];
                             let trimmed = fs.text.trim();
@@ -453,35 +467,44 @@ fn run_transcription_inner(
                                 continue;
                             }
 
-                            // Check overlap with recent FINALs (last 8):
-                            // - Bag-of-words: >50% overlap in either direction
-                            // - Substring: short FINALs that are substrings of recent ones (or vice versa)
-                            // - Exact duplicate: identical text
+                            // Echo dedup: check overlap with recent FINALs (last 8)
+                            // Uses stopword-filtered content words for more accurate overlap
                             let cleaned_lower = cleaned.to_lowercase();
-                            let curr_word_set: std::collections::HashSet<String> = cleaned_lower
+                            let curr_all_words: std::collections::HashSet<String> = cleaned_lower
                                 .split_whitespace()
                                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
                                 .filter(|w| !w.is_empty())
                                 .collect();
-                            let is_echo = recent_finals.iter().rev().take(8).any(|prev| {
+                            let curr_content: std::collections::HashSet<&String> = curr_all_words
+                                .iter()
+                                .filter(|w| !stopwords.contains(w.as_str()))
+                                .collect();
+
+                            let is_echo = recent_finals.iter().rev().take(15).any(|prev| {
                                 let prev_lower = prev.to_lowercase();
                                 // Exact duplicate
                                 if cleaned_lower == prev_lower { return true; }
                                 // Substring check for short FINALs
-                                if curr_word_set.len() < 4 && prev_lower.contains(&cleaned_lower) { return true; }
-                                if curr_word_set.len() < 4 && cleaned_lower.contains(&prev_lower) { return true; }
-                                // Bag-of-words overlap
-                                if curr_word_set.len() >= 3 {
-                                    let prev_words: std::collections::HashSet<String> = prev_lower
+                                if curr_all_words.len() < 4 && prev_lower.contains(&cleaned_lower) { return true; }
+                                if curr_all_words.len() < 4 && cleaned_lower.contains(&prev_lower) { return true; }
+                                // Content-word overlap (stopword-filtered, threshold 0.65)
+                                if curr_content.len() >= 2 {
+                                    let prev_all: std::collections::HashSet<String> = prev_lower
                                         .split_whitespace()
                                         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
                                         .filter(|w| !w.is_empty())
                                         .collect();
-                                    if prev_words.is_empty() { return false; }
-                                    let common = curr_word_set.intersection(&prev_words).count();
-                                    let overlap_curr = common as f64 / curr_word_set.len() as f64;
-                                    let overlap_prev = common as f64 / prev_words.len() as f64;
-                                    if overlap_curr > 0.5 || overlap_prev > 0.5 { return true; }
+                                    let prev_content: std::collections::HashSet<&String> = prev_all
+                                        .iter()
+                                        .filter(|w| !stopwords.contains(w.as_str()))
+                                        .collect();
+                                    if prev_content.is_empty() { return false; }
+                                    let common = curr_content.iter()
+                                        .filter(|w| prev_content.contains(*w))
+                                        .count();
+                                    let overlap_curr = common as f64 / curr_content.len() as f64;
+                                    let overlap_prev = common as f64 / prev_content.len() as f64;
+                                    if overlap_curr > 0.50 || overlap_prev > 0.50 { return true; }
                                 }
                                 false
                             });
@@ -490,14 +513,38 @@ fn run_transcription_inner(
                                 continue;
                             }
 
-                            recent_finals.push(cleaned.clone());
-                            // Keep only last 10 FINALs for dedup
-                            if recent_finals.len() > 10 {
+                            collected_finals.push(cleaned);
+                        }
+
+                        // Phase 4a: Merge consecutive short FINALs (< 5 words) into one
+                        let mut merged_finals: Vec<String> = Vec::new();
+                        for text in collected_finals {
+                            let wc = text.split_whitespace().count();
+                            if wc < 5 {
+                                // Short FINAL — try merging with previous
+                                if let Some(last) = merged_finals.last_mut() {
+                                    let combined_wc = last.split_whitespace().count() + wc;
+                                    if combined_wc <= 15 {
+                                        last.push(' ');
+                                        last.push_str(&text);
+                                        continue;
+                                    }
+                                }
+                            }
+                            merged_finals.push(text);
+                        }
+
+                        // Emit merged FINALs
+                        for cleaned in merged_finals {
+                            let normalized = emitters::normalize_text(&cleaned);
+
+                            recent_finals.push(normalized.clone());
+                            if recent_finals.len() > 20 {
                                 recent_finals.remove(0);
                             }
 
                             let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
-                                text: cleaned,
+                                text: normalized,
                                 start_time: ref_segment.start_time,
                                 end_time: ref_segment.end_time,
                                 speaker: ref_segment.speaker,
@@ -531,10 +578,10 @@ fn run_transcription_inner(
                                 let overlap = if prev_words.is_empty() { 1.0 }
                                     else { common as f64 / prev_words.len() as f64 };
 
-                                if overlap < 0.3 && prev_words.len() >= 4 {
+                                if overlap < 0.15 && prev_words.len() >= 8 {
                                     // Transition detected — check not already in recent_finals (dedup)
                                     let prev_lower = prev_trimmed.to_lowercase();
-                                    let already_emitted = recent_finals.iter().rev().take(8).any(|f| {
+                                    let already_emitted = recent_finals.iter().rev().take(15).any(|f| {
                                         let f_lower = f.to_lowercase();
                                         if f_lower == prev_lower { return true; }
                                         // Bag-of-words check
@@ -564,7 +611,7 @@ fn run_transcription_inner(
                                         );
 
                                         recent_finals.push(promoted_text.clone());
-                                        if recent_finals.len() > 10 {
+                                        if recent_finals.len() > 20 {
                                             recent_finals.remove(0);
                                         }
 

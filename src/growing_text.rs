@@ -160,17 +160,22 @@ impl GrowingTextMerger {
             // No anchor found in working tokens.
 
             // Check for divergence (complete restart detection)
-            // If the new text's first 5 tokens share < 30% similarity with the
-            // last 5 working tokens, this looks like a complete restart
-            if self.working_tokens.len() >= 5 && effective_tokens.len() >= 5 {
-                let tail_start = self.working_tokens.len() - 5;
+            // If the new text's first 8 tokens share < 20% similarity with the
+            // last 8 working tokens, this looks like a complete restart.
+            // Requires at least 10 working tokens to avoid triggering on short buffers.
+            let div_window = 8;
+            if self.working_tokens.len() >= div_window
+                && self.working_tokens.len() >= 10
+                && effective_tokens.len() >= div_window
+            {
+                let tail_start = self.working_tokens.len() - div_window;
                 let tail_slice = &self.working_tokens[tail_start..];
-                let new_head: Vec<String> = effective_tokens[..5].iter().map(|s| s.to_string()).collect();
+                let new_head: Vec<String> = effective_tokens[..div_window].iter().map(|s| s.to_string()).collect();
                 let matching = tail_slice.iter().zip(new_head.iter())
                     .filter(|(a, b)| Self::token_similarity(a, b) > 0.7)
                     .count();
-                let similarity = matching as f32 / 5.0;
-                if similarity < 0.3 {
+                let similarity = matching as f32 / div_window as f32;
+                if similarity < 0.2 {
                     eprintln!(
                         "[GrowingTextMerger] Divergence detected (similarity {:.0}%), finalizing and restarting",
                         similarity * 100.0
@@ -260,9 +265,10 @@ impl GrowingTextMerger {
                 self.stable_count = 0;
                 self.last_stable_buffer = self.working_buffer.clone();
             }
-            if self.stable_count >= 3
+            if self.stable_count >= 5
                 && !self.working_buffer.is_empty()
                 && self.ends_with_sentence_terminator(&self.working_buffer)
+                && self.working_tokens.len() >= 5
             {
                 eprintln!(
                     "[GrowingTextMerger] Stable trailing sentence detected ({} pushes), finalizing: \"{}\"",
@@ -765,8 +771,13 @@ impl GrowingTextMerger {
     /// has started after them. If the buffer contains "First sentence. Second sentence.
     /// Third partial text", everything up to the last terminator with ≥ 2 words after it
     /// is finalized, and only "Third partial text" remains as the working buffer.
+    ///
+    /// To avoid premature finalization on periods that are not true sentence boundaries
+    /// (dates like "am 19.", abbreviations, incomplete words), we require at least 5 words
+    /// before the terminator for it to qualify as a sentence boundary.
     fn finalize_inner_sentences(&mut self) {
         // Find the LAST sentence terminator that has ≥ 2 words after it
+        // AND ≥ 5 words before it (sentence boundary confidence check)
         let mut split_pos = None;
         for (i, c) in self.working_buffer.char_indices() {
             let is_terminator = match c {
@@ -777,7 +788,9 @@ impl GrowingTextMerger {
             if is_terminator {
                 let after_pos = i + c.len_utf8();
                 let after = self.working_buffer[after_pos..].trim();
-                if after.split_whitespace().count() >= 2 {
+                let before = self.working_buffer[..i].trim();
+                let words_before = before.split_whitespace().count();
+                if after.split_whitespace().count() >= 2 && words_before >= 5 {
                     split_pos = Some(after_pos);
                 }
             }
@@ -1354,8 +1367,8 @@ mod tests {
     fn test_inner_sentence_finalization() {
         let mut merger = GrowingTextMerger::new();
 
-        // Push text with a complete inner sentence
-        merger.push("Erster Satz. Zweiter Satz. Dritter Teil", false);
+        // Push text with a complete inner sentence (≥5 words before terminator)
+        merger.push("Dies ist der erste komplette Satz. Zweiter Satz folgt hier. Dritter Teil", false);
 
         // The inner sentences should be finalized (since there are ≥2 words after the last terminator)
         let finalized = merger.get_finalized_sentences();
@@ -1714,9 +1727,9 @@ mod tests {
     fn test_current_sentence_extraction() {
         let mut merger = GrowingTextMerger::new();
 
-        merger.push("First sentence. Second partial", false);
+        merger.push("This is the very first complete sentence. Second partial text here", false);
         let finalized = merger.get_finalized_sentences();
-        // Inner finalization should have finalized "First sentence."
+        // Inner finalization should have finalized the first sentence (≥5 words before terminator)
         // and current_sentence should be something about the partial
         assert!(finalized.len() >= 1);
     }
