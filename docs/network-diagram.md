@@ -21,14 +21,16 @@ graph LR
     subgraph VPC["AWS VPC (10.84.17.0/24)"]
         SRTFanout["SRT Fanout<br/>(GStreamer / Docker)<br/>10.84.17.100<br/>:24001-24019"]
 
-        subgraph Server["WebRTC-Server — 10.84.17.28"]
+        subgraph Server[" "]
+            ServerLabel["10.84.17.28"]
             Coturn["coturn<br/>(Docker)<br/>:3478"]
             WebRTCServer["WebRTC-Server<br/>(parakeet-rs)<br/>:80"]
+            style ServerLabel fill:none,stroke:none,color:#333
         end
     end
 
     Encoder -- "SRT caller<br/>UDP :14001-14019" --> SRTFanout
-    SRTFanout -- "SRT listener<br/>UDP :24001-24019" --> WebRTCServer
+    SRTFanout -- "SRT<br/>UDP :24001-24019" --> WebRTCServer
 
     Browser -- "HTTP/WS<br/>TCP :80" --> WebRTCServer
     Browser -- "TURN Allocate<br/>UDP :3478" --> Coturn
