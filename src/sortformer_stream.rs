@@ -10,9 +10,9 @@ use std::collections::VecDeque;
 use std::path::Path;
 
 const SAMPLE_RATE: usize = 16000;
-const FRAME_DURATION: f32 = 0.08; // 80ms per model frame
-const CHUNK_FRAMES: usize = 124; // Frames per Sortformer chunk
-const SUBSAMPLING: usize = 8;
+const _FRAME_DURATION: f32 = 0.08; // 80ms per model frame
+const _CHUNK_FRAMES: usize = 124; // Frames per Sortformer chunk
+const _SUBSAMPLING: usize = 8;
 
 // Minimum audio needed before first diarization (samples)
 // ~10 seconds = CHUNK_FRAMES * SUBSAMPLING * HOP_LENGTH / SAMPLE_RATE

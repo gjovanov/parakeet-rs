@@ -619,7 +619,7 @@ impl VodTranscriberTDT {
         let mut seen_sentences: HashSet<String> = HashSet::new();
 
         for (i, result) in chunk_results.iter().enumerate() {
-            let overlap_start = if i == 0 {
+            let _overlap_start = if i == 0 {
                 0.0
             } else {
                 result.start_time
@@ -1054,6 +1054,260 @@ impl VodTranscriberCanary {
     }
 
     /// Merge and deduplicate (same logic as TDT)
+    fn merge_and_deduplicate(&self, chunk_results: Vec<ChunkResult>) -> Vec<VodSegment> {
+        if chunk_results.is_empty() {
+            return Vec::new();
+        }
+
+        let mut all_segments: Vec<VodSegment> = Vec::new();
+        let mut seen_sentences: HashSet<String> = HashSet::new();
+
+        for (i, result) in chunk_results.iter().enumerate() {
+            let overlap_end = result.start_time + self.config.overlap_duration_secs;
+
+            for segment in &result.segments {
+                if i > 0 && segment.start < overlap_end {
+                    let normalized = self.normalize_text(&segment.text);
+
+                    let is_duplicate = seen_sentences.iter().any(|seen| {
+                        self.jaccard_similarity(&normalized, seen) >= self.config.dedup_threshold
+                    });
+
+                    if is_duplicate {
+                        continue;
+                    }
+                }
+
+                let normalized = self.normalize_text(&segment.text);
+                seen_sentences.insert(normalized);
+                all_segments.push(segment.clone());
+            }
+        }
+
+        for (i, segment) in all_segments.iter_mut().enumerate() {
+            segment.id = i;
+        }
+
+        all_segments.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+        all_segments
+    }
+
+    fn normalize_text(&self, text: &str) -> String {
+        text.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn jaccard_similarity(&self, a: &str, b: &str) -> f32 {
+        let words_a: HashSet<&str> = a.split_whitespace().collect();
+        let words_b: HashSet<&str> = b.split_whitespace().collect();
+
+        if words_a.is_empty() && words_b.is_empty() {
+            return 1.0;
+        }
+
+        let intersection = words_a.intersection(&words_b).count();
+        let union = words_a.union(&words_b).count();
+
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f32 / union as f32
+        }
+    }
+}
+
+// ============================================================================
+// VoD Transcriber - Canary-Qwen
+// ============================================================================
+
+/// VoD transcriber using Canary-Qwen 2.5B SALM model
+pub struct VodTranscriberCanaryQwen {
+    config: VodConfig,
+    model_path: PathBuf,
+    exec_config: ExecutionConfig,
+}
+
+impl VodTranscriberCanaryQwen {
+    /// Create a new VoD transcriber for Canary-Qwen model
+    pub fn new<P: AsRef<Path>>(
+        model_path: P,
+        config: VodConfig,
+        exec_config: Option<ExecutionConfig>,
+    ) -> Result<Self> {
+        Ok(Self {
+            config,
+            model_path: model_path.as_ref().to_path_buf(),
+            exec_config: exec_config.unwrap_or_default(),
+        })
+    }
+
+    /// Transcribe an audio file
+    pub fn transcribe_file<P: AsRef<Path>>(
+        &self,
+        wav_path: P,
+        session_id: &str,
+        progress_callback: Option<ProgressCallback>,
+    ) -> Result<VodTranscript> {
+        self.transcribe_file_with_segments(wav_path, session_id, progress_callback, None)
+    }
+
+    /// Transcribe an audio file with optional segment callback for real-time updates
+    pub fn transcribe_file_with_segments<P: AsRef<Path>>(
+        &self,
+        wav_path: P,
+        session_id: &str,
+        progress_callback: Option<ProgressCallback>,
+        segment_callback: Option<SegmentCallback>,
+    ) -> Result<VodTranscript> {
+        use crate::canary_qwen::{CanaryQwenConfig, CanaryQwenModel};
+
+        let created_at = Utc::now();
+        let wav_path = wav_path.as_ref();
+
+        // Load audio
+        let (samples, spec) = audio::load_audio(wav_path)?;
+        let sample_rate = spec.sample_rate as usize;
+        let channels = spec.channels;
+
+        // Convert to mono if needed
+        let samples = if channels > 1 {
+            samples
+                .chunks(channels as usize)
+                .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+                .collect()
+        } else {
+            samples
+        };
+
+        let duration_secs = samples.len() as f32 / sample_rate as f32;
+
+        // Create chunks (30s with 5s overlap for canary-qwen)
+        let chunks = self.create_chunks(&samples, sample_rate);
+        let total_chunks = chunks.len();
+
+        eprintln!(
+            "[VoD CanaryQwen] Processing {} chunks ({:.1} min file, {:.0}s chunks, {:.0}s overlap)",
+            total_chunks,
+            duration_secs / 60.0,
+            self.config.chunk_duration_secs,
+            self.config.overlap_duration_secs
+        );
+
+        // Process chunks sequentially (single worker due to large model)
+        let qwen_config = CanaryQwenConfig {
+            language: self.config.language.clone(),
+            ..CanaryQwenConfig::from_env()
+        };
+
+        let mut model = CanaryQwenModel::from_pretrained(
+            &self.model_path,
+            Some(self.exec_config.clone()),
+            Some(qwen_config),
+        )?;
+
+        let mut results = Vec::new();
+        let completed_count = Arc::new(AtomicUsize::new(0));
+
+        for chunk in chunks {
+            let chunk_index = chunk.index;
+            let chunk_offset = chunk.start_time;
+            let chunk_duration = chunk.end_time - chunk.start_time;
+
+            let text = model.transcribe(&chunk.samples)?;
+
+            let segments = if text.is_empty() {
+                Vec::new()
+            } else {
+                VodTranscriberCanary::text_to_segments_with_estimated_timing(
+                    &text,
+                    chunk_offset,
+                    chunk_duration,
+                    chunk_index * 1000,
+                )
+            };
+
+            let completed = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+
+            if let Some(ref callback) = progress_callback {
+                callback(VodProgress {
+                    total_chunks,
+                    completed_chunks: completed,
+                    current_chunk: chunk_index,
+                    percent: (completed as f32 / total_chunks as f32) * 100.0,
+                });
+            }
+
+            if let Some(ref callback) = segment_callback {
+                let is_final_chunk = completed == total_chunks;
+                callback(&segments, chunk_index, is_final_chunk);
+            }
+
+            eprintln!(
+                "[VoD CanaryQwen] Completed chunk {}/{} ({:.1}s - {:.1}s)",
+                completed, total_chunks, chunk.start_time, chunk.end_time
+            );
+
+            results.push(ChunkResult {
+                index: chunk_index,
+                segments,
+                start_time: chunk.start_time,
+                end_time: chunk.end_time,
+            });
+        }
+
+        // Merge and deduplicate
+        let segments = self.merge_and_deduplicate(results);
+
+        let completed_at = Utc::now();
+
+        Ok(VodTranscript {
+            session_id: session_id.to_string(),
+            model: "canary-qwen-2b".to_string(),
+            language: self.config.language.clone(),
+            duration_secs,
+            created_at,
+            completed_at,
+            segments,
+        })
+    }
+
+    /// Create audio chunks with overlap
+    fn create_chunks(&self, samples: &[f32], sample_rate: usize) -> Vec<AudioChunk> {
+        let chunk_samples = (self.config.chunk_duration_secs * sample_rate as f32) as usize;
+        let overlap_samples = (self.config.overlap_duration_secs * sample_rate as f32) as usize;
+        let step_samples = chunk_samples - overlap_samples;
+
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        let mut index = 0;
+
+        while start < samples.len() {
+            let end = (start + chunk_samples).min(samples.len());
+            let chunk_samples_vec = samples[start..end].to_vec();
+
+            let start_time = start as f32 / sample_rate as f32;
+            let end_time = end as f32 / sample_rate as f32;
+
+            chunks.push(AudioChunk {
+                index,
+                samples: chunk_samples_vec,
+                start_time,
+                end_time,
+            });
+
+            start += step_samples;
+            index += 1;
+        }
+
+        chunks
+    }
+
+    /// Merge and deduplicate
     fn merge_and_deduplicate(&self, chunk_results: Vec<ChunkResult>) -> Vec<VodSegment> {
         if chunk_results.is_empty() {
             return Vec::new();

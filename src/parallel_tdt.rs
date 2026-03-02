@@ -85,6 +85,7 @@ struct TranscriptionResult {
 /// Merges overlapping transcription results
 struct ResultMerger {
     last_emitted_end_chunk: i64,
+    #[allow(dead_code)]
     buffer_size: usize,
     min_window_size: usize,
 }

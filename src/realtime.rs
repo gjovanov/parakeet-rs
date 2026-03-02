@@ -180,12 +180,14 @@ impl RealtimeConfig {
 }
 
 /// Internal message types for thread communication
+#[allow(dead_code)]
 #[derive(Debug)]
 enum AsrMessage {
     Result(StreamingResult),
     Stop,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum DiarMessage {
     SpeakerUpdate {
@@ -196,6 +198,7 @@ enum DiarMessage {
 }
 
 /// Pending utterance waiting for speaker attribution
+#[allow(dead_code)]
 struct PendingUtterance {
     utterance_id: u64,
     text: String,

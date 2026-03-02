@@ -1,6 +1,6 @@
 //! Application state types for the WebRTC transcription server
 
-use crate::api::sessions::{ParallelConfig, PauseConfig};
+use crate::api::sessions::{GrowingSegmentsConfig, ParallelConfig, PauseConfig};
 use crate::config::RuntimeConfig;
 use crate::srt_config::SrtConfig;
 use parakeet_rs::{SharedMediaManager, SharedModelRegistry, SharedSessionManager};
@@ -20,6 +20,7 @@ pub struct FabConfig {
 }
 
 /// Client connection with WebRTC peer connection
+#[allow(dead_code)]
 pub struct ClientConnection {
     pub id: String,
     pub session_id: String,
@@ -57,6 +58,8 @@ pub struct AppState {
     pub parallel_configs: RwLock<HashMap<String, ParallelConfig>>,
     /// Per-session pause configs (for pause-related modes)
     pub pause_configs: RwLock<HashMap<String, PauseConfig>>,
+    /// Per-session growing segments configs
+    pub growing_segments_configs: RwLock<HashMap<String, GrowingSegmentsConfig>>,
     /// SRT stream configuration (optional)
     pub srt_config: Option<SrtConfig>,
     /// Whether FAB forwarding is enabled by default

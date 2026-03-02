@@ -39,12 +39,15 @@ pub fn run_vod_transcription(
     rt.block_on(session.set_state(SessionState::Running));
 
     // Check if Canary or TDT model
-    let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash";
+    let is_canary_qwen = model_id == "canary-qwen-2b";
+    let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash" || is_canary_qwen;
 
     // Determine config based on model type:
     // - Use 1 worker to avoid GPU OOM when processing concurrently
-    // - 3-min chunks fit comfortably in GPU VRAM
-    let (num_workers, chunk_duration, overlap_duration) = if is_canary {
+    // - 3-min chunks for standard models, 30s for canary-qwen (40s training limit)
+    let (num_workers, chunk_duration, overlap_duration) = if is_canary_qwen {
+        (1, 30.0, 5.0)
+    } else if is_canary {
         (1, 180.0, 15.0)
     } else {
         (1, 180.0, 15.0)
@@ -86,14 +89,19 @@ pub fn run_vod_transcription(
 
         for (seg_idx, segment) in segments.iter().enumerate() {
             let is_final = true;
-            let growing_result = merger.push(&segment.text, is_final);
+            let normalized_text = super::emitters::normalize_text(&segment.text);
+            let growing_result = merger.push(&normalized_text, is_final);
+
+            let growing_text = super::emitters::normalize_text(&growing_result.current_sentence);
+            let full_transcript = super::emitters::normalize_text(&growing_result.buffer);
+            let delta = super::emitters::normalize_text(&growing_result.delta);
 
             let subtitle_msg = serde_json::json!({
                 "type": "subtitle",
-                "text": segment.text,
-                "growing_text": growing_result.current_sentence,
-                "full_transcript": growing_result.buffer,
-                "delta": growing_result.delta,
+                "text": normalized_text,
+                "growing_text": growing_text,
+                "full_transcript": full_transcript,
+                "delta": delta,
                 "tail_changed": growing_result.tail_changed,
                 "speaker": segment.speaker,
                 "start": segment.start,
@@ -118,7 +126,17 @@ pub fn run_vod_transcription(
     });
 
     // Run transcription with segment callback
-    let result = if is_canary {
+    let result = if is_canary_qwen {
+        eprintln!("[Session {}] Using Canary-Qwen model for VoD", session.id);
+        match parakeet_rs::vod_transcriber::VodTranscriberCanaryQwen::new(&model_path, vod_config, Some(exec_config)) {
+            Ok(transcriber) => transcriber.transcribe_file_with_segments(&wav_path, &session.id, Some(progress_callback), Some(segment_callback)),
+            Err(e) => {
+                eprintln!("[Session {}] Failed to create Canary-Qwen VoD transcriber: {}", session.id, e);
+                rt.block_on(session.set_state(SessionState::Stopped));
+                return;
+            }
+        }
+    } else if is_canary {
         eprintln!("[Session {}] Using Canary model for VoD", session.id);
         match VodTranscriberCanary::new(&model_path, vod_config, Some(exec_config)) {
             Ok(transcriber) => transcriber.transcribe_file_with_segments(&wav_path, &session.id, Some(progress_callback), Some(segment_callback)),

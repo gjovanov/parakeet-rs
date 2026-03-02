@@ -1,11 +1,11 @@
-//! Streaming wrapper for Canary 1B v2 model
+//! Streaming wrapper for Canary-Qwen 2.5B SALM model
 //!
-//! This module provides a streaming interface for the Canary encoder-decoder model,
-//! similar to RealtimeTDT but adapted for the encoder-decoder architecture.
+//! This module provides a streaming interface for the Canary-Qwen encoder-decoder model,
+//! similar to RealtimeCanary but adapted for the larger Canary-Qwen 2.5B architecture.
 //!
 //! ## Text Confirmation Strategy
 //!
-//! Since Canary re-transcribes a sliding window of audio, we need to handle
+//! Since Canary-Qwen re-transcribes a sliding window of audio, we need to handle
 //! overlapping/repeated text carefully:
 //!
 //! 1. Each transcription covers the current buffer window
@@ -15,7 +15,7 @@
 //!
 //! This prevents the same words from being emitted repeatedly.
 
-use crate::canary::{CanaryConfig, CanaryModel};
+use crate::canary_qwen::{CanaryQwenConfig, CanaryQwenModel};
 use crate::error::Result;
 use crate::execution::ModelConfig as ExecutionConfig;
 use crate::streaming_transcriber::{ModelInfo, StreamingChunkResult, StreamingTranscriber, TranscriptionSegment};
@@ -32,6 +32,9 @@ const MIN_STABLE_COUNT: u32 = 2;
 
 /// Maximum expected words per second of audio (for hallucination length guard)
 const MAX_WORDS_PER_SEC: f32 = 5.0;
+
+/// Maximum audio duration in seconds (model training limit)
+const MAX_BUFFER_SECS: f32 = 40.0;
 
 /// Calculate RMS (root mean square) energy of audio samples
 fn calculate_rms(samples: &[f32]) -> f32 {
@@ -62,7 +65,7 @@ fn truncate_hallucination(text: &str) -> String {
                 let truncate_at = i - consecutive_count + 1;
                 if truncate_at > 0 {
                     eprintln!(
-                        "[RealtimeCanary] Truncating hallucination at word {}: '{}'",
+                        "[RealtimeCanaryQwen] Truncating hallucination at word {}: '{}'",
                         truncate_at, words[i]
                     );
                     return words[..truncate_at].join(" ");
@@ -94,7 +97,7 @@ fn truncate_hallucination(text: &str) -> String {
                     pattern_count += 1;
                     if pattern_count >= 3 {
                         eprintln!(
-                            "[RealtimeCanary] Truncating repeated phrase at {}: '{}'",
+                            "[RealtimeCanaryQwen] Truncating repeated phrase at {}: '{}'",
                             i, pattern.join(" ")
                         );
                         if i > 0 {
@@ -113,9 +116,9 @@ fn truncate_hallucination(text: &str) -> String {
     text.to_string()
 }
 
-/// Configuration for streaming Canary processing
+/// Configuration for streaming Canary-Qwen processing
 #[derive(Debug, Clone)]
-pub struct RealtimeCanaryConfig {
+pub struct RealtimeCanaryQwenConfig {
     /// Buffer size in seconds before processing
     pub buffer_size_secs: f32,
     /// Minimum audio to accumulate before first transcription
@@ -124,7 +127,7 @@ pub struct RealtimeCanaryConfig {
     pub process_interval_secs: f32,
     /// Target language code
     pub language: String,
-    /// Enable pause-based confirmation (default: true for speedy mode)
+    /// Enable pause-based confirmation (default: false)
     /// When true, detected pauses force-confirm text, bypassing MIN_STABLE_COUNT
     pub pause_based_confirm: bool,
     /// Minimum pause duration in seconds to trigger confirmation (default: 0.6)
@@ -132,12 +135,11 @@ pub struct RealtimeCanaryConfig {
     /// Audio RMS below this is considered silence (default: 0.008)
     pub silence_energy_threshold: f32,
     /// When true, return full buffer transcription as partial instead of doing
-    /// word-level confirmation. Use for growing_segments mode where the
-    /// GrowingTextMerger handles finalization.
+    /// word-level confirmation. Use for growing_segments mode.
     pub emit_full_text: bool,
 }
 
-impl Default for RealtimeCanaryConfig {
+impl Default for RealtimeCanaryQwenConfig {
     fn default() -> Self {
         Self {
             buffer_size_secs: 10.0,
@@ -152,13 +154,13 @@ impl Default for RealtimeCanaryConfig {
     }
 }
 
-/// Streaming Canary transcriber
+/// Streaming Canary-Qwen transcriber
 ///
 /// Accumulates audio in a buffer and processes periodically,
 /// using the encoder-decoder model for transcription.
-pub struct RealtimeCanary {
-    model: CanaryModel,
-    config: RealtimeCanaryConfig,
+pub struct RealtimeCanaryQwen {
+    model: CanaryQwenModel,
+    config: RealtimeCanaryQwenConfig,
 
     /// Audio buffer
     audio_buffer: VecDeque<f32>,
@@ -205,29 +207,34 @@ pub struct RealtimeCanary {
     diarizer: Option<SortformerStream>,
 }
 
-impl RealtimeCanary {
-    /// Create a new streaming Canary transcriber
+impl RealtimeCanaryQwen {
+    /// Create a new streaming Canary-Qwen transcriber
     pub fn new<P: AsRef<Path>>(
         model_path: P,
         exec_config: Option<ExecutionConfig>,
-        config: Option<RealtimeCanaryConfig>,
+        config: Option<RealtimeCanaryQwenConfig>,
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
 
-        let canary_config = CanaryConfig {
+        let canary_config = CanaryQwenConfig {
             language: config.language.clone(),
             ..Default::default()
         };
 
-        let model = CanaryModel::from_pretrained(model_path, exec_config, Some(canary_config))?;
+        let model = CanaryQwenModel::from_pretrained(model_path, exec_config, Some(canary_config))?;
 
-        let buffer_size_samples = (config.buffer_size_secs * SAMPLE_RATE as f32) as usize;
+        // Cap buffer_size_secs at model training limit
+        let buffer_size_secs = config.buffer_size_secs.min(MAX_BUFFER_SECS);
+        let buffer_size_samples = (buffer_size_secs * SAMPLE_RATE as f32) as usize;
         let process_interval_samples = (config.process_interval_secs * SAMPLE_RATE as f32) as usize;
         let min_audio_samples = (config.min_audio_secs * SAMPLE_RATE as f32) as usize;
 
         Ok(Self {
             model,
-            config,
+            config: RealtimeCanaryQwenConfig {
+                buffer_size_secs,
+                ..config
+            },
             audio_buffer: VecDeque::with_capacity(buffer_size_samples),
             buffer_size_samples,
             total_samples_received: 0,
@@ -251,30 +258,32 @@ impl RealtimeCanary {
         })
     }
 
-    /// Create a new streaming Canary transcriber with optional diarization
+    /// Create a new streaming Canary-Qwen transcriber with optional diarization
     #[cfg(feature = "sortformer")]
     pub fn new_with_diarization<P1: AsRef<Path>, P2: AsRef<Path>>(
         model_path: P1,
         diar_path: Option<P2>,
         exec_config: Option<ExecutionConfig>,
-        config: Option<RealtimeCanaryConfig>,
+        config: Option<RealtimeCanaryQwenConfig>,
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
 
-        let canary_config = CanaryConfig {
+        let canary_config = CanaryQwenConfig {
             language: config.language.clone(),
             ..Default::default()
         };
 
-        let model = CanaryModel::from_pretrained(&model_path, exec_config.clone(), Some(canary_config))?;
+        let model = CanaryQwenModel::from_pretrained(&model_path, exec_config.clone(), Some(canary_config))?;
 
-        let buffer_size_samples = (config.buffer_size_secs * SAMPLE_RATE as f32) as usize;
+        // Cap buffer_size_secs at model training limit
+        let buffer_size_secs = config.buffer_size_secs.min(MAX_BUFFER_SECS);
+        let buffer_size_samples = (buffer_size_secs * SAMPLE_RATE as f32) as usize;
         let process_interval_samples = (config.process_interval_secs * SAMPLE_RATE as f32) as usize;
         let min_audio_samples = (config.min_audio_secs * SAMPLE_RATE as f32) as usize;
 
         // Create diarizer if path provided
         let diarizer = if let Some(diar_path) = diar_path {
-            eprintln!("[RealtimeCanary] Creating diarizer from {:?}", diar_path.as_ref());
+            eprintln!("[RealtimeCanaryQwen] Creating diarizer from {:?}", diar_path.as_ref());
             Some(SortformerStream::with_config(
                 diar_path,
                 exec_config,
@@ -286,7 +295,10 @@ impl RealtimeCanary {
 
         Ok(Self {
             model,
-            config,
+            config: RealtimeCanaryQwenConfig {
+                buffer_size_secs,
+                ..config
+            },
             audio_buffer: VecDeque::with_capacity(buffer_size_samples),
             buffer_size_samples,
             total_samples_received: 0,
@@ -364,7 +376,7 @@ impl RealtimeCanary {
                         self.pause_boundary_time = Some(boundary);
                         self.last_pause_end_time = chunk_end_time;
                         eprintln!(
-                            "[RealtimeCanary] Pause detected at {:.2}s (boundary: {:.2}s)",
+                            "[RealtimeCanaryQwen] Pause detected at {:.2}s (boundary: {:.2}s)",
                             chunk_end_time, boundary
                         );
                     }
@@ -378,7 +390,7 @@ impl RealtimeCanary {
     }
 
     /// Push audio samples and get transcription results
-    pub fn push_audio(&mut self, samples: &[f32]) -> Result<CanaryChunkResult> {
+    pub fn push_audio(&mut self, samples: &[f32]) -> Result<CanaryQwenChunkResult> {
         // Push audio to diarizer for speaker tracking (if available)
         #[cfg(feature = "sortformer")]
         if let Some(diarizer) = &mut self.diarizer {
@@ -405,7 +417,7 @@ impl RealtimeCanary {
 
         // Check if we should process
         if self.audio_buffer.len() < self.min_audio_samples {
-            return Ok(CanaryChunkResult {
+            return Ok(CanaryQwenChunkResult {
                 text: String::new(),
                 is_partial: true,
                 buffer_time: buffer_secs,
@@ -413,7 +425,7 @@ impl RealtimeCanary {
         }
 
         if self.samples_since_last_process < self.process_interval_samples {
-            return Ok(CanaryChunkResult {
+            return Ok(CanaryQwenChunkResult {
                 text: String::new(),
                 is_partial: true,
                 buffer_time: buffer_secs,
@@ -439,7 +451,7 @@ impl RealtimeCanary {
         median
     }
 
-    fn process_buffer(&mut self) -> Result<CanaryChunkResult> {
+    fn process_buffer(&mut self) -> Result<CanaryQwenChunkResult> {
         let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
 
         // Convert buffer to vec
@@ -457,10 +469,10 @@ impl RealtimeCanary {
         // Anomaly detection: if inference time > 5x the rolling median, skip result
         if median > 0 && inference_ms > (median as f32 * INFERENCE_TIME_ANOMALY_MULTIPLIER) as u32 {
             eprintln!(
-                "[RealtimeCanary] WARNING: Inference anomaly detected ({}ms vs {}ms median), skipping result",
+                "[RealtimeCanaryQwen] WARNING: Inference anomaly detected ({}ms vs {}ms median), skipping result",
                 inference_ms, median
             );
-            return Ok(CanaryChunkResult {
+            return Ok(CanaryQwenChunkResult {
                 text: String::new(),
                 is_partial: true,
                 buffer_time: buffer_secs,
@@ -475,7 +487,7 @@ impl RealtimeCanary {
         let word_count = text.split_whitespace().count();
         let text = if word_count > max_expected_words && max_expected_words > 0 {
             eprintln!(
-                "[RealtimeCanary] WARNING: Output too long ({} words for {:.1}s buffer), truncating to {}",
+                "[RealtimeCanaryQwen] WARNING: Output too long ({} words for {:.1}s buffer), truncating to {}",
                 word_count, buffer_secs, max_expected_words
             );
             text.split_whitespace()
@@ -490,7 +502,7 @@ impl RealtimeCanary {
         // and skip word-level confirmation. The growing text merger handles finalization.
         if self.config.emit_full_text {
             self.last_transcription = text.clone();
-            return Ok(CanaryChunkResult {
+            return Ok(CanaryQwenChunkResult {
                 text,
                 is_partial: true,
                 buffer_time: buffer_secs,
@@ -539,7 +551,7 @@ impl RealtimeCanary {
                     let new_confirmed: Vec<&str> = stable_words[self.confirmed_word_count..].to_vec();
                     if !new_confirmed.is_empty() {
                         eprintln!(
-                            "[RealtimeCanary] Pause-based force confirm: {} words",
+                            "[RealtimeCanaryQwen] Pause-based force confirm: {} words",
                             new_confirmed.len()
                         );
                         self.pause_boundary_time = None; // Consume the pause
@@ -612,7 +624,7 @@ impl RealtimeCanary {
                 self.confirmed_end_time,
             ));
 
-            eprintln!("[RealtimeCanary] Confirmed: \"{}\" (total: {} words)",
+            eprintln!("[RealtimeCanaryQwen] Confirmed: \"{}\" (total: {} words)",
                 new_confirmed_text, self.confirmed_word_count);
 
             // Reset pending
@@ -623,9 +635,8 @@ impl RealtimeCanary {
         self.last_transcription = text.clone();
 
         // Return the unstable portion as partial (what's still being refined)
-        // Use buffer_start_time for partial segment start rather than confirmed_end_time
         let partial_text = unstable_words.join(" ");
-        Ok(CanaryChunkResult {
+        Ok(CanaryQwenChunkResult {
             text: partial_text,
             is_partial: true,
             buffer_time: buffer_secs,
@@ -633,9 +644,9 @@ impl RealtimeCanary {
     }
 
     /// Finalize transcription
-    pub fn finalize(&mut self) -> Result<CanaryChunkResult> {
+    pub fn finalize(&mut self) -> Result<CanaryQwenChunkResult> {
         if self.audio_buffer.is_empty() {
-            return Ok(CanaryChunkResult {
+            return Ok(CanaryQwenChunkResult {
                 text: self.last_transcription.clone(),
                 is_partial: false,
                 buffer_time: 0.0,
@@ -648,7 +659,7 @@ impl RealtimeCanary {
 
         self.audio_buffer.clear();
 
-        Ok(CanaryChunkResult {
+        Ok(CanaryQwenChunkResult {
             text,
             is_partial: false,
             buffer_time: 0.0,
@@ -691,14 +702,13 @@ impl RealtimeCanary {
 
     /// Set the target language
     pub fn set_language(&mut self, lang: &str) {
-        self.model.set_language(lang);
         self.config.language = lang.to_string();
     }
 }
 
-/// Result from Canary chunk processing
+/// Result from Canary-Qwen chunk processing
 #[derive(Debug, Clone)]
-pub struct CanaryChunkResult {
+pub struct CanaryQwenChunkResult {
     /// Transcribed text
     pub text: String,
     /// Whether this is a partial (in-progress) transcription
@@ -711,23 +721,20 @@ pub struct CanaryChunkResult {
 // StreamingTranscriber implementation
 // ============================================================================
 
-impl StreamingTranscriber for RealtimeCanary {
+impl StreamingTranscriber for RealtimeCanaryQwen {
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            id: "canary-1b".to_string(),
-            display_name: "Canary 1B v2".to_string(),
-            description: "NVIDIA's Canary 1B encoder-decoder model for multilingual ASR".to_string(),
+            id: "canary-qwen-2b".to_string(),
+            display_name: "Canary-Qwen 2.5B".to_string(),
+            description: "NVIDIA's Canary-Qwen 2.5B SALM model for English ASR".to_string(),
             supports_diarization: self.has_diarization(),
-            languages: vec![
-                "en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string(),
-                "it".to_string(), "pt".to_string(), "nl".to_string(), "pl".to_string(),
-            ],
+            languages: vec!["en".to_string()],
             is_loaded: true,
         }
     }
 
     fn push_audio(&mut self, samples: &[f32]) -> Result<StreamingChunkResult> {
-        let result = RealtimeCanary::push_audio(self, samples)?;
+        let result = RealtimeCanaryQwen::push_audio(self, samples)?;
 
         let mut segments = Vec::new();
 
@@ -782,7 +789,7 @@ impl StreamingTranscriber for RealtimeCanary {
     }
 
     fn finalize(&mut self) -> Result<StreamingChunkResult> {
-        let result = RealtimeCanary::finalize(self)?;
+        let result = RealtimeCanaryQwen::finalize(self)?;
 
         let segments = if !result.text.is_empty() {
             let end_time = self.total_duration();
@@ -810,15 +817,15 @@ impl StreamingTranscriber for RealtimeCanary {
     }
 
     fn reset(&mut self) {
-        RealtimeCanary::reset(self);
+        RealtimeCanaryQwen::reset(self);
     }
 
     fn buffer_duration(&self) -> f32 {
-        RealtimeCanary::buffer_duration(self)
+        RealtimeCanaryQwen::buffer_duration(self)
     }
 
     fn total_duration(&self) -> f32 {
-        RealtimeCanary::total_duration(self)
+        RealtimeCanaryQwen::total_duration(self)
     }
 }
 
@@ -828,8 +835,13 @@ mod tests {
 
     #[test]
     fn test_config_default() {
-        let config = RealtimeCanaryConfig::default();
+        let config = RealtimeCanaryQwenConfig::default();
         assert_eq!(config.buffer_size_secs, 10.0);
+        assert_eq!(config.min_audio_secs, 2.0);
+        assert_eq!(config.process_interval_secs, 2.0);
+        assert!(!config.pause_based_confirm);
+        assert_eq!(config.pause_threshold_secs, 0.6);
+        assert_eq!(config.silence_energy_threshold, 0.008);
         assert_eq!(config.language, "en");
     }
 }

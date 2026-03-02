@@ -23,6 +23,8 @@ pub enum ModelType {
     Canary1B,
     /// Canary 180M Flash model (faster, smaller variant with KV cache)
     Canary180MFlash,
+    /// Canary-Qwen 2.5B SALM model (FastConformer + Qwen3 LLM decoder)
+    CanaryQwen2B,
 }
 
 impl ModelType {
@@ -32,6 +34,7 @@ impl ModelType {
             ModelType::ParakeetTdt => "parakeet-tdt",
             ModelType::Canary1B => "canary-1b",
             ModelType::Canary180MFlash => "canary-180m-flash",
+            ModelType::CanaryQwen2B => "canary-qwen-2b",
         }
     }
 
@@ -41,6 +44,7 @@ impl ModelType {
             ModelType::ParakeetTdt => "Parakeet TDT 0.6B",
             ModelType::Canary1B => "Canary 1B",
             ModelType::Canary180MFlash => "Canary 180M Flash",
+            ModelType::CanaryQwen2B => "Canary-Qwen 2.5B",
         }
     }
 
@@ -50,6 +54,7 @@ impl ModelType {
             "parakeet-tdt" => Some(ModelType::ParakeetTdt),
             "canary-1b" => Some(ModelType::Canary1B),
             "canary-180m-flash" => Some(ModelType::Canary180MFlash),
+            "canary-qwen-2b" => Some(ModelType::CanaryQwen2B),
             _ => None,
         }
     }
@@ -60,6 +65,7 @@ impl ModelType {
             ModelType::ParakeetTdt => vec!["en"],
             ModelType::Canary1B => vec!["en", "de", "fr", "es"],
             ModelType::Canary180MFlash => vec!["en", "de", "fr", "es"],
+            ModelType::CanaryQwen2B => vec!["en"],
         }
     }
 }
@@ -177,6 +183,20 @@ impl ModelRegistry {
             });
         }
 
+        // Register Canary-Qwen 2.5B (always register, like TDT)
+        let canary_qwen_path = std::env::var("CANARY_QWEN_MODEL_PATH")
+            .unwrap_or_else(|_| "./canary-qwen".to_string());
+        let canary_qwen_available = std::path::Path::new(&canary_qwen_path).exists();
+        registry.register(RegisteredModel {
+            model_type: ModelType::CanaryQwen2B,
+            model_path: PathBuf::from(&canary_qwen_path),
+            diarization_path: diar_path.clone(),
+            exec_config: registry.default_exec_config.clone(),
+            is_available: canary_qwen_available,
+            description: "NVIDIA's Canary-Qwen 2.5B SALM - state-of-the-art English ASR with LLM decoder".to_string(),
+            languages: vec!["en".to_string()],
+        });
+
         eprintln!("[ModelRegistry] Registered {} models", registry.models.len());
         for (id, model) in &registry.models {
             eprintln!(
@@ -281,6 +301,7 @@ impl ModelRegistry {
                     pause_based_confirm: false,
                     pause_threshold_secs: 0.6,
                     silence_energy_threshold: 0.008,
+                    emit_full_text: false,
                 };
 
                 let transcriber = RealtimeCanary::new(
@@ -309,12 +330,34 @@ impl ModelRegistry {
 
                 Ok(Box::new(transcriber))
             }
+            ModelType::CanaryQwen2B => {
+                use crate::realtime_canary_qwen::{RealtimeCanaryQwen, RealtimeCanaryQwenConfig};
+
+                let qwen_config = RealtimeCanaryQwenConfig {
+                    buffer_size_secs: 10.0,
+                    min_audio_secs: 2.0,
+                    process_interval_secs: 2.0,
+                    language: "en".to_string(),
+                    pause_based_confirm: true,
+                    pause_threshold_secs: 0.6,
+                    silence_energy_threshold: 0.008,
+                    emit_full_text: false,
+                };
+
+                let transcriber = RealtimeCanaryQwen::new(
+                    &model.model_path,
+                    Some(model.exec_config.clone()),
+                    Some(qwen_config),
+                )?;
+
+                Ok(Box::new(transcriber))
+            }
         }
     }
 
     /// Create a transcriber instance (stub for non-sortformer builds)
     #[cfg(not(feature = "sortformer"))]
-    pub fn create_transcriber(&self, model_id: &str) -> Result<Box<dyn StreamingTranscriber>> {
+    pub fn create_transcriber(&self, _model_id: &str) -> Result<Box<dyn StreamingTranscriber>> {
         Err(Error::Model(
             "Transcriber creation requires 'sortformer' feature".to_string()
         ))
@@ -339,11 +382,13 @@ mod tests {
         assert_eq!(ModelType::from_str("parakeet-tdt"), Some(ModelType::ParakeetTdt));
         assert_eq!(ModelType::from_str("canary-1b"), Some(ModelType::Canary1B));
         assert_eq!(ModelType::from_str("canary-180m-flash"), Some(ModelType::Canary180MFlash));
+        assert_eq!(ModelType::from_str("canary-qwen-2b"), Some(ModelType::CanaryQwen2B));
         assert_eq!(ModelType::from_str("unknown"), None);
 
         assert_eq!(ModelType::ParakeetTdt.as_str(), "parakeet-tdt");
         assert_eq!(ModelType::Canary1B.as_str(), "canary-1b");
         assert_eq!(ModelType::Canary180MFlash.as_str(), "canary-180m-flash");
+        assert_eq!(ModelType::CanaryQwen2B.as_str(), "canary-qwen-2b");
     }
 
     #[test]

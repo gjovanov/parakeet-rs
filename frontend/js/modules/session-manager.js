@@ -150,6 +150,7 @@ export class SessionManager {
    * @param {string} [options.noiseCancellation='none'] - Noise cancellation type
    * @param {boolean} [options.diarization=false] - Enable diarization
    * @param {Object} [options.pauseConfig] - Pause detection config
+   * @param {Object} [options.growingSegmentsConfig] - Growing segments config
    * @param {string} [options.sentenceCompletion='minimal'] - Sentence completion mode
    * @param {string} [options.fabEnabled='default'] - FAB forwarding ("default", "enabled", "disabled")
    * @param {string} [options.fabUrl=''] - FAB endpoint URL override
@@ -165,6 +166,7 @@ export class SessionManager {
       noiseCancellation = 'none',
       diarization = false,
       pauseConfig = null,
+      growingSegmentsConfig = null,
       sentenceCompletion = 'minimal',
       fabEnabled = 'default',
       fabUrl = '',
@@ -198,6 +200,11 @@ export class SessionManager {
       // Add pause config if provided
       if (pauseConfig) {
         body.pause_config = pauseConfig;
+      }
+
+      // Add growing segments config if provided
+      if (growingSegmentsConfig) {
+        body.growing_segments_config = growingSegmentsConfig;
       }
 
       // Add FAB config if not default

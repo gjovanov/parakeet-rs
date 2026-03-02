@@ -1,8 +1,8 @@
-//! Parallel sliding window transcription using multiple Canary model instances
+//! Parallel sliding window transcription using multiple CanaryQwen model instances
 //!
 //! This module implements a parallel transcription strategy where multiple
-//! Canary model instances process overlapping audio windows concurrently.
-//! This reduces effective latency from ~5s to ~1s on an 8-core CPU.
+//! CanaryQwen 2.5B model instances process overlapping audio windows concurrently.
+//! This reduces effective latency from ~5s to ~1s on a multi-core CPU.
 //!
 //! ## Algorithm
 //!
@@ -17,7 +17,7 @@
 //! Results are merged using timestamp-based alignment, preferring
 //! transcriptions with more context (larger windows).
 
-use crate::canary::{CanaryConfig, CanaryModel};
+use crate::canary_qwen::{CanaryQwenConfig, CanaryQwenModel};
 use crate::error::Result;
 use crate::execution::ModelConfig;
 use crate::streaming_transcriber::{ModelInfo, StreamingChunkResult, StreamingTranscriber, TranscriptionSegment};
@@ -32,10 +32,10 @@ use std::time::Instant;
 #[cfg(feature = "sortformer")]
 use crate::sortformer_stream::SortformerStream;
 
-/// Configuration for parallel transcription
+/// Configuration for parallel CanaryQwen transcription
 #[derive(Debug, Clone)]
-pub struct ParallelCanaryConfig {
-    /// Number of worker threads (default: 8)
+pub struct ParallelCanaryQwenConfig {
+    /// Number of worker threads (default: 4 due to larger model memory)
     pub num_threads: usize,
     /// Maximum buffer size in 1-second chunks (default: 6)
     pub buffer_size_chunks: usize,
@@ -47,19 +47,19 @@ pub struct ParallelCanaryConfig {
     pub intra_threads: usize,
 }
 
-impl Default for ParallelCanaryConfig {
+impl Default for ParallelCanaryQwenConfig {
     fn default() -> Self {
         Self {
-            num_threads: 8,
+            num_threads: 4,
             buffer_size_chunks: 6,
             chunk_duration_secs: 1.0,
-            language: "de".to_string(),
+            language: "en".to_string(),
             intra_threads: 1,
         }
     }
 }
 
-impl ParallelCanaryConfig {
+impl ParallelCanaryQwenConfig {
     /// Create config with specified threads and buffer size
     pub fn new(num_threads: usize, buffer_size_secs: usize, language: String) -> Self {
         Self {
@@ -211,7 +211,7 @@ impl ResultMerger {
                 });
 
                 eprintln!(
-                    "[ParallelCanary] Emitting segment [{:.1}s-{:.1}s] end_chunk={} (window: {}, inference: {}ms)",
+                    "[ParallelCanaryQwen] Emitting segment [{:.1}s-{:.1}s] end_chunk={} (window: {}, inference: {}ms)",
                     result.start_time, result.end_time, result.end_chunk_idx, result.window_size, result.inference_time_ms
                 );
             }
@@ -253,7 +253,7 @@ fn truncate_hallucination(text: &str) -> String {
                 let truncate_at = i - consecutive_count + 1;
                 if truncate_at > 0 {
                     eprintln!(
-                        "[ParallelCanary] Truncating hallucination at word {}: '{}'",
+                        "[ParallelCanaryQwen] Truncating hallucination at word {}: '{}'",
                         truncate_at,
                         words[i]
                     );
@@ -287,7 +287,7 @@ fn truncate_hallucination(text: &str) -> String {
                     pattern_count += 1;
                     if pattern_count >= 3 {
                         eprintln!(
-                            "[ParallelCanary] Truncating repeated phrase at {}: '{}'",
+                            "[ParallelCanaryQwen] Truncating repeated phrase at {}: '{}'",
                             i,
                             pattern.join(" ")
                         );
@@ -307,10 +307,10 @@ fn truncate_hallucination(text: &str) -> String {
     text.to_string()
 }
 
-/// Parallel Canary transcriber with multiple model instances
-pub struct ParallelCanary {
+/// Parallel CanaryQwen transcriber with multiple model instances
+pub struct ParallelCanaryQwen {
     /// Configuration
-    config: ParallelCanaryConfig,
+    config: ParallelCanaryQwenConfig,
 
     /// Worker thread handles
     workers: Vec<JoinHandle<()>>,
@@ -353,22 +353,22 @@ pub struct ParallelCanary {
     diarizer: Option<SortformerStream>,
 }
 
-impl ParallelCanary {
-    /// Create a new parallel transcriber
+impl ParallelCanaryQwen {
+    /// Create a new parallel CanaryQwen transcriber
     ///
     /// # Arguments
-    /// * `model_dir` - Path to Canary model directory
+    /// * `model_dir` - Path to CanaryQwen model directory
     /// * `exec_config` - Optional execution configuration
     /// * `config` - Parallel transcription configuration
     pub fn new(
         model_dir: &Path,
         exec_config: Option<ModelConfig>,
-        config: Option<ParallelCanaryConfig>,
+        config: Option<ParallelCanaryQwenConfig>,
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
 
         eprintln!(
-            "[ParallelCanary] Initializing with {} threads, {} chunk buffer, language: {}",
+            "[ParallelCanaryQwen] Initializing with {} threads, {} chunk buffer, language: {}",
             config.num_threads, config.buffer_size_chunks, config.language
         );
 
@@ -384,7 +384,7 @@ impl ParallelCanary {
         // Spawn worker threads, each with its own model instance
         let mut workers = Vec::with_capacity(config.num_threads);
 
-        eprintln!("[ParallelCanary] Loading {} model instances...", config.num_threads);
+        eprintln!("[ParallelCanaryQwen] Loading {} model instances...", config.num_threads);
         let load_start = Instant::now();
 
         for i in 0..config.num_threads {
@@ -401,19 +401,19 @@ impl ParallelCanary {
 
             let handle = thread::spawn(move || {
                 // Load model for this worker with the specified language
-                eprintln!("[ParallelCanary] Worker {} loading model...", i);
-                let canary_config = CanaryConfig {
+                eprintln!("[ParallelCanaryQwen] Worker {} loading model...", i);
+                let canary_qwen_config = CanaryQwenConfig {
                     language: language.clone(),
                     ..Default::default()
                 };
-                let mut model = match CanaryModel::from_pretrained(&model_dir, Some(exec_config), Some(canary_config)) {
+                let mut model = match CanaryQwenModel::from_pretrained(&model_dir, Some(exec_config), Some(canary_qwen_config)) {
                     Ok(m) => m,
                     Err(e) => {
-                        eprintln!("[ParallelCanary] Worker {} failed to load model: {}", i, e);
+                        eprintln!("[ParallelCanaryQwen] Worker {} failed to load model: {}", i, e);
                         return;
                     }
                 };
-                eprintln!("[ParallelCanary] Worker {} ready (language: {})", i, language);
+                eprintln!("[ParallelCanaryQwen] Worker {} ready (language: {})", i, language);
 
                 // Process jobs until shutdown
                 loop {
@@ -436,7 +436,7 @@ impl ParallelCanary {
                                 Ok(t) => t,
                                 Err(e) => {
                                     eprintln!(
-                                        "[ParallelCanary] Worker {} inference error: {}",
+                                        "[ParallelCanaryQwen] Worker {} inference error: {}",
                                         i, e
                                     );
                                     continue;
@@ -466,14 +466,14 @@ impl ParallelCanary {
                     }
                 }
 
-                eprintln!("[ParallelCanary] Worker {} shutting down", i);
+                eprintln!("[ParallelCanaryQwen] Worker {} shutting down", i);
             });
 
             workers.push(handle);
         }
 
         eprintln!(
-            "[ParallelCanary] All {} workers initialized in {:.2}s",
+            "[ParallelCanaryQwen] All {} workers initialized in {:.2}s",
             config.num_threads,
             load_start.elapsed().as_secs_f32()
         );
@@ -497,18 +497,18 @@ impl ParallelCanary {
         })
     }
 
-    /// Create a new parallel transcriber with optional diarization
+    /// Create a new parallel CanaryQwen transcriber with optional diarization
     #[cfg(feature = "sortformer")]
     pub fn new_with_diarization<P1: AsRef<Path>, P2: AsRef<Path>>(
         model_dir: P1,
         diar_model_path: Option<P2>,
         exec_config: Option<ModelConfig>,
-        config: Option<ParallelCanaryConfig>,
+        config: Option<ParallelCanaryQwenConfig>,
     ) -> Result<Self> {
         let mut transcriber = Self::new(model_dir.as_ref(), exec_config.clone(), config)?;
 
         if let Some(diar_path) = diar_model_path {
-            eprintln!("[ParallelCanary] Creating diarizer from {:?}", diar_path.as_ref());
+            eprintln!("[ParallelCanaryQwen] Creating diarizer from {:?}", diar_path.as_ref());
             transcriber.diarizer = Some(SortformerStream::new(diar_path)?);
         }
 
@@ -582,7 +582,7 @@ impl ParallelCanary {
 
         // Send to workers (they compete for jobs)
         if let Err(e) = self.job_tx.send(job) {
-            eprintln!("[ParallelCanary] Failed to dispatch job: {}", e);
+            eprintln!("[ParallelCanaryQwen] Failed to dispatch job: {}", e);
         }
 
         self.next_worker_idx = (self.next_worker_idx + 1) % self.config.num_threads;
@@ -605,13 +605,13 @@ impl ParallelCanary {
     }
 }
 
-impl StreamingTranscriber for ParallelCanary {
+impl StreamingTranscriber for ParallelCanaryQwen {
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            id: "parallel-canary".to_string(),
-            display_name: format!("Parallel Canary ({}x{})", self.config.num_threads, self.config.buffer_size_chunks),
+            id: "parallel-canary-qwen".to_string(),
+            display_name: format!("Parallel CanaryQwen ({}x{})", self.config.num_threads, self.config.buffer_size_chunks),
             description: format!(
-                "Parallel sliding window transcription with {} threads and {} second buffer",
+                "Parallel sliding window CanaryQwen transcription with {} threads and {} second buffer",
                 self.config.num_threads, self.config.buffer_size_chunks
             ),
             supports_diarization: self.has_diarization(),
@@ -688,7 +688,7 @@ impl StreamingTranscriber for ParallelCanary {
     }
 
     fn finalize(&mut self) -> Result<StreamingChunkResult> {
-        eprintln!("[ParallelCanary] Finalizing...");
+        eprintln!("[ParallelCanaryQwen] Finalizing...");
 
         // Process any remaining samples as final chunk
         if !self.current_chunk_samples.is_empty() {
@@ -750,7 +750,7 @@ impl StreamingTranscriber for ParallelCanary {
             }
         }
 
-        eprintln!("[ParallelCanary] Finalized with {} segments", segments.len());
+        eprintln!("[ParallelCanaryQwen] Finalized with {} segments", segments.len());
 
         Ok(StreamingChunkResult {
             segments,
@@ -770,19 +770,19 @@ impl StreamingTranscriber for ParallelCanary {
     }
 }
 
-impl Drop for ParallelCanary {
+impl Drop for ParallelCanaryQwen {
     fn drop(&mut self) {
-        eprintln!("[ParallelCanary] Shutting down {} workers...", self.workers.len());
+        eprintln!("[ParallelCanaryQwen] Shutting down {} workers...", self.workers.len());
         self.shutdown.store(true, Ordering::Relaxed);
 
         // Wait for workers to finish
         for (i, worker) in self.workers.drain(..).enumerate() {
             if worker.join().is_err() {
-                eprintln!("[ParallelCanary] Worker {} panicked", i);
+                eprintln!("[ParallelCanaryQwen] Worker {} panicked", i);
             }
         }
 
-        eprintln!("[ParallelCanary] Shutdown complete");
+        eprintln!("[ParallelCanaryQwen] Shutdown complete");
     }
 }
 
@@ -812,8 +812,71 @@ mod tests {
     }
 
     #[test]
+    fn test_config_defaults() {
+        let config = ParallelCanaryQwenConfig::default();
+        assert_eq!(config.num_threads, 4);
+        assert_eq!(config.intra_threads, 1);
+        assert_eq!(config.language, "en");
+        assert_eq!(config.buffer_size_chunks, 6);
+        assert_eq!(config.chunk_duration_secs, 1.0);
+    }
+
+    #[test]
     fn test_config_samples_per_chunk() {
-        let config = ParallelCanaryConfig::default();
+        let config = ParallelCanaryQwenConfig::default();
         assert_eq!(config.samples_per_chunk(), 16000);
+    }
+
+    #[test]
+    fn test_config_new() {
+        let config = ParallelCanaryQwenConfig::new(2, 4, "de".to_string());
+        assert_eq!(config.num_threads, 2);
+        assert_eq!(config.buffer_size_chunks, 4);
+        assert_eq!(config.language, "de");
+        // intra_threads should still be default
+        assert_eq!(config.intra_threads, 1);
+    }
+
+    #[test]
+    fn test_result_merger_new() {
+        let merger = ResultMerger::new(6);
+        assert_eq!(merger.last_emitted_end_chunk, -1);
+        assert_eq!(merger.buffer_size, 6);
+        assert_eq!(merger.min_window_size, 3);
+    }
+
+    #[test]
+    fn test_result_merger_small_buffer() {
+        let merger = ResultMerger::new(2);
+        assert_eq!(merger.min_window_size, 2);
+    }
+
+    #[test]
+    fn test_truncate_hallucination_short_text() {
+        let text = "hi there";
+        let result = truncate_hallucination(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_truncate_hallucination_empty() {
+        let text = "";
+        let result = truncate_hallucination(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_truncate_hallucination_single_char_words_ignored() {
+        // Single character repeated words should not trigger truncation
+        let text = "I I I went to the store";
+        let result = truncate_hallucination(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_truncate_hallucination_three_word_phrase() {
+        let text = "the quick brown the quick brown the quick brown fox";
+        let result = truncate_hallucination(text);
+        assert_eq!(result, "");
     }
 }

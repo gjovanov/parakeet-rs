@@ -60,7 +60,7 @@ sequenceDiagram
     participant WS as WebSocket
     participant RTC as WebRTC
 
-    U->>UI: Select model + media + mode
+    U->>UI: Select model + media + mode + config
     UI->>API: POST /api/sessions
     API-->>UI: {id: "abc123", state: "created"}
 
@@ -86,6 +86,25 @@ sequenceDiagram
     WS-->>UI: {type: "end"}
     UI->>UI: Show completion
 ```
+
+## Mode-Specific Config Panels
+
+The session creation form shows/hides configuration panels based on the selected transcription mode:
+
+| Mode | Config Panel | Sliders |
+|------|-------------|---------|
+| `parallel`, `pause_parallel` | Parallel Config | Worker Threads, Buffer Size |
+| `speedy`, `pause_based`, `lookahead`, `vad_*`, `pause_parallel` | Pause Config | Pause Threshold, Silence Sensitivity, Max Segment, Context Buffer |
+| `growing_segments` | Growing Segments Config | Buffer Size, Process Interval, Pause Threshold, Silence Sensitivity |
+
+The Growing Segments config panel exposes four parameters that override the model-specific defaults:
+
+- **Buffer Size** (4-15s, default 8s) — Audio context window for each inference pass
+- **Process Interval** (0.2-3.0s, default 0.5s) — How often inference runs
+- **Pause Threshold** (200-800ms, default 500ms) — Silence duration to finalize a sentence
+- **Silence Sensitivity** (1-5, default 3/Medium) — Maps to energy thresholds [0.003, 0.005, 0.008, 0.012, 0.02]
+
+All slider values are sent as `growing_segments_config` in the session creation request. The backend applies overrides only when mode is `growing_segments`; non-growing modes ignore the config entirely.
 
 ## Subtitle Processing Pipeline
 

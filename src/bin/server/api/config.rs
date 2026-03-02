@@ -2,8 +2,12 @@
 
 use crate::config::generate_turn_credentials;
 use crate::state::AppState;
+use crate::turn_credentials::generate_turn_credentials;
 use axum::{extract::State, response::IntoResponse};
 use std::sync::Arc;
+
+/// TURN credential TTL: 24 hours
+const TURN_CREDENTIAL_TTL: u64 = 86400;
 
 /// Return frontend configuration (WebSocket URL, ICE servers, etc.)
 pub async fn config_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -22,7 +26,6 @@ pub async fn config_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
 
     if !config.turn_server.is_empty() {
         // Provide both UDP and TCP TURN URLs for maximum compatibility
-        // Server (webrtc-rs) uses UDP, Windows browsers may need TCP
         let turn_url = &config.turn_server;
         let mut turn_urls = vec![turn_url.clone()];
 
@@ -31,10 +34,16 @@ pub async fn config_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
             turn_urls.push(format!("{}?transport=tcp", turn_url));
         }
 
+<<<<<<< HEAD
         // Use ephemeral HMAC-SHA1 credentials when shared secret is configured,
         // otherwise fall back to static username/password
         let (username, credential) = if !config.turn_shared_secret.is_empty() {
             generate_turn_credentials(&config.turn_shared_secret, config.turn_credential_ttl)
+=======
+        // Use ephemeral credentials (shared secret) if configured, otherwise static
+        let (username, credential) = if !config.turn_shared_secret.is_empty() {
+            generate_turn_credentials(&config.turn_shared_secret, TURN_CREDENTIAL_TTL)
+>>>>>>> 423e2252a776f67ae1aec078e6f034ba429f26f9
         } else {
             (config.turn_username.clone(), config.turn_password.clone())
         };

@@ -27,9 +27,9 @@ const WIN_LENGTH: usize = 400;
 const PREEMPHASIS: f32 = 0.97;
 
 // Special token IDs (from vocab.txt)
-const UNK_ID: i64 = 0;
-const NOSPEECH_ID: i64 = 1;
-const PAD_ID: i64 = 2;
+const _UNK_ID: i64 = 0;
+const _NOSPEECH_ID: i64 = 1;
+const _PAD_ID: i64 = 2;
 const ENDOFTEXT_ID: i64 = 3;
 const STARTOFTRANSCRIPT_ID: i64 = 4;
 const PNC_ID: i64 = 5;           // <|pnc|> - punctuation
@@ -84,6 +84,7 @@ pub struct CanaryTokenizer {
     /// Token ID to string mapping
     id_to_token: Vec<String>,
     /// String to token ID mapping
+    #[allow(dead_code)]
     token_to_id: HashMap<String, i64>,
     /// Language code to token ID mapping
     lang_to_id: HashMap<String, i64>,
@@ -301,8 +302,8 @@ impl CanaryModel {
         // Log mel spectrogram
         let mel_spectrogram = mel_spectrogram.mapv(|x| (x.max(1e-10)).ln());
 
-        // Transpose to (time, mels)
-        let mel_spectrogram = mel_spectrogram.t().to_owned();
+        // Transpose to (time, mels) and ensure C-order layout for reshape compatibility
+        let mel_spectrogram = mel_spectrogram.t().as_standard_layout().into_owned();
 
         // Normalize (mean=0, std=1 per feature)
         let mel_spectrogram = self.normalize_features(mel_spectrogram)?;
@@ -311,7 +312,7 @@ impl CanaryModel {
         let time_steps = mel_spectrogram.shape()[0];
         let n_mels = mel_spectrogram.shape()[1];
         let mel_3d = mel_spectrogram
-            .into_shape((1, time_steps, n_mels))
+            .into_shape_with_order((1, time_steps, n_mels))
             .map_err(|e| Error::Audio(format!("Failed to reshape features: {}", e)))?;
 
         Ok(mel_3d)
@@ -391,7 +392,7 @@ impl CanaryModel {
         // Transpose to (batch, mels, time)
         let features_transposed = features
             .clone()
-            .into_shape((batch_size, time_steps, n_mels))
+            .into_shape_with_order((batch_size, time_steps, n_mels))
             .map_err(|e| Error::Model(format!("Failed to reshape: {}", e)))?;
 
         // Create transposed view: (batch, mels, time)
@@ -605,12 +606,26 @@ impl CanaryModel {
             .map_err(|e| Error::Model(format!("Failed to extract logits: {}", e)))?;
 
         let logits_dims = logits_shape.as_ref();
-        let vocab_size = logits_dims[2] as usize;
-        let seq_len = logits_dims[1] as usize;
 
-        // Get logits for last position
-        let last_pos_start = (seq_len - 1) * vocab_size;
-        let mut last_logits: Vec<f32> = logits_data[last_pos_start..last_pos_start + vocab_size].to_vec();
+        // Handle both 2D [batch, vocab_size] (KV-cached single-token step)
+        // and 3D [batch, seq_len, vocab_size] (multi-token / full decode step)
+        let mut last_logits: Vec<f32> = match logits_dims.len() {
+            2 => {
+                let vocab_size = logits_dims[1] as usize;
+                logits_data[..vocab_size].to_vec()
+            }
+            3 => {
+                let vocab_size = logits_dims[2] as usize;
+                let seq_len = logits_dims[1] as usize;
+                let last_pos_start = (seq_len - 1) * vocab_size;
+                logits_data[last_pos_start..last_pos_start + vocab_size].to_vec()
+            }
+            _ => {
+                return Err(Error::Model(format!(
+                    "Unexpected logits dimensions: {:?}", logits_dims
+                )));
+            }
+        };
 
         // Apply repetition penalty
         if repetition_penalty != 1.0 {

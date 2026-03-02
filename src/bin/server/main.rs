@@ -28,6 +28,7 @@ mod fab_forwarder;
 mod srt_config;
 mod state;
 mod transcription;
+mod turn_credentials;
 mod webrtc_handlers;
 
 use axum::{
@@ -136,6 +137,7 @@ struct Args {
 }
 
 impl Args {
+    #[allow(dead_code)]
     fn latency_mode(&self) -> LatencyMode {
         if self.lookahead {
             LatencyMode::Lookahead
@@ -317,6 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
     let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
     let turn_shared_secret = std::env::var("TURN_SHARED_SECRET").unwrap_or_default();
+<<<<<<< HEAD
     let turn_credential_ttl: u64 = std::env::var("TURN_CREDENTIAL_TTL")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -325,6 +328,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !turn_shared_secret.is_empty() {
         eprintln!("TURN: ephemeral credentials enabled (TTL={}s)", turn_credential_ttl);
     }
+=======
+>>>>>>> 423e2252a776f67ae1aec078e6f034ba429f26f9
 
     let ws_host = std::env::var("WS_HOST")
         .ok()
@@ -334,13 +339,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ws_url = format!("ws://{}:{}/ws", ws_host, args.port);
 
+    if !turn_shared_secret.is_empty() {
+        eprintln!("TURN auth: ephemeral credentials (shared secret)");
+    } else if !turn_username.is_empty() {
+        eprintln!("TURN auth: static credentials (user: {})", turn_username);
+    }
+
     let runtime_config = RuntimeConfig {
         ws_url: ws_url.clone(),
         turn_server: turn_server.clone(),
         turn_username: turn_username.clone(),
         turn_password: turn_password.clone(),
+<<<<<<< HEAD
         turn_shared_secret,
         turn_credential_ttl,
+=======
+        turn_shared_secret: turn_shared_secret.clone(),
+>>>>>>> 423e2252a776f67ae1aec078e6f034ba429f26f9
     };
 
     eprintln!("Frontend config: ws_url={}", ws_url);
@@ -389,6 +404,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_audio: RwLock::new(HashMap::new()),
         parallel_configs: RwLock::new(HashMap::new()),
         pause_configs: RwLock::new(HashMap::new()),
+        growing_segments_configs: RwLock::new(HashMap::new()),
         srt_config,
         fab_enabled,
         fab_send_type,

@@ -75,6 +75,7 @@ Create a new transcription session.
 | `diarization` | boolean | `false` | Enable speaker diarization |
 | `parallel_config` | object? | null | Config for parallel modes |
 | `pause_config` | object? | null | Config for pause detection |
+| `growing_segments_config` | object? | null | Config for growing segments mode |
 | `sentence_completion` | string | `"minimal"` | `"off"`, `"minimal"`, `"balanced"`, `"complete"` |
 | `fab_enabled` | string? | null | FAB override: `"default"`, `"enabled"`, `"disabled"` |
 | `fab_url` | string? | null | FAB endpoint URL override |
@@ -95,6 +96,15 @@ Create a new transcription session.
 | `silence_energy_threshold` | number | 0.008 | RMS energy threshold for silence (0.003-0.02) |
 | `max_segment_secs` | number | 5.0 | Maximum segment duration (3.0-15.0) |
 | `context_buffer_secs` | number | 0.0 | Context overlap for parallel modes (0.0-3.0) |
+
+**`growing_segments_config`** (for `growing_segments` mode, all fields optional):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `buffer_size_secs` | number? | 8.0 | Audio context window (4-15) |
+| `process_interval_secs` | number? | 0.5 | Inference frequency (0.2-3.0) |
+| `pause_threshold_ms` | number? | 500 | Silence for sentence finalization (200-800) |
+| `silence_energy_threshold` | number? | 0.008 | RMS energy threshold for silence (0.003-0.02) |
 
 **Response**: `ApiResponse<SessionInfo>`
 

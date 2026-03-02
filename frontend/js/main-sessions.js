@@ -151,6 +151,17 @@ function cacheElements() {
   elements.contextBuffer = document.getElementById('context-buffer');
   elements.contextBufferValue = document.getElementById('context-buffer-value');
 
+  // Growing segments config elements
+  elements.growingSegmentsConfig = document.getElementById('growing-segments-config');
+  elements.gsBufferSize = document.getElementById('gs-buffer-size');
+  elements.gsBufferSizeValue = document.getElementById('gs-buffer-size-value');
+  elements.gsProcessInterval = document.getElementById('gs-process-interval');
+  elements.gsProcessIntervalValue = document.getElementById('gs-process-interval-value');
+  elements.gsPauseThreshold = document.getElementById('gs-pause-threshold');
+  elements.gsPauseThresholdValue = document.getElementById('gs-pause-threshold-value');
+  elements.gsSilenceSensitivity = document.getElementById('gs-silence-sensitivity');
+  elements.gsSilenceSensitivityValue = document.getElementById('gs-silence-sensitivity-value');
+
   // FAB config elements
   elements.fabEnabledSelect = document.getElementById('fab-enabled-select');
   elements.fabUrlGroup = document.getElementById('fab-url-group');
@@ -239,6 +250,11 @@ function setupEventListeners() {
         elements.pauseConfig.style.display = isPauseMode ? 'block' : 'none';
       }
 
+      // Show/hide growing segments config
+      if (elements.growingSegmentsConfig) {
+        elements.growingSegmentsConfig.style.display = mode === 'growing_segments' ? 'block' : 'none';
+      }
+
       // Show context buffer only for pause_parallel mode
       if (elements.contextBufferGroup) {
         elements.contextBufferGroup.style.display = isPauseParallel ? 'flex' : 'none';
@@ -278,6 +294,29 @@ function setupEventListeners() {
   if (elements.contextBuffer) {
     elements.contextBuffer.addEventListener('input', () => {
       elements.contextBufferValue.textContent = elements.contextBuffer.value;
+    });
+  }
+
+  // Growing segments sliders - update displayed values
+  if (elements.gsBufferSize) {
+    elements.gsBufferSize.addEventListener('input', () => {
+      elements.gsBufferSizeValue.textContent = elements.gsBufferSize.value;
+    });
+  }
+  if (elements.gsProcessInterval) {
+    elements.gsProcessInterval.addEventListener('input', () => {
+      elements.gsProcessIntervalValue.textContent = elements.gsProcessInterval.value;
+    });
+  }
+  if (elements.gsPauseThreshold) {
+    elements.gsPauseThreshold.addEventListener('input', () => {
+      elements.gsPauseThresholdValue.textContent = elements.gsPauseThreshold.value;
+    });
+  }
+  if (elements.gsSilenceSensitivity) {
+    elements.gsSilenceSensitivity.addEventListener('input', () => {
+      const labels = ['Very High', 'High', 'Medium', 'Low', 'Very Low'];
+      elements.gsSilenceSensitivityValue.textContent = labels[elements.gsSilenceSensitivity.value - 1];
     });
   }
 
@@ -355,6 +394,17 @@ function setupEventListeners() {
       };
     }
 
+    // Get growing segments config
+    let growingSegmentsConfig = null;
+    if (mode === 'growing_segments' && elements.gsBufferSize) {
+      growingSegmentsConfig = {
+        buffer_size_secs: parseFloat(elements.gsBufferSize.value),
+        process_interval_secs: parseFloat(elements.gsProcessInterval.value),
+        pause_threshold_ms: parseInt(elements.gsPauseThreshold.value, 10),
+        silence_energy_threshold: getSilenceEnergyThreshold(parseInt(elements.gsSilenceSensitivity?.value || 3, 10))
+      };
+    }
+
     try {
       elements.createSessionBtn.disabled = true;
       elements.createSessionBtn.textContent = 'Creating...';
@@ -367,6 +417,7 @@ function setupEventListeners() {
         noiseCancellation,
         diarization,
         pauseConfig,
+        growingSegmentsConfig,
         sentenceCompletion,
         fabEnabled,
         fabUrl,
@@ -524,9 +575,15 @@ function showTab(tabName) {
 
 function renderModelSelect() {
   const models = sessionManager.models;
-  elements.modelSelect.innerHTML = models.length
-    ? models.map(m => `<option value="${m.id}">${m.display_name}</option>`).join('')
-    : '<option value="">No models available</option>';
+  const available = models.filter(m => m.is_loaded);
+  const unavailable = models.filter(m => !m.is_loaded);
+  if (available.length === 0 && unavailable.length === 0) {
+    elements.modelSelect.innerHTML = '<option value="">No models available</option>';
+  } else {
+    elements.modelSelect.innerHTML =
+      available.map(m => `<option value="${m.id}">${m.display_name}</option>`).join('') +
+      unavailable.map(m => `<option value="${m.id}" disabled>${m.display_name} (not installed)</option>`).join('');
+  }
 }
 
 function renderMediaSelect() {

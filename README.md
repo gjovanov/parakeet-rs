@@ -4,14 +4,14 @@
 [![crates.io](https://img.shields.io/crates/v/parakeet-rs.svg)](https://crates.io/crates/parakeet-rs)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-Real-time speech recognition server and Rust library built on NVIDIA's Parakeet ASR models via ONNX Runtime. Provides a multi-session WebRTC transcription server with live subtitles, speaker diarization, FAB teletext forwarding, and 13 transcription modes optimized for different latency/accuracy trade-offs.
+Real-time speech recognition server and Rust library built on NVIDIA's Parakeet ASR models via ONNX Runtime. Provides a multi-session WebRTC transcription server with live subtitles, speaker diarization, FAB teletext forwarding, and 14 transcription modes optimized for different latency/accuracy trade-offs.
 
 ## Features
 
 | Category | Features |
 |----------|----------|
 | **ASR Models** | Parakeet TDT 0.6B (English), Canary 1B with KV cache (multilingual: en/de/fr/es), Canary 180M Flash |
-| **Streaming** | 13 transcription modes from extreme-low-latency (~1.3s) to batch VoD processing |
+| **Streaming** | 14 transcription modes from extreme-low-latency (~1.3s) to batch VoD processing |
 | **Diarization** | Sortformer v2 streaming speaker diarization (up to 4 speakers) |
 | **Server** | Axum HTTP/WS server, multi-session, REST API, WebSocket subtitles |
 | **Audio Input** | Media file playback, SRT live streams (14 channels), file upload (up to 2GB) |
@@ -144,6 +144,7 @@ See [docs/deployment.md](docs/deployment.md) for full configuration reference.
 | `asr` | continuous | Pure streaming without VAD |
 | `parallel` | sliding window | Multi-threaded parallel inference (4-8 threads) |
 | `pause_parallel` | pause-triggered | Pause-triggered parallel inference with ordered output |
+| `growing_segments` | ~0.3-1.5s | Incrementally growing transcript with sentence-level deduplication |
 | `vod` | batch | Batch processing in 10-min chunks with deduplication, SRT subtitle export |
 
 See [docs/transcription-modes.md](docs/transcription-modes.md) for detailed configuration.
@@ -154,7 +155,7 @@ See [docs/transcription-modes.md](docs/transcription-modes.md) for detailed conf
 |----------|-------------|
 | [Architecture](docs/architecture.md) | System design, audio pipeline, session lifecycle, module structure |
 | [API Reference](docs/api.md) | REST endpoints, WebSocket protocol, response format |
-| [Transcription Modes](docs/transcription-modes.md) | All 13 modes with configuration parameters and selection guide |
+| [Transcription Modes](docs/transcription-modes.md) | All 14 modes with configuration parameters and selection guide |
 | [Frontend](docs/frontend.md) | Web UI, JavaScript modules, subtitle processing pipeline |
 | [FAB Teletext](docs/fab-teletext.md) | FAB forwarding system, teletext splitting, deduplication |
 | [Testing](docs/testing.md) | 243 Rust tests + 34 E2E tests, fixtures, WER thresholds |
