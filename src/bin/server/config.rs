@@ -135,7 +135,6 @@ pub struct RuntimeConfig {
     pub turn_server: String,
     pub turn_username: String,
     pub turn_password: String,
-<<<<<<< HEAD
     pub turn_shared_secret: String,
     pub turn_credential_ttl: u64,
 }
@@ -160,8 +159,4 @@ pub fn generate_turn_credentials(shared_secret: &str, ttl: u64) -> (String, Stri
     let credential = base64::engine::general_purpose::STANDARD.encode(result.into_bytes());
 
     (username, credential)
-=======
-    /// COTURN shared secret for ephemeral credentials (overrides username/password when set)
-    pub turn_shared_secret: String,
->>>>>>> 423e2252a776f67ae1aec078e6f034ba429f26f9
 }

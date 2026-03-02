@@ -524,6 +524,7 @@ impl ParallelCanary {
     }
 
     /// Get speaker at a given time
+    #[allow(unused_variables)]
     fn get_speaker_at(&self, time: f32) -> Option<usize> {
         #[cfg(feature = "sortformer")]
         if let Some(diarizer) = &self.diarizer {

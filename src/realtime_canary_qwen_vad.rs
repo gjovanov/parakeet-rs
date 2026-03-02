@@ -361,6 +361,7 @@ impl RealtimeCanaryQwenVad {
         Ok(())
     }
 
+    #[allow(unused_variables)]
     fn transcribe_sliding_window(&mut self) -> Result<()> {
         if self.segment_buffer.is_empty() {
             return Ok(());

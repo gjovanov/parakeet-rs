@@ -201,13 +201,8 @@ pub use german_normalizer::{GermanTextNormalizer, normalize_german};
 
 // VoD transcriber exports
 pub use vod_transcriber::{
-<<<<<<< HEAD
     format_srt_time, SegmentCallback, VodConfig, VodProgress, VodSegment, VodTranscript,
-    VodTranscriberCanary, VodTranscriberTDT, VodWord,
-=======
-    SegmentCallback, VodConfig, VodProgress, VodSegment, VodTranscript, VodTranscriberCanary,
-    VodTranscriberCanaryQwen, VodTranscriberTDT, VodWord,
->>>>>>> 423e2252a776f67ae1aec078e6f034ba429f26f9
+    VodTranscriberCanary, VodTranscriberCanaryQwen, VodTranscriberTDT, VodWord,
 };
 
 // Noise cancellation exports

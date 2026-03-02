@@ -73,14 +73,7 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
     let mut status_rx = session.subscribe_status();
 
     // Create peer connection
-<<<<<<< HEAD
     let turn_config = &state.config;
-=======
-    let turn_server = std::env::var("TURN_SERVER").unwrap_or_default();
-    let turn_shared_secret = std::env::var("TURN_SHARED_SECRET").unwrap_or_default();
-    let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
-    let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
->>>>>>> 423e2252a776f67ae1aec078e6f034ba429f26f9
     let force_relay = std::env::var("FORCE_RELAY")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
@@ -95,7 +88,6 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
         }]
     };
 
-<<<<<<< HEAD
     if !turn_config.turn_server.is_empty() {
         // Use ephemeral HMAC-SHA1 credentials when shared secret is configured,
         // otherwise fall back to static username/password
@@ -114,27 +106,6 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
         eprintln!("[WebRTC] Configuring TURN: {} (user: {})", turn_config.turn_server, username);
         ice_servers.push(RTCIceServer {
             urls: vec![turn_config.turn_server.clone()],
-=======
-    if !turn_server.is_empty() {
-        // Build TURN URLs: include both UDP and TCP variants
-        let mut turn_urls = vec![turn_server.clone()];
-        if !turn_server.contains("?transport=") {
-            turn_urls.push(format!("{}?transport=tcp", turn_server));
-        }
-
-        // Use ephemeral credentials (shared secret) if configured, otherwise static
-        let (username, credential) = if !turn_shared_secret.is_empty() {
-            let creds = crate::turn_credentials::generate_turn_credentials(&turn_shared_secret, 86400);
-            eprintln!("[WebRTC] Configuring TURN: {:?} (ephemeral user: {})", turn_urls, creds.0);
-            creds
-        } else {
-            eprintln!("[WebRTC] Configuring TURN: {:?} (static user: {})", turn_urls, turn_username);
-            (turn_username, turn_password)
-        };
-
-        ice_servers.push(RTCIceServer {
-            urls: turn_urls,
->>>>>>> 423e2252a776f67ae1aec078e6f034ba429f26f9
             username,
             credential,
             credential_type: RTCIceCredentialType::Password,

@@ -134,8 +134,8 @@ impl GermanTextNormalizer {
             return (0, 0);
         }
 
-        let mut total: u64 = 0;
-        let mut consumed: usize = 0;
+        let mut total: u64;
+        let mut consumed: usize;
 
         // Check for "eine million" / "eine milliarde" prefix
         if words.len() >= 2 {
