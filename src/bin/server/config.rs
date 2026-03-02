@@ -1,6 +1,9 @@
 //! Configuration types for the WebRTC transcription server
 
+use base64::Engine;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 
 /// Transcription latency mode
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -121,4 +124,28 @@ pub struct RuntimeConfig {
     pub turn_server: String,
     pub turn_username: String,
     pub turn_password: String,
+    pub turn_shared_secret: String,
+    pub turn_credential_ttl: u64,
+}
+
+/// Generate ephemeral TURN credentials using HMAC-SHA1 (RFC 5389 shared-secret mode).
+///
+/// Returns `(username, credential)` where:
+/// - `username` = `<unix_expiry_timestamp>:parakeet`
+/// - `credential` = `base64(HMAC-SHA1(shared_secret, username))`
+pub fn generate_turn_credentials(shared_secret: &str, ttl: u64) -> (String, String) {
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + ttl;
+    let username = format!("{}:parakeet", expiry);
+
+    let mut mac =
+        Hmac::<Sha1>::new_from_slice(shared_secret.as_bytes()).expect("HMAC accepts any key size");
+    mac.update(username.as_bytes());
+    let result = mac.finalize();
+    let credential = base64::engine::general_purpose::STANDARD.encode(result.into_bytes());
+
+    (username, credential)
 }

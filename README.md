@@ -17,10 +17,10 @@ Real-time speech recognition server and Rust library built on NVIDIA's Parakeet 
 | **Audio Input** | Media file playback, SRT live streams (14 channels), file upload (up to 2GB) |
 | **WebRTC** | Browser audio playback via WebRTC with TURN/STUN NAT traversal |
 | **FAB Teletext** | Live transcription forwarding to FAB endpoints with teletext line splitting (42x2 chars) |
-| **Text Processing** | GrowingTextMerger (anchor-based tail-overwrite), sentence boundary detection, deduplication |
+| **Text Processing** | GrowingTextMerger (anchor-based tail-overwrite), sentence boundary detection, deduplication, German text normalization (WER evaluation) |
 | **Noise Cancellation** | RNNoise real-time noise suppression |
 | **Frontend** | Web UI with session management, live subtitles, WebRTC audio, transcript export |
-| **Testing** | 199 Rust tests + 34 Playwright E2E tests |
+| **Testing** | 243 Rust tests (with WER threshold assertions) + 34 Playwright E2E tests |
 
 ## Tech Stack
 
@@ -144,7 +144,7 @@ See [docs/deployment.md](docs/deployment.md) for full configuration reference.
 | `asr` | continuous | Pure streaming without VAD |
 | `parallel` | sliding window | Multi-threaded parallel inference (4-8 threads) |
 | `pause_parallel` | pause-triggered | Pause-triggered parallel inference with ordered output |
-| `vod` | batch | Batch processing in 10-min chunks with deduplication |
+| `vod` | batch | Batch processing in 10-min chunks with deduplication, SRT subtitle export |
 
 See [docs/transcription-modes.md](docs/transcription-modes.md) for detailed configuration.
 
@@ -157,7 +157,7 @@ See [docs/transcription-modes.md](docs/transcription-modes.md) for detailed conf
 | [Transcription Modes](docs/transcription-modes.md) | All 13 modes with configuration parameters and selection guide |
 | [Frontend](docs/frontend.md) | Web UI, JavaScript modules, subtitle processing pipeline |
 | [FAB Teletext](docs/fab-teletext.md) | FAB forwarding system, teletext splitting, deduplication |
-| [Testing](docs/testing.md) | 199 Rust tests + 34 E2E tests, fixtures, running tests |
+| [Testing](docs/testing.md) | 243 Rust tests + 34 E2E tests, fixtures, WER thresholds |
 | [Deployment](docs/deployment.md) | Environment variables, CLI arguments, model setup, SRT channels |
 
 ## License

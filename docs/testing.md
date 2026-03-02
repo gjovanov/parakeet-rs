@@ -8,16 +8,16 @@
 
 | Type | Count | Location | Description |
 |------|-------|----------|-------------|
-| **Library unit tests** | 109 | `src/*.rs` | Core library logic (models, text processing, configs) |
+| **Library unit tests** | 153 | `src/*.rs` | Core library logic (models, text processing, normalizer, SRT export) |
 | **Server unit tests** | 71 | `src/bin/server/**/*.rs` | API handlers, FAB forwarder (31 tests), transcription configs |
-| **Integration tests** | 17 | `tests/integration_transcription.rs` | End-to-end transcription with real models |
+| **Integration tests** | 17 | `tests/integration_transcription.rs` | End-to-end transcription with WER threshold assertions |
 | **Doc tests** | 2 | `src/lib.rs` | Documentation examples |
 | **Playwright E2E** | 34 | `tests/e2e/*.spec.ts` | Browser-based UI and API tests |
-| **Total** | **233** | | |
+| **Total** | **277** | | |
 
 ## Running Tests
 
-### Rust Tests (199 total)
+### Rust Tests (243 total)
 
 ```bash
 # Run all tests (unit + integration, excluding ignored)
@@ -64,14 +64,16 @@ BASE_URL=http://localhost:80 bunx playwright test --debug
 
 ## Rust Test Breakdown
 
-### Library Tests (109)
+### Library Tests (153)
 
 Key test areas:
 
 | Module | Tests | Description |
 |--------|-------|-------------|
+| `german_normalizer` | 34 | German text normalization: umlauts, eszett, fillers, titles, number words, brackets |
 | `growing_text` | ~20 | GrowingTextMerger anchor-based merge, finalization, dedup |
 | `sentence_buffer` | ~15 | Sentence boundary detection, completion modes |
+| `vod_transcriber` | ~13 | VoD config, dedup, SRT export (`to_srt()`, `format_srt_time()`) |
 | `canary` / `canary_flash` | ~10 | Tokenizer, decoder, KV cache shape handling |
 | `vad` | ~8 | Silero VAD state machine, segment detection |
 | `model_registry` | ~5 | Model discovery, type mapping |
@@ -141,4 +143,20 @@ Integration tests evaluate transcription quality using:
 - **CER** (Character Error Rate): Percentage of character-level errors
 - **Key phrase recall**: Percentage of expected phrases found in output
 
+Text is normalized before comparison using `GermanTextNormalizer` (`src/german_normalizer.rs`), which handles: lowercase, bracket removal, filler words (`äh`, `ähm`), title expansion (`Hr.` → `herr`), eszett (`ß` → `ss`), German number words (`einundzwanzig` → `21`), and punctuation stripping.
+
 Reference results from `references.json` are used to ensure models maintain expected quality.
+
+### WER Threshold Assertions
+
+Integration tests enforce WER thresholds per mode/fixture to catch quality regressions:
+
+| Test | Fixture | Key Phrase Recall | WER Threshold |
+|------|---------|-------------------|---------------|
+| `test_canary_speedy_de_short` | de_short | ≥ 30% | < 60% |
+| `test_canary_speedy_de_medium` | de_medium | ≥ 30% | < 60% |
+| `test_canary_pause_based_de_long` | de_long | ≥ 30% | < 50% |
+| `test_canary_vod_de_news` | de_news | ≥ 30% | < 40% |
+| `test_canary_low_latency_de_medium` | de_medium | ≥ 20% | < 60% |
+
+Thresholds are intentionally relaxed (TTS-generated audio, streaming latency). VoD gets a tighter threshold since it processes the full file.

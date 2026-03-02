@@ -4,7 +4,7 @@ use super::models::ApiResponse;
 use crate::config::LatencyMode;
 use crate::state::{AppState, FabConfig, SessionAudioState};
 use crate::transcription::{run_session_transcription, AudioSource};
-use axum::{extract::{Path, State}, Json};
+use axum::{extract::{Path, Query, State}, Json};
 use parakeet_rs::SessionState;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -396,12 +396,20 @@ pub async fn stop_session(
     Json(ApiResponse::success(()))
 }
 
+/// Query parameters for transcript endpoint
+#[derive(Debug, Deserialize, Default)]
+pub struct TranscriptQuery {
+    /// Output format: "json" (default) or "srt"
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
 /// Get transcript for a completed VoD session
 pub async fn get_transcript(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<TranscriptQuery>,
 ) -> axum::response::Response {
-    use axum::body::Body;
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
@@ -430,38 +438,73 @@ pub async fn get_transcript(
     };
 
     // Read the transcript file
-    match tokio::fs::read_to_string(&transcript_path).await {
-        Ok(content) => {
-            // Get filename for Content-Disposition
-            let filename = transcript_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("transcript.json");
-
-            (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, "application/json"),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        &format!("attachment; filename=\"{}\"", filename),
-                    ),
-                ],
-                content,
-            )
-                .into_response()
-        }
+    let content = match tokio::fs::read_to_string(&transcript_path).await {
+        Ok(c) => c,
         Err(e) => {
             eprintln!(
                 "[Session {}] Failed to read transcript: {}",
                 id, e
             );
-            (
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiResponse::<()>::error("Failed to read transcript")),
             )
-                .into_response()
+                .into_response();
         }
+    };
+
+    let want_srt = query.format.as_deref() == Some("srt");
+
+    if want_srt {
+        // Parse JSON transcript and convert to SRT
+        match serde_json::from_str::<parakeet_rs::VodTranscript>(&content) {
+            Ok(transcript) => {
+                let srt_content = transcript.to_srt();
+                let filename = format!("transcript_{}.srt", id);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                        (
+                            header::CONTENT_DISPOSITION,
+                            &format!("attachment; filename=\"{}\"", filename),
+                        ),
+                    ],
+                    srt_content,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                eprintln!(
+                    "[Session {}] Failed to parse transcript for SRT conversion: {}",
+                    id, e
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::<()>::error("Failed to convert transcript to SRT")),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        // Return JSON as-is
+        let filename = transcript_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("transcript.json");
+
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    &format!("attachment; filename=\"{}\"", filename),
+                ),
+            ],
+            content,
+        )
+            .into_response()
     }
 }
 

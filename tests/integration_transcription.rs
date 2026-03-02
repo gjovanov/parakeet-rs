@@ -59,13 +59,7 @@ fn key_phrase_recall(hypothesis: &str, key_phrases: &[String]) -> f32 {
 }
 
 fn normalize_text(text: &str) -> String {
-    text.to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    parakeet_rs::normalize_german(text)
 }
 
 fn normalize_words(text: &str) -> Vec<String> {
@@ -271,9 +265,24 @@ async fn run_transcription_session(
         .send()
         .await;
 
-    // Build full transcript from finals, or fall back to growing text
+    // Build full transcript from finals + any remaining unfinalized growing text
     let transcript = if !finals.is_empty() {
-        finals.join(" ")
+        let mut full = finals.join(" ");
+        // Append any unfinalized trailing text that wasn't confirmed
+        if !last_growing.is_empty() {
+            let growing_lower = last_growing.to_lowercase();
+            let finals_lower = full.to_lowercase();
+            // Only append if growing text has content beyond what's already in finals
+            if !finals_lower.ends_with(&growing_lower) && !growing_lower.is_empty() {
+                // Check if last_growing contains new words not in the last final
+                let last_final = finals.last().map(|s| s.to_lowercase()).unwrap_or_default();
+                if !last_final.contains(&growing_lower) && !growing_lower.contains(&last_final) {
+                    full.push(' ');
+                    full.push_str(&last_growing);
+                }
+            }
+        }
+        full
     } else {
         last_growing
     };
@@ -452,6 +461,7 @@ mod integration {
 
         // Relaxed thresholds for TTS-generated audio (not natural speech)
         assert!(recall >= 0.3, "Key phrase recall too low: {:.1}%", recall * 100.0);
+        assert!(wer < 0.60, "WER too high: {:.1}% (threshold: 60%)", wer * 100.0);
     }
 
     #[tokio::test]
@@ -471,6 +481,7 @@ mod integration {
         eprintln!("  Transcript: {}", &transcript.chars().take(120).collect::<String>());
 
         assert!(recall >= 0.3, "Key phrase recall too low: {:.1}%", recall * 100.0);
+        assert!(wer < 0.60, "WER too high: {:.1}% (threshold: 60%)", wer * 100.0);
     }
 
     #[tokio::test]
@@ -490,6 +501,7 @@ mod integration {
         eprintln!("  Transcript: {}", &transcript.chars().take(120).collect::<String>());
 
         assert!(recall >= 0.3, "Key phrase recall too low: {:.1}%", recall * 100.0);
+        assert!(wer < 0.50, "WER too high: {:.1}% (threshold: 50%)", wer * 100.0);
     }
 
     #[tokio::test]
@@ -511,6 +523,7 @@ mod integration {
 
         // VoD should be more accurate than streaming
         assert!(recall >= 0.3, "Key phrase recall too low: {:.1}%", recall * 100.0);
+        assert!(wer < 0.40, "WER too high: {:.1}% (threshold: 40%)", wer * 100.0);
     }
 
     #[tokio::test]
@@ -522,12 +535,15 @@ mod integration {
             .await
             .expect("Transcription failed");
 
+        let wer = word_error_rate(&fixture.reference, &transcript);
         let recall = key_phrase_recall(&transcript, &fixture.key_phrases);
 
-        eprintln!("\n  [canary-1b/low_latency/de_medium] Recall: {:.1}%", recall * 100.0);
+        eprintln!("\n  [canary-1b/low_latency/de_medium] WER: {:.1}% Recall: {:.1}%",
+            wer * 100.0, recall * 100.0);
         eprintln!("  Transcript: {}", &transcript.chars().take(120).collect::<String>());
 
         assert!(recall >= 0.2, "Key phrase recall too low: {:.1}%", recall * 100.0);
+        assert!(wer < 0.60, "WER too high: {:.1}% (threshold: 60%)", wer * 100.0);
     }
 
     /// A/B test: KV cache (O(n)) vs full decode (O(n²)) quality comparison.

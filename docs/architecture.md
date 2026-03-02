@@ -48,7 +48,7 @@ graph TD
         SUB["WebSocket Subtitles<br/>(partial + final)"]
         RTC["WebRTC Audio<br/>(Opus/RTP)"]
         FAB["FAB Teletext<br/>(HTTP GET, 42x2 chars)"]
-        VOD["VoD Transcript<br/>(JSON download)"]
+        VOD["VoD Transcript<br/>(JSON + SRT export)"]
     end
 
     MF --> FF
@@ -207,7 +207,8 @@ The core library (`src/lib.rs`) exposes these public modules:
 | `streaming_transcriber` | `StreamingTranscriber` trait and `TranscriberFactory` |
 | `growing_text` | `GrowingTextMerger` — anchor-based tail-overwrite text merging |
 | `sentence_buffer` | Sentence boundary detection and completion |
-| `vod_transcriber` | VoD batch transcription (10-min chunks) |
+| `vod_transcriber` | VoD batch transcription (10-min chunks), SRT subtitle export |
+| `german_normalizer` | German text normalization for WER evaluation (umlauts, eszett, numbers, fillers) |
 | `model_registry` | `ModelRegistry` — model discovery and type mapping |
 | `media_manager` | `MediaManager` — file scanning and upload handling |
 | `session` | `SessionManager`, `TranscriptionSession`, `SessionState` |

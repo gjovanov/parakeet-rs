@@ -122,7 +122,29 @@ Stop and remove a session. Terminates the FFmpeg process and transcription threa
 
 Download the VoD transcript (only available for `vod` mode sessions).
 
-**Response**: JSON transcript with segments, words, and timing.
+**Query Parameters**:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `format` | string | `"json"` | Output format: `"json"` or `"srt"` |
+
+**Response** (JSON format — default):
+
+JSON transcript with segments, words, and timing. Content-Type: `application/json`.
+
+**Response** (SRT format — `?format=srt`):
+
+SRT subtitle file. Content-Type: `text/plain; charset=utf-8`.
+
+```
+1
+00:00:01,500 --> 00:00:03,200
+Guten Morgen, meine Damen und Herren.
+
+2
+00:00:03,500 --> 00:00:06,100
+Willkommen zur heutigen Sendung.
+```
 
 ## Model & Mode Endpoints
 

@@ -82,6 +82,7 @@ pub mod realtime_tdt_vad;
 pub mod noise_cancellation;
 pub mod sentence_buffer;
 pub mod growing_text;
+pub mod german_normalizer;
 pub mod vod_transcriber;
 mod timestamps;
 mod transcriber;
@@ -185,10 +186,13 @@ pub use growing_text::{
     FinalizedSentence, GrowingTextConfig, GrowingTextMerger, GrowingTextResult,
 };
 
+// German normalizer exports
+pub use german_normalizer::{GermanTextNormalizer, normalize_german};
+
 // VoD transcriber exports
 pub use vod_transcriber::{
-    SegmentCallback, VodConfig, VodProgress, VodSegment, VodTranscript, VodTranscriberCanary,
-    VodTranscriberTDT, VodWord,
+    format_srt_time, SegmentCallback, VodConfig, VodProgress, VodSegment, VodTranscript,
+    VodTranscriberCanary, VodTranscriberTDT, VodWord,
 };
 
 // Noise cancellation exports

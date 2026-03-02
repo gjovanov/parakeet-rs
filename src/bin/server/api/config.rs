@@ -1,5 +1,6 @@
 //! API handler for frontend configuration
 
+use crate::config::generate_turn_credentials;
 use crate::state::AppState;
 use axum::{extract::State, response::IntoResponse};
 use std::sync::Arc;
@@ -30,10 +31,18 @@ pub async fn config_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
             turn_urls.push(format!("{}?transport=tcp", turn_url));
         }
 
+        // Use ephemeral HMAC-SHA1 credentials when shared secret is configured,
+        // otherwise fall back to static username/password
+        let (username, credential) = if !config.turn_shared_secret.is_empty() {
+            generate_turn_credentials(&config.turn_shared_secret, config.turn_credential_ttl)
+        } else {
+            (config.turn_username.clone(), config.turn_password.clone())
+        };
+
         ice_servers.push(serde_json::json!({
             "urls": turn_urls,
-            "username": config.turn_username,
-            "credential": config.turn_password
+            "username": username,
+            "credential": credential
         }));
     }
 

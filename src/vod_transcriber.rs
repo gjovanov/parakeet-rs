@@ -90,6 +90,49 @@ pub struct VodTranscript {
     pub segments: Vec<VodSegment>,
 }
 
+impl VodTranscript {
+    /// Generate an SRT subtitle file from this transcript.
+    ///
+    /// Format:
+    /// ```text
+    /// 1
+    /// 00:00:01,500 --> 00:00:03,200
+    /// Guten Morgen, meine Damen und Herren.
+    ///
+    /// 2
+    /// 00:00:03,500 --> 00:00:06,100
+    /// Willkommen zur heutigen Sendung.
+    /// ```
+    pub fn to_srt(&self) -> String {
+        let mut srt = String::new();
+        for (i, segment) in self.segments.iter().enumerate() {
+            if i > 0 {
+                srt.push('\n');
+            }
+            srt.push_str(&format!(
+                "{}\n{} --> {}\n{}\n",
+                i + 1,
+                format_srt_time(segment.start),
+                format_srt_time(segment.end),
+                segment.text,
+            ));
+        }
+        srt
+    }
+}
+
+/// Format seconds as SRT timestamp: `HH:MM:SS,mmm`
+pub fn format_srt_time(seconds: f32) -> String {
+    let total_ms = (seconds * 1000.0).round() as u64;
+    let ms = total_ms % 1000;
+    let total_secs = total_ms / 1000;
+    let s = total_secs % 60;
+    let total_mins = total_secs / 60;
+    let m = total_mins % 60;
+    let h = total_mins / 60;
+    format!("{:02}:{:02}:{:02},{:03}", h, m, s, ms)
+}
+
 /// Progress callback type
 pub type ProgressCallback = Box<dyn Fn(VodProgress) + Send + Sync>;
 
@@ -1135,5 +1178,101 @@ mod tests {
         assert_eq!(config.overlap_duration_secs, 60.0);
         assert_eq!(config.num_workers, 4);
         assert_eq!(config.dedup_threshold, 0.8);
+    }
+
+    #[test]
+    fn test_format_srt_time_zero() {
+        assert_eq!(format_srt_time(0.0), "00:00:00,000");
+    }
+
+    #[test]
+    fn test_format_srt_time_seconds() {
+        assert_eq!(format_srt_time(1.5), "00:00:01,500");
+    }
+
+    #[test]
+    fn test_format_srt_time_minutes() {
+        assert_eq!(format_srt_time(65.2), "00:01:05,200");
+    }
+
+    #[test]
+    fn test_format_srt_time_hours() {
+        assert_eq!(format_srt_time(3661.123), "01:01:01,123");
+    }
+
+    #[test]
+    fn test_format_srt_time_fractional() {
+        assert_eq!(format_srt_time(3.2), "00:00:03,200");
+    }
+
+    #[test]
+    fn test_to_srt_empty() {
+        let transcript = VodTranscript {
+            session_id: "test".to_string(),
+            model: "test".to_string(),
+            language: "de".to_string(),
+            duration_secs: 0.0,
+            created_at: chrono::Utc::now(),
+            completed_at: chrono::Utc::now(),
+            segments: vec![],
+        };
+        assert_eq!(transcript.to_srt(), "");
+    }
+
+    #[test]
+    fn test_to_srt_single_segment() {
+        let transcript = VodTranscript {
+            session_id: "test".to_string(),
+            model: "test".to_string(),
+            language: "de".to_string(),
+            duration_secs: 5.0,
+            created_at: chrono::Utc::now(),
+            completed_at: chrono::Utc::now(),
+            segments: vec![VodSegment {
+                id: 0,
+                text: "Guten Morgen.".to_string(),
+                start: 1.5,
+                end: 3.2,
+                speaker: None,
+                words: vec![],
+            }],
+        };
+        let expected = "1\n00:00:01,500 --> 00:00:03,200\nGuten Morgen.\n";
+        assert_eq!(transcript.to_srt(), expected);
+    }
+
+    #[test]
+    fn test_to_srt_multiple_segments() {
+        let transcript = VodTranscript {
+            session_id: "test".to_string(),
+            model: "test".to_string(),
+            language: "de".to_string(),
+            duration_secs: 10.0,
+            created_at: chrono::Utc::now(),
+            completed_at: chrono::Utc::now(),
+            segments: vec![
+                VodSegment {
+                    id: 0,
+                    text: "Guten Morgen.".to_string(),
+                    start: 1.5,
+                    end: 3.2,
+                    speaker: None,
+                    words: vec![],
+                },
+                VodSegment {
+                    id: 1,
+                    text: "Willkommen zur Sendung.".to_string(),
+                    start: 3.5,
+                    end: 6.1,
+                    speaker: None,
+                    words: vec![],
+                },
+            ],
+        };
+        let srt = transcript.to_srt();
+        assert!(srt.contains("1\n00:00:01,500 --> 00:00:03,200\nGuten Morgen.\n"));
+        assert!(srt.contains("2\n00:00:03,500 --> 00:00:06,100\nWillkommen zur Sendung.\n"));
+        // Two segments should be separated by a blank line
+        assert!(srt.contains("Guten Morgen.\n\n2\n"));
     }
 }

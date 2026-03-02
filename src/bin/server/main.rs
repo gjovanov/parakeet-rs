@@ -316,6 +316,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let turn_server = std::env::var("TURN_SERVER").unwrap_or_default();
     let turn_username = std::env::var("TURN_USERNAME").unwrap_or_default();
     let turn_password = std::env::var("TURN_PASSWORD").unwrap_or_default();
+    let turn_shared_secret = std::env::var("TURN_SHARED_SECRET").unwrap_or_default();
+    let turn_credential_ttl: u64 = std::env::var("TURN_CREDENTIAL_TTL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(86400);
+
+    if !turn_shared_secret.is_empty() {
+        eprintln!("TURN: ephemeral credentials enabled (TTL={}s)", turn_credential_ttl);
+    }
 
     let ws_host = std::env::var("WS_HOST")
         .ok()
@@ -330,6 +339,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         turn_server: turn_server.clone(),
         turn_username: turn_username.clone(),
         turn_password: turn_password.clone(),
+        turn_shared_secret,
+        turn_credential_ttl,
     };
 
     eprintln!("Frontend config: ws_url={}", ws_url);
