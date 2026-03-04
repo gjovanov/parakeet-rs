@@ -54,9 +54,10 @@ pub fn run_audio_only_session(
 
     let duration_secs = 0.0_f32;
 
-    // Create a dummy channel — immediately drop the receiver so audio_pipeline
+    // Create a dummy channel and drop the receiver so audio_pipeline
     // silently discards samples (TrySendError::Disconnected is ignored)
-    let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(1);
+    let (audio_tx, audio_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(1);
+    drop(audio_rx);
 
     // Run the audio pipeline (FFmpeg → PCM → noise cancel → Opus → RTP)
     audio_pipeline::run_audio_pipeline(
