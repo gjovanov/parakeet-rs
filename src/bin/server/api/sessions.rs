@@ -105,7 +105,8 @@ pub struct GrowingSegmentsConfig {
 /// Request to create a new session
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
-    pub model_id: String,
+    #[serde(default)]
+    pub model_id: Option<String>,
     /// Media file ID (for file-based sessions) - mutually exclusive with srt_channel_id
     #[serde(default)]
     pub media_id: Option<String>,
@@ -144,6 +145,9 @@ pub struct CreateSessionRequest {
     /// FAB send type override ("growing" or "confirmed", empty = use server default)
     #[serde(default)]
     pub fab_send_type: Option<String>,
+    /// Audio-only mode (no transcription, just stream audio via WebRTC)
+    #[serde(default)]
+    pub without_transcription: bool,
 }
 
 fn default_sentence_completion() -> String {
@@ -229,6 +233,14 @@ pub async fn create_session(
     } else {
         req.noise_cancellation
     };
+    let without_transcription = req.without_transcription;
+
+    // Resolve model_id: required when transcription is enabled, empty placeholder when audio-only
+    let model_id = match req.model_id {
+        Some(id) => id,
+        None if without_transcription => String::new(),
+        None => return Json(ApiResponse::error("model_id is required when transcription is enabled")),
+    };
 
     // Determine diarization model name if enabled
     let diarization_model = if req.diarization {
@@ -244,7 +256,7 @@ pub async fn create_session(
             state
                 .session_manager
                 .create_session(
-                    &req.model_id,
+                    &model_id,
                     media_id,
                     mode_str,
                     &language,
@@ -252,6 +264,7 @@ pub async fn create_session(
                     req.diarization,
                     diarization_model.clone(),
                     &req.sentence_completion,
+                    without_transcription,
                 )
                 .await
         }
@@ -275,7 +288,7 @@ pub async fn create_session(
             state
                 .session_manager
                 .create_srt_session(
-                    &req.model_id,
+                    &model_id,
                     *srt_channel_id,
                     &channel.name,
                     &srt_url,
@@ -285,6 +298,7 @@ pub async fn create_session(
                     req.diarization,
                     diarization_model,
                     &req.sentence_completion,
+                    without_transcription,
                 )
                 .await
         }
@@ -580,6 +594,32 @@ pub async fn start_session(
                 ffmpeg_pid: ffmpeg_pid.clone(),
             },
         );
+    }
+
+    // Audio-only mode: skip model lookup, FAB forwarder, transcription
+    if session.without_transcription {
+        session.start();
+        session.set_state(SessionState::Running).await;
+
+        let session_clone = session.clone();
+        let audio_source = if let Some(srt_url) = &session.srt_url {
+            AudioSource::Srt(srt_url.clone())
+        } else {
+            AudioSource::File(session.wav_path.clone())
+        };
+
+        std::thread::spawn(move || {
+            crate::transcription::run_audio_only_session(
+                session_clone,
+                audio_source,
+                audio_track,
+                running,
+                ffmpeg_pid,
+            );
+        });
+
+        let info = session.info().await;
+        return Json(ApiResponse::success(info));
     }
 
     // Get model config for this session

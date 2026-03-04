@@ -428,6 +428,14 @@
       <div id="create-content" class="session-content">
         <div class="create-form">
           <div class="form-group">
+            <label>
+              <input type="checkbox" id="without-transcription-toggle">
+              Audio Only (no transcription)
+            </label>
+            <small style="color: #666;">Stream audio without running speech-to-text</small>
+          </div>
+
+          <div class="form-group" id="model-select-group">
             <label for="model-select">Transcription Model</label>
             <select id="model-select">
               <option value="">Loading models...</option>

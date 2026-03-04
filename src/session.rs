@@ -104,6 +104,9 @@ pub struct SessionInfo {
     /// Sentence completion mode ("off", "minimal", "balanced", "complete")
     #[serde(default = "default_sentence_completion")]
     pub sentence_completion: String,
+    /// Whether this is an audio-only session (no transcription)
+    #[serde(default)]
+    pub without_transcription: bool,
     /// Whether transcript is available for download (VoD mode)
     #[serde(default)]
     pub transcript_available: bool,
@@ -180,6 +183,8 @@ pub struct TranscriptionSession {
     pub srt_url: Option<String>,
     /// Sentence completion mode ("off", "minimal", "balanced", "complete")
     pub sentence_completion: String,
+    /// Whether this is an audio-only session (no transcription)
+    pub without_transcription: bool,
     /// Path to transcript.json (VoD mode)
     transcript_path: RwLock<Option<PathBuf>>,
     /// VoD progress (VoD mode)
@@ -201,6 +206,7 @@ impl TranscriptionSession {
         diarization: bool,
         diarization_model: Option<String>,
         sentence_completion: String,
+        without_transcription: bool,
     ) -> Self {
         let (subtitle_tx, _) = broadcast::channel(1000);
         let (status_tx, _) = broadcast::channel(100);
@@ -234,6 +240,7 @@ impl TranscriptionSession {
             srt_channel_name: None,
             srt_url: None,
             sentence_completion,
+            without_transcription,
             transcript_path: RwLock::new(None),
             vod_progress: RwLock::new(None),
         }
@@ -252,6 +259,7 @@ impl TranscriptionSession {
         diarization: bool,
         diarization_model: Option<String>,
         sentence_completion: String,
+        without_transcription: bool,
     ) -> Self {
         let (subtitle_tx, _) = broadcast::channel(1000);
         let (status_tx, _) = broadcast::channel(100);
@@ -285,6 +293,7 @@ impl TranscriptionSession {
             srt_channel_name: Some(srt_channel_name),
             srt_url: Some(srt_url),
             sentence_completion,
+            without_transcription,
             transcript_path: RwLock::new(None),
             vod_progress: RwLock::new(None),
         }
@@ -318,6 +327,7 @@ impl TranscriptionSession {
             srt_channel_name: self.srt_channel_name.clone(),
             srt_url: self.srt_url.clone(),
             sentence_completion: self.sentence_completion.clone(),
+            without_transcription: self.without_transcription,
             transcript_available: self.transcript_path.read().await.is_some(),
             vod_progress: self.vod_progress.read().await.clone(),
         }
@@ -477,6 +487,7 @@ impl SessionManager {
         diarization: bool,
         diarization_model: Option<String>,
         sentence_completion: &str,
+        without_transcription: bool,
     ) -> Result<Arc<TranscriptionSession>> {
         // Check session limit
         let current_count = self.sessions.read().await.len();
@@ -487,17 +498,22 @@ impl SessionManager {
             )));
         }
 
-        // Validate model
-        let model = self.model_registry.get_model(model_id).ok_or_else(|| {
-            Error::Model(format!("Unknown model: {}", model_id))
-        })?;
+        // Validate model (skip for audio-only sessions)
+        let model_name = if without_transcription {
+            "None (audio only)".to_string()
+        } else {
+            let model = self.model_registry.get_model(model_id).ok_or_else(|| {
+                Error::Model(format!("Unknown model: {}", model_id))
+            })?;
 
-        if !model.is_available {
-            return Err(Error::Model(format!(
-                "Model {} not available",
-                model_id
-            )));
-        }
+            if !model.is_available {
+                return Err(Error::Model(format!(
+                    "Model {} not available",
+                    model_id
+                )));
+            }
+            model.model_type.display_name().to_string()
+        };
 
         // Get media file
         let media = self.media_manager.get_file(media_id).await.ok_or_else(|| {
@@ -516,7 +532,7 @@ impl SessionManager {
         // Create session
         let session = TranscriptionSession::new(
             model_id.to_string(),
-            model.model_type.display_name().to_string(),
+            model_name,
             media_id.to_string(),
             media.filename,
             wav_path,
@@ -527,6 +543,7 @@ impl SessionManager {
             diarization,
             diarization_model,
             sentence_completion.to_string(),
+            without_transcription,
         );
 
         let session = Arc::new(session);
@@ -558,6 +575,7 @@ impl SessionManager {
         diarization: bool,
         diarization_model: Option<String>,
         sentence_completion: &str,
+        without_transcription: bool,
     ) -> Result<Arc<TranscriptionSession>> {
         // Check session limit
         let current_count = self.sessions.read().await.len();
@@ -568,17 +586,22 @@ impl SessionManager {
             )));
         }
 
-        // Validate model
-        let model = self.model_registry.get_model(model_id).ok_or_else(|| {
-            Error::Model(format!("Unknown model: {}", model_id))
-        })?;
+        // Validate model (skip for audio-only sessions)
+        let model_name = if without_transcription {
+            "None (audio only)".to_string()
+        } else {
+            let model = self.model_registry.get_model(model_id).ok_or_else(|| {
+                Error::Model(format!("Unknown model: {}", model_id))
+            })?;
 
-        if !model.is_available {
-            return Err(Error::Model(format!(
-                "Model {} not available",
-                model_id
-            )));
-        }
+            if !model.is_available {
+                return Err(Error::Model(format!(
+                    "Model {} not available",
+                    model_id
+                )));
+            }
+            model.model_type.display_name().to_string()
+        };
 
         // Use default language if empty
         let lang = if language.is_empty() { "de" } else { language };
@@ -586,7 +609,7 @@ impl SessionManager {
         // Create SRT session
         let session = TranscriptionSession::new_srt(
             model_id.to_string(),
-            model.model_type.display_name().to_string(),
+            model_name,
             srt_channel_id,
             srt_channel_name.to_string(),
             srt_url.to_string(),
@@ -596,6 +619,7 @@ impl SessionManager {
             diarization,
             diarization_model,
             sentence_completion.to_string(),
+            without_transcription,
         );
 
         let session = Arc::new(session);

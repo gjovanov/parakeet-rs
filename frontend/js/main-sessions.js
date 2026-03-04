@@ -114,6 +114,10 @@ function cacheElements() {
   elements.audioPlayer = document.getElementById('audio-player');
   elements.latencyInfo = document.getElementById('latency-info');
 
+  // Audio-only toggle
+  elements.withoutTranscriptionToggle = document.getElementById('without-transcription-toggle');
+  elements.modelSelectGroup = document.getElementById('model-select-group');
+
   // Session panel elements
   elements.sessionTabs = document.querySelectorAll('.session-tab');
   elements.sessionContents = document.querySelectorAll('.session-content');
@@ -227,6 +231,34 @@ function setupEventListeners() {
     });
   }
 
+  // Audio-only toggle - hide/show transcription-related controls
+  if (elements.withoutTranscriptionToggle) {
+    elements.withoutTranscriptionToggle.addEventListener('change', () => {
+      const audioOnly = elements.withoutTranscriptionToggle.checked;
+      const displayVal = audioOnly ? 'none' : '';
+
+      // Hide/show transcription-related form groups
+      const transcriptionElements = [
+        elements.modelSelectGroup,
+        elements.modeSelect?.closest('.form-group'),
+        elements.languageSelect?.closest('.form-group'),
+        elements.noiseSelect?.closest('.form-group'),
+        elements.diarizationSelect?.closest('.form-group'),
+        elements.sentenceCompletionSelect?.closest('.form-group'),
+        elements.fabEnabledSelect?.closest('.form-group'),
+        elements.fabUrlGroup,
+        elements.fabSendTypeGroup,
+        elements.parallelConfig,
+        elements.pauseConfig,
+        elements.growingSegmentsConfig,
+      ];
+
+      for (const el of transcriptionElements) {
+        if (el) el.style.display = displayVal;
+      }
+    });
+  }
+
   // Mode select - show/hide parallel config and pause config
   if (elements.modeSelect) {
     elements.modeSelect.addEventListener('change', () => {
@@ -336,7 +368,8 @@ function setupEventListeners() {
 
   // Create session
   elements.createSessionBtn.addEventListener('click', async () => {
-    const modelId = elements.modelSelect.value;
+    const withoutTranscription = elements.withoutTranscriptionToggle?.checked || false;
+    const modelId = withoutTranscription ? null : elements.modelSelect.value;
     const mode = elements.modeSelect?.value || 'speedy';
     const language = elements.languageSelect?.value || 'de';
     const noiseCancellation = elements.noiseSelect?.value || 'none';
@@ -364,7 +397,7 @@ function setupEventListeners() {
       }
     }
 
-    if (!modelId) {
+    if (!withoutTranscription && !modelId) {
       alert('Please select a model');
       return;
     }
@@ -421,7 +454,8 @@ function setupEventListeners() {
         sentenceCompletion,
         fabEnabled,
         fabUrl,
-        fabSendType
+        fabSendType,
+        withoutTranscription
       });
       // Auto-start the session
       await sessionManager.startSession(session.id);

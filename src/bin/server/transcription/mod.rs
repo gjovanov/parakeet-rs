@@ -36,6 +36,71 @@ impl AudioSource {
     }
 }
 
+/// Run an audio-only session (no transcription, just stream audio via WebRTC)
+pub fn run_audio_only_session(
+    session: Arc<TranscriptionSession>,
+    audio_source: AudioSource,
+    audio_track: Arc<TrackLocalStaticRTP>,
+    running: Arc<AtomicBool>,
+    ffmpeg_pid: Arc<AtomicU32>,
+) {
+    let is_srt = audio_source.is_srt();
+
+    eprintln!(
+        "[Session {}] Starting audio-only session for {} ({})",
+        session.id,
+        audio_source.display(),
+        if is_srt { "SRT stream" } else { "file" }
+    );
+
+    let duration_secs = match &audio_source {
+        AudioSource::File(path) => vod::get_audio_duration(path).unwrap_or(0.0),
+        AudioSource::Srt(_) => 0.0,
+    };
+
+    // Create a dummy channel — immediately drop the receiver so audio_pipeline
+    // silently discards samples (TrySendError::Disconnected is ignored)
+    let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(1);
+
+    // Run the audio pipeline (FFmpeg → PCM → noise cancel → Opus → RTP)
+    audio_pipeline::run_audio_pipeline(
+        session.clone(),
+        &audio_source,
+        audio_track,
+        running.clone(),
+        ffmpeg_pid,
+        audio_tx,
+        is_srt,
+        duration_secs,
+    );
+
+    // Mark session as completed (file) or stopped (SRT stream)
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let final_state = if is_srt {
+        SessionState::Stopped
+    } else {
+        SessionState::Completed
+    };
+    rt.block_on(session.set_state(final_state));
+    session.stop();
+
+    let end_msg = serde_json::json!({
+        "type": "end",
+        "total_duration": duration_secs,
+        "is_live": is_srt
+    });
+    session.status_tx.send(end_msg.to_string()).ok();
+
+    if is_srt {
+        eprintln!("[Session {}] Audio-only session stopped.", session.id);
+    } else {
+        eprintln!("[Session {}] Audio-only session complete. Duration: {:.2}s", session.id, duration_secs);
+    }
+}
+
 /// Run transcription for a session
 pub fn run_session_transcription(
     session: Arc<TranscriptionSession>,

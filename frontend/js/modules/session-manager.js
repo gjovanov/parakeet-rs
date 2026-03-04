@@ -170,18 +170,24 @@ export class SessionManager {
       sentenceCompletion = 'minimal',
       fabEnabled = 'default',
       fabUrl = '',
-      fabSendType = 'default'
+      fabSendType = 'default',
+      withoutTranscription = false
     } = options;
 
     try {
       const body = {
-        model_id: modelId,
         mode,
         language,
         noise_cancellation: noiseCancellation,
         diarization: diarization,
         sentence_completion: sentenceCompletion
       };
+
+      if (withoutTranscription) {
+        body.without_transcription = true;
+      } else {
+        body.model_id = modelId;
+      }
 
       // Add source - either media file or SRT channel (mutually exclusive)
       if (mediaId) {
