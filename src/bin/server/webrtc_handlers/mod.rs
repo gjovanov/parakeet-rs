@@ -103,9 +103,16 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
             )
         };
 
-        eprintln!("[WebRTC] Configuring TURN: {} (user: {})", turn_config.turn_server, username);
+        // Provide both UDP and TCP TURN URLs for maximum compatibility
+        let turn_url = &turn_config.turn_server;
+        let mut turn_urls = vec![turn_url.clone()];
+        if !turn_url.contains("?transport=") {
+            turn_urls.push(format!("{}?transport=tcp", turn_url));
+        }
+
+        eprintln!("[WebRTC] Configuring TURN: {:?} (user: {})", turn_urls, username);
         ice_servers.push(RTCIceServer {
-            urls: vec![turn_config.turn_server.clone()],
+            urls: turn_urls,
             username,
             credential,
             credential_type: RTCIceCredentialType::Password,
@@ -310,6 +317,8 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
                             &text,
                             &peer_connection,
                             &mut ws_sender,
+                            &state,
+                            &session_id,
                         ).await {
                             eprintln!("[WebRTC] Error handling message: {}", e);
                         }
@@ -374,11 +383,13 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
     cleanup_client(&state, &client_id, &session).await;
 }
 
-/// Handle incoming WebSocket messages (signaling)
+/// Handle incoming WebSocket messages (signaling + corrections)
 async fn handle_client_message(
     text: &str,
     peer_connection: &Arc<RTCPeerConnection>,
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    state: &Arc<AppState>,
+    session_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let msg: serde_json::Value = serde_json::from_str(text)?;
 
@@ -414,10 +425,74 @@ async fn handle_client_message(
                 peer_connection.add_ice_candidate(ice_candidate).await?;
             }
         }
+        Some("correction") => {
+            handle_correction_message(&msg, state, session_id).await;
+        }
         _ => {}
     }
 
     Ok(())
+}
+
+/// Handle a correction message from the client.
+///
+/// Parses the correction, learns new vocabulary words from it, and updates the
+/// session's formatting config so subsequent transcriptions benefit.
+async fn handle_correction_message(
+    msg: &serde_json::Value,
+    state: &Arc<AppState>,
+    session_id: &str,
+) {
+    // Parse the correction fields
+    let correction: parakeet_rs::CorrectionMessage = match serde_json::from_value(
+        serde_json::json!({
+            "original": msg["original"],
+            "corrected": msg["corrected"],
+        }),
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[Session {}] Failed to parse correction message: {}",
+                session_id, e
+            );
+            return;
+        }
+    };
+
+    eprintln!(
+        "[Session {}] Correction received: {:?} -> {:?}",
+        session_id, correction.original, correction.corrected
+    );
+
+    // Learn vocabulary from the correction and update the formatting config
+    let mut configs = state.formatting_configs.write().await;
+    if let Some(fmt_config) = configs.get_mut(session_id) {
+        // Use UserContext to extract vocabulary-worthy words from the correction
+        let mut ctx = parakeet_rs::UserContext::new();
+        ctx.vocabulary = fmt_config.vocabulary.clone();
+        ctx.learn_correction(&correction.original, &correction.corrected);
+
+        // Add any newly learned words back to the formatting config
+        let new_words: Vec<String> = ctx
+            .vocabulary
+            .into_iter()
+            .filter(|w| !fmt_config.vocabulary.contains(w))
+            .collect();
+
+        if !new_words.is_empty() {
+            eprintln!(
+                "[Session {}] Learned new vocabulary: {:?}",
+                session_id, new_words
+            );
+            fmt_config.vocabulary.extend(new_words);
+        }
+    } else {
+        eprintln!(
+            "[Session {}] Correction ignored: formatting not enabled for this session",
+            session_id
+        );
+    }
 }
 
 /// Clean up client connection

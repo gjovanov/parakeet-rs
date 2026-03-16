@@ -155,6 +155,8 @@ export class SessionManager {
    * @param {string} [options.fabEnabled='default'] - FAB forwarding ("default", "enabled", "disabled")
    * @param {string} [options.fabUrl=''] - FAB endpoint URL override
    * @param {string} [options.fabSendType='default'] - FAB send type ("default", "growing", "confirmed")
+   * @param {boolean} [options.enableFormatting=false] - Enable LLM text formatting on FINAL segments
+   * @param {string} [options.formattingTone='subtitle'] - Formatting tone hint
    */
   async createSession(modelId, options = {}) {
     const {
@@ -168,6 +170,8 @@ export class SessionManager {
       pauseConfig = null,
       growingSegmentsConfig = null,
       sentenceCompletion = 'minimal',
+      enableFormatting = false,
+      formattingTone = 'subtitle',
       fabEnabled = 'default',
       fabUrl = '',
       fabSendType = 'default',
@@ -211,6 +215,12 @@ export class SessionManager {
       // Add growing segments config if provided
       if (growingSegmentsConfig) {
         body.growing_segments_config = growingSegmentsConfig;
+      }
+
+      // Add formatting config
+      if (enableFormatting) {
+        body.enable_formatting = true;
+        body.formatting_tone = formattingTone;
       }
 
       // Add FAB config if not default

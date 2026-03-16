@@ -226,17 +226,17 @@ impl CanaryModel {
 
         // Load encoder
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let encoder = builder.commit_from_file(&encoder_path)?;
 
         // Load decoder
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let decoder = builder.commit_from_file(&decoder_path)?;
 
         eprintln!("[CanaryModel] Models loaded successfully");
-        eprintln!("[CanaryModel] Encoder inputs: {:?}", encoder.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
-        eprintln!("[CanaryModel] Decoder inputs: {:?}", decoder.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
+        eprintln!("[CanaryModel] Encoder inputs: {:?}", encoder.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
+        eprintln!("[CanaryModel] Decoder inputs: {:?}", decoder.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
 
         Ok(Self {
             encoder,
@@ -663,16 +663,27 @@ impl CanaryModel {
         }
 
         // Extract features
+        let t0 = std::time::Instant::now();
         let features = self.extract_features(samples)?;
+        let feat_ms = t0.elapsed().as_millis();
 
         // Run encoder
+        let t1 = std::time::Instant::now();
         let (encoder_embeddings, encoder_mask) = self.run_encoder(&features)?;
+        let enc_ms = t1.elapsed().as_millis();
 
         // Run decoder (greedy)
+        let t2 = std::time::Instant::now();
         let token_ids = self.greedy_decode(&encoder_embeddings, &encoder_mask)?;
+        let dec_ms = t2.elapsed().as_millis();
 
         // Decode tokens to text
         let text = self.tokenizer.decode(&token_ids);
+
+        eprintln!(
+            "[Canary] features={}ms encoder={}ms decoder={}ms ({} tokens) total={}ms",
+            feat_ms, enc_ms, dec_ms, token_ids.len(), t0.elapsed().as_millis()
+        );
 
         Ok(text)
     }

@@ -299,6 +299,7 @@ impl SentenceBuffer {
 
         let merged = TranscriptionSegment {
             text: self.combined_text.trim().to_string(),
+            raw_text: None,
             start_time: self.start_time.unwrap_or(0.0),
             end_time: self.end_time,
             speaker: self.speaker,
@@ -348,6 +349,7 @@ mod tests {
     fn make_segment(text: &str, start: f32, end: f32) -> TranscriptionSegment {
         TranscriptionSegment {
             text: text.to_string(),
+            raw_text: None,
             start_time: start,
             end_time: end,
             speaker: Some(0),
@@ -523,6 +525,7 @@ mod tests {
 
         let seg1 = TranscriptionSegment {
             text: "Hello".to_string(),
+            raw_text: None,
             start_time: 0.0,
             end_time: 0.5,
             speaker: Some(0),
@@ -534,6 +537,7 @@ mod tests {
 
         let seg2 = TranscriptionSegment {
             text: "world.".to_string(),
+            raw_text: None,
             start_time: 0.5,
             end_time: 1.0,
             speaker: Some(0),
@@ -596,6 +600,7 @@ mod tests {
 
         let seg = TranscriptionSegment {
             text: "Hello world.".to_string(),
+            raw_text: None,
             start_time: 0.0,
             end_time: 1.0,
             speaker: Some(2),

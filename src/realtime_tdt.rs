@@ -1247,6 +1247,7 @@ impl StreamingTranscriber for RealtimeTDTDiarized {
             .into_iter()
             .map(|seg| TranscriptionSegment {
                 text: seg.text,
+                raw_text: None,
                 start_time: seg.start_time,
                 end_time: seg.end_time,
                 speaker: seg.speaker,
@@ -1271,6 +1272,7 @@ impl StreamingTranscriber for RealtimeTDTDiarized {
             .into_iter()
             .map(|seg| TranscriptionSegment {
                 text: seg.text,
+                raw_text: None,
                 start_time: seg.start_time,
                 end_time: seg.end_time,
                 speaker: seg.speaker,

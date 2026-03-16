@@ -118,6 +118,7 @@ impl OrderedMerger {
             if !text.is_empty() && result.start_time >= self.last_emitted_end_time - 0.1 {
                 segments.push(TranscriptionSegment {
                     text,
+                    raw_text: None,
                     start_time: result.start_time,
                     end_time: result.end_time,
                     speaker: None,
@@ -551,6 +552,7 @@ impl StreamingTranscriber for PauseParallelTDT {
 
                 segments.push(TranscriptionSegment {
                     text,
+                    raw_text: None,
                     start_time: result.start_time,
                     end_time: result.end_time,
                     speaker,

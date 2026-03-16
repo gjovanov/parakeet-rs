@@ -19,6 +19,7 @@ pub fn create_canary_config(
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         },
         "pause_based" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
@@ -29,6 +30,7 @@ pub fn create_canary_config(
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         },
         "low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
@@ -39,6 +41,7 @@ pub fn create_canary_config(
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         },
         "ultra_low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 6.0,
@@ -49,6 +52,7 @@ pub fn create_canary_config(
             pause_threshold_secs: 0.5,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         },
         "extreme_low_latency" => RealtimeCanaryConfig {
             buffer_size_secs: 4.0,
@@ -59,6 +63,7 @@ pub fn create_canary_config(
             pause_threshold_secs: 0.4,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         },
         "lookahead" => RealtimeCanaryConfig {
             buffer_size_secs: 10.0,
@@ -69,16 +74,18 @@ pub fn create_canary_config(
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         },
         "growing_segments" => RealtimeCanaryConfig {
             buffer_size_secs: 8.0,          // Larger buffer = more time for word confirmation
             min_audio_secs: 1.0,
-            process_interval_secs: 0.5,     // Faster processing for quicker word confirmation
+            process_interval_secs: 1.0,     // Match inference time (~1s), reduce redundant re-transcriptions
             language,
             pause_based_confirm: true,
             pause_threshold_secs: 0.5,
             silence_energy_threshold: 0.008,
-            emit_full_text: false,          // Use word-level confirmation, not raw full-buffer text
+            emit_full_text: true,           // Bypass word confirmation, let merger handle everything
+            min_stable_count: None,         // Use default (2)
         },
         _ => RealtimeCanaryConfig {
             buffer_size_secs: 8.0,
@@ -89,6 +96,7 @@ pub fn create_canary_config(
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         },
     }
 }
@@ -565,6 +573,7 @@ mod tests {
             process_interval_secs: None,
             pause_threshold_ms: Some(600),
             silence_energy_threshold: None,
+            ..Default::default()
         };
         let config = apply_gs_canary("growing_segments", Some(&gs));
         assert_eq!(config.buffer_size_secs, 12.0);
@@ -580,6 +589,7 @@ mod tests {
             process_interval_secs: Some(1.0),
             pause_threshold_ms: Some(400),
             silence_energy_threshold: Some(0.012),
+            ..Default::default()
         };
         let config = apply_gs_canary("growing_segments", Some(&gs));
         assert_eq!(config.buffer_size_secs, 10.0);
@@ -595,6 +605,7 @@ mod tests {
             process_interval_secs: Some(99.0),
             pause_threshold_ms: Some(9999),
             silence_energy_threshold: Some(0.999),
+            ..Default::default()
         };
         let config = apply_gs_canary("speedy", Some(&gs));
         assert_eq!(config.buffer_size_secs, 8.0); // speedy default, not 99
@@ -608,6 +619,7 @@ mod tests {
             process_interval_secs: None,
             pause_threshold_ms: Some(700),
             silence_energy_threshold: None,
+            ..Default::default()
         };
         let config = apply_gs_tdt("growing_segments", Some(&gs));
         assert_eq!(config.buffer_size_secs, 15.0);
@@ -622,6 +634,7 @@ mod tests {
             process_interval_secs: None,
             pause_threshold_ms: None,
             silence_energy_threshold: None,
+            ..Default::default()
         };
         let config = apply_gs_tdt("speedy", Some(&gs));
         assert_eq!(config.buffer_size_secs, 8.0); // speedy default
@@ -634,6 +647,7 @@ mod tests {
             process_interval_secs: Some(2.0),
             pause_threshold_ms: None,
             silence_energy_threshold: Some(0.005),
+            ..Default::default()
         };
         let config = apply_gs_qwen("growing_segments", Some(&gs));
         assert_eq!(config.buffer_size_secs, 8.0);

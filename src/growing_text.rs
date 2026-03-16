@@ -265,10 +265,10 @@ impl GrowingTextMerger {
                 self.stable_count = 0;
                 self.last_stable_buffer = self.working_buffer.clone();
             }
-            if self.stable_count >= 5
+            if self.stable_count >= 7
                 && !self.working_buffer.is_empty()
                 && self.ends_with_sentence_terminator(&self.working_buffer)
-                && self.working_tokens.len() >= 5
+                && self.working_tokens.len() >= 8
             {
                 eprintln!(
                     "[GrowingTextMerger] Stable trailing sentence detected ({} pushes), finalizing: \"{}\"",
@@ -704,14 +704,43 @@ impl GrowingTextMerger {
         prev_row[n]
     }
 
-    /// Check if a dot at the given byte position is inside a number (e.g., "25.000").
-    /// A dot is inside a number if it's preceded by a digit AND followed by a digit.
+    /// Check if a dot at the given byte position is NOT a sentence terminator.
+    /// Returns true for: numbers (25.000), ordinals (19.), abbreviations (St., Dr., Nr.)
     fn is_dot_in_number(text: &str, byte_pos: usize) -> bool {
         let bytes = text.as_bytes();
-        byte_pos > 0
+        // Digit.Digit (e.g., "25.000", "1.3")
+        if byte_pos > 0
             && byte_pos + 1 < bytes.len()
             && bytes[byte_pos - 1].is_ascii_digit()
             && bytes[byte_pos + 1].is_ascii_digit()
+        {
+            return true;
+        }
+        // Digit. (ordinal, e.g., "am 19.", "der 5.")
+        if byte_pos > 0 && bytes[byte_pos - 1].is_ascii_digit() {
+            // Check if followed by space+lowercase (not a sentence start)
+            let after = &text[byte_pos + 1..];
+            let after_trimmed = after.trim_start();
+            if let Some(first_char) = after_trimmed.chars().next() {
+                if first_char.is_lowercase() {
+                    return true; // "19. november" — ordinal, not sentence end
+                }
+            }
+        }
+        // Common German abbreviations: 2-4 letter word before period
+        if byte_pos >= 2 {
+            // Find start of the word before the dot
+            let before = &text[..byte_pos];
+            if let Some(word_start) = before.rfind(|c: char| c.is_whitespace()) {
+                let word = &before[word_start + 1..];
+                let abbrevs = ["St", "Nr", "Abs", "Dr", "Prof", "bzw", "usw", "ca",
+                               "etc", "inkl", "ggf", "evtl", "sog", "vgl", "Jh"];
+                if abbrevs.iter().any(|a| word.eq_ignore_ascii_case(a)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Check if text ends with sentence terminator
@@ -790,7 +819,16 @@ impl GrowingTextMerger {
                 let after = self.working_buffer[after_pos..].trim();
                 let before = self.working_buffer[..i].trim();
                 let words_before = before.split_whitespace().count();
-                if after.split_whitespace().count() >= 2 && words_before >= 5 {
+                // Require: enough words before, enough after, and text after starts
+                // with uppercase (German sentence start) or is ! / ? (always sentence end)
+                let after_starts_upper = after.chars().next()
+                    .map(|ch| ch.is_uppercase())
+                    .unwrap_or(false);
+                let is_strong_terminator = c == '!' || c == '?';
+                if after.split_whitespace().count() >= 3
+                    && words_before >= 8
+                    && (after_starts_upper || is_strong_terminator)
+                {
                     split_pos = Some(after_pos);
                 }
             }

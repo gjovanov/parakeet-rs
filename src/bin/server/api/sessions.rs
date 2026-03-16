@@ -90,7 +90,7 @@ impl Default for PauseConfig {
 }
 
 /// Configuration for growing segments mode parameters
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GrowingSegmentsConfig {
     #[serde(default)]
     pub buffer_size_secs: Option<f32>,
@@ -100,6 +100,29 @@ pub struct GrowingSegmentsConfig {
     pub pause_threshold_ms: Option<u32>,
     #[serde(default)]
     pub silence_energy_threshold: Option<f32>,
+    /// When true, bypass word-level confirmation and send raw full-buffer text
+    /// directly to GrowingTextMerger (simpler pipeline, fewer layers).
+    /// When false (default), use word confirmation + stability counting.
+    #[serde(default)]
+    pub emit_full_text: Option<bool>,
+    /// Minimum consecutive stable transcription passes before confirming words (default: 2)
+    #[serde(default)]
+    pub min_stable_count: Option<u32>,
+    /// Echo dedup content-word overlap threshold (default: 0.50)
+    #[serde(default)]
+    pub echo_dedup_threshold: Option<f64>,
+    /// How many recent FINALs to check for echo dedup (default: 15)
+    #[serde(default)]
+    pub echo_dedup_window: Option<usize>,
+    /// Minimum word count for a FINAL segment (default: 4)
+    #[serde(default)]
+    pub min_final_words: Option<usize>,
+    /// Enable Phase 4b sentence promotion (default: true)
+    #[serde(default)]
+    pub promotion_enabled: Option<bool>,
+    /// Minimum words for promoted FINALs (default: 8)
+    #[serde(default)]
+    pub promotion_min_words: Option<usize>,
 }
 
 /// Request to create a new session
@@ -148,6 +171,15 @@ pub struct CreateSessionRequest {
     /// Audio-only mode (no transcription, just stream audio via WebRTC)
     #[serde(default)]
     pub without_transcription: bool,
+    /// Enable text formatting on FINAL segments (filler removal, self-correction, etc.)
+    #[serde(default)]
+    pub enable_formatting: bool,
+    /// Formatting tone hint ("casual", "email", "technical", "formal", "subtitle")
+    #[serde(default)]
+    pub formatting_tone: Option<String>,
+    /// User context for personalized formatting (vocabulary, app_hint)
+    #[serde(default)]
+    pub user_context: Option<parakeet_rs::UserContextRequest>,
 }
 
 fn default_sentence_completion() -> String {
@@ -344,6 +376,20 @@ pub async fn create_session(
                 configs.insert(session.id.clone(), gs_config);
             }
 
+            // Store formatting config if enabled
+            if req.enable_formatting {
+                let fmt_config = crate::state::FormattingConfig {
+                    enabled: true,
+                    tone: req.formatting_tone.clone().unwrap_or_else(|| "casual".to_string()),
+                    vocabulary: req.user_context.as_ref()
+                        .and_then(|uc| uc.vocabulary.clone())
+                        .unwrap_or_default(),
+                    app_hint: req.user_context.as_ref()
+                        .and_then(|uc| uc.app_hint.clone()),
+                };
+                state.formatting_configs.write().await.insert(session.id.clone(), fmt_config);
+            }
+
             // Store FAB config
             {
                 let fab_config = FabConfig {
@@ -429,6 +475,12 @@ pub async fn stop_session(
     // Clean up FAB config
     {
         let mut configs = state.fab_configs.write().await;
+        configs.remove(&id);
+    }
+
+    // Clean up formatting config
+    {
+        let mut configs = state.formatting_configs.write().await;
         configs.remove(&id);
     }
 
@@ -681,6 +733,15 @@ pub async fn start_session(
     let language = session.language.clone();
     let sentence_completion = session.sentence_completion.clone();
 
+    // Get formatting config if any
+    let (enable_formatting, formatting_tone, formatting_vocabulary) = {
+        let configs = state.formatting_configs.read().await;
+        match configs.get(&id) {
+            Some(cfg) if cfg.enabled => (true, cfg.tone.clone(), cfg.vocabulary.clone()),
+            _ => (false, "casual".to_string(), vec![]),
+        }
+    };
+
     // Determine audio source type
     let audio_source = if let Some(srt_url) = &session.srt_url {
         AudioSource::Srt(srt_url.clone())
@@ -704,6 +765,9 @@ pub async fn start_session(
             pause_config,
             growing_segments_config,
             sentence_completion,
+            enable_formatting,
+            formatting_tone,
+            formatting_vocabulary,
         );
     });
 

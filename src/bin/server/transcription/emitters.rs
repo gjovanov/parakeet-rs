@@ -20,7 +20,7 @@ pub fn emit_partial_subtitle(
     let subtitle_msg = serde_json::json!({
         "type": "subtitle",
         "text": segment.text,
-        "raw_text": segment.text,
+        "raw_text": segment.raw_text.as_deref().unwrap_or(&segment.text),
         "growing_text": growing_text,
         "full_transcript": full_transcript,
         "delta": delta,
@@ -75,7 +75,7 @@ pub fn emit_final_subtitle(
     let subtitle_msg = serde_json::json!({
         "type": "subtitle",
         "text": final_text,
-        "raw_text": merged.text,
+        "raw_text": merged.raw_text.as_deref().unwrap_or(&merged.text),
         "growing_text": growing_text,
         "full_transcript": full_transcript,
         "delta": "",
@@ -123,7 +123,7 @@ pub fn emit_streaming_segments(
         let subtitle_msg = serde_json::json!({
             "type": "subtitle",
             "text": normalized_text,
-            "raw_text": segment.text,
+            "raw_text": segment.raw_text.as_deref().unwrap_or(&segment.text),
             "growing_text": growing_text,
             "full_transcript": full_transcript,
             "delta": delta,

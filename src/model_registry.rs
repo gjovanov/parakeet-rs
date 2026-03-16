@@ -25,6 +25,8 @@ pub enum ModelType {
     Canary180MFlash,
     /// Canary-Qwen 2.5B SALM model (FastConformer + Qwen3 LLM decoder)
     CanaryQwen2B,
+    /// Small LLM for text formatting (e.g. Qwen2.5-0.5B-Instruct ONNX INT4)
+    FormatterLlm,
 }
 
 impl ModelType {
@@ -35,6 +37,7 @@ impl ModelType {
             ModelType::Canary1B => "canary-1b",
             ModelType::Canary180MFlash => "canary-180m-flash",
             ModelType::CanaryQwen2B => "canary-qwen-2b",
+            ModelType::FormatterLlm => "formatter-llm",
         }
     }
 
@@ -45,6 +48,7 @@ impl ModelType {
             ModelType::Canary1B => "Canary 1B",
             ModelType::Canary180MFlash => "Canary 180M Flash",
             ModelType::CanaryQwen2B => "Canary-Qwen 2.5B",
+            ModelType::FormatterLlm => "Formatter LLM",
         }
     }
 
@@ -55,6 +59,7 @@ impl ModelType {
             "canary-1b" => Some(ModelType::Canary1B),
             "canary-180m-flash" => Some(ModelType::Canary180MFlash),
             "canary-qwen-2b" => Some(ModelType::CanaryQwen2B),
+            "formatter-llm" => Some(ModelType::FormatterLlm),
             _ => None,
         }
     }
@@ -66,6 +71,8 @@ impl ModelType {
             ModelType::Canary1B => vec!["en", "de", "fr", "es"],
             ModelType::Canary180MFlash => vec!["en", "de", "fr", "es"],
             ModelType::CanaryQwen2B => vec!["en"],
+            // Formatter LLM is language-agnostic — it processes whatever the ASR outputs
+            ModelType::FormatterLlm => vec!["en", "de", "fr", "es"],
         }
     }
 }
@@ -197,6 +204,23 @@ impl ModelRegistry {
             languages: vec!["en".to_string()],
         });
 
+        // Register Formatter LLM if FORMATTER_MODEL_PATH is set
+        if let Ok(formatter_path) = std::env::var("FORMATTER_MODEL_PATH") {
+            let path = PathBuf::from(&formatter_path);
+            let formatter_available = path.exists();
+            let mut exec = registry.default_exec_config.clone();
+            exec.model_role = Some(crate::execution::ModelRole::Formatter);
+            registry.register(RegisteredModel {
+                model_type: ModelType::FormatterLlm,
+                model_path: path,
+                diarization_path: None,
+                exec_config: exec,
+                is_available: formatter_available,
+                description: "Small LLM for text formatting (e.g. Qwen2.5-0.5B-Instruct ONNX INT4)".to_string(),
+                languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
+            });
+        }
+
         eprintln!("[ModelRegistry] Registered {} models", registry.models.len());
         for (id, model) in &registry.models {
             eprintln!(
@@ -216,19 +240,20 @@ impl ModelRegistry {
         self.models.insert(id, model);
     }
 
-    /// List all registered models
+    /// List all registered transcription models (excludes utility models like FormatterLlm)
     pub fn list_models(&self) -> Vec<ModelInfo> {
         self.models
             .values()
+            .filter(|m| !matches!(m.model_type, ModelType::FormatterLlm))
             .map(|m| m.to_model_info())
             .collect()
     }
 
-    /// List only available models
+    /// List only available transcription models (excludes utility models like FormatterLlm)
     pub fn list_available_models(&self) -> Vec<ModelInfo> {
         self.models
             .values()
-            .filter(|m| m.is_available)
+            .filter(|m| m.is_available && !matches!(m.model_type, ModelType::FormatterLlm))
             .map(|m| m.to_model_info())
             .collect()
     }
@@ -302,6 +327,7 @@ impl ModelRegistry {
                     pause_threshold_secs: 0.6,
                     silence_energy_threshold: 0.008,
                     emit_full_text: false,
+                    min_stable_count: None,
                 };
 
                 let transcriber = RealtimeCanary::new(
@@ -352,6 +378,11 @@ impl ModelRegistry {
 
                 Ok(Box::new(transcriber))
             }
+            ModelType::FormatterLlm => {
+                Err(Error::Model(
+                    "FormatterLlm is not a transcription model — use it via LlmFormatter instead".to_string()
+                ))
+            }
         }
     }
 
@@ -383,12 +414,14 @@ mod tests {
         assert_eq!(ModelType::from_str("canary-1b"), Some(ModelType::Canary1B));
         assert_eq!(ModelType::from_str("canary-180m-flash"), Some(ModelType::Canary180MFlash));
         assert_eq!(ModelType::from_str("canary-qwen-2b"), Some(ModelType::CanaryQwen2B));
+        assert_eq!(ModelType::from_str("formatter-llm"), Some(ModelType::FormatterLlm));
         assert_eq!(ModelType::from_str("unknown"), None);
 
         assert_eq!(ModelType::ParakeetTdt.as_str(), "parakeet-tdt");
         assert_eq!(ModelType::Canary1B.as_str(), "canary-1b");
         assert_eq!(ModelType::Canary180MFlash.as_str(), "canary-180m-flash");
         assert_eq!(ModelType::CanaryQwen2B.as_str(), "canary-qwen-2b");
+        assert_eq!(ModelType::FormatterLlm.as_str(), "formatter-llm");
     }
 
     #[test]

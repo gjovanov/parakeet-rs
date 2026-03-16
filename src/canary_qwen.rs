@@ -306,28 +306,28 @@ impl CanaryQwenModel {
 
         // Load ONNX sessions
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let encoder = builder.commit_from_file(&encoder_path)?;
 
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let projection = builder.commit_from_file(&projection_path)?;
 
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let decoder = builder.commit_from_file(&decoder_path)?;
 
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let embed_tokens = builder.commit_from_file(&embed_tokens_path)?;
 
         eprintln!("[CanaryQwen] Models loaded successfully");
-        eprintln!("[CanaryQwen] Encoder inputs: {:?}", encoder.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
-        eprintln!("[CanaryQwen] Encoder outputs: {:?}", encoder.outputs.iter().map(|o| &o.name).collect::<Vec<_>>());
-        eprintln!("[CanaryQwen] Projection inputs: {:?}", projection.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
-        eprintln!("[CanaryQwen] Decoder inputs: {:?}", decoder.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
-        eprintln!("[CanaryQwen] Decoder outputs: {:?}", decoder.outputs.iter().map(|o| &o.name).collect::<Vec<_>>());
-        eprintln!("[CanaryQwen] EmbedTokens inputs: {:?}", embed_tokens.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
+        eprintln!("[CanaryQwen] Encoder inputs: {:?}", encoder.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
+        eprintln!("[CanaryQwen] Encoder outputs: {:?}", encoder.outputs().iter().map(|o| o.name()).collect::<Vec<_>>());
+        eprintln!("[CanaryQwen] Projection inputs: {:?}", projection.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
+        eprintln!("[CanaryQwen] Decoder inputs: {:?}", decoder.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
+        eprintln!("[CanaryQwen] Decoder outputs: {:?}", decoder.outputs().iter().map(|o| o.name()).collect::<Vec<_>>());
+        eprintln!("[CanaryQwen] EmbedTokens inputs: {:?}", embed_tokens.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
 
         Ok(Self {
             encoder,
@@ -540,8 +540,8 @@ impl CanaryQwenModel {
         let input_value = ort::value::Value::from_array(encoder_embeddings.clone())?;
 
         // Read output name before run() to avoid overlapping borrows on self.projection
-        let output_name = self.projection.outputs.first()
-            .map(|o| o.name.clone())
+        let output_name = self.projection.outputs().first()
+            .map(|o| o.name().to_string())
             .unwrap_or_else(|| "projected_output".to_string());
 
         let outputs = self.projection.run(ort::inputs!(
@@ -552,7 +552,7 @@ impl CanaryQwenModel {
             .try_extract_tensor::<f32>()
             .map_err(|e| Error::Model(format!("Failed to extract projected embeddings: {}", e)))?;
 
-        let dims = shape.as_ref();
+        let dims: &[i64] = &**shape;
         Array3::from_shape_vec(
             (dims[0] as usize, dims[1] as usize, dims[2] as usize),
             data.to_vec(),
@@ -568,8 +568,8 @@ impl CanaryQwenModel {
         let input_value = ort::value::Value::from_array(input)?;
 
         // Read output name before run() to avoid overlapping borrows on self.embed_tokens
-        let output_name = self.embed_tokens.outputs.first()
-            .map(|o| o.name.clone())
+        let output_name = self.embed_tokens.outputs().first()
+            .map(|o| o.name().to_string())
             .unwrap_or_else(|| "inputs_embeds".to_string());
 
         let outputs = self.embed_tokens.run(ort::inputs!(
@@ -580,7 +580,7 @@ impl CanaryQwenModel {
             .try_extract_tensor::<f32>()
             .map_err(|e| Error::Model(format!("Failed to extract embeddings: {}", e)))?;
 
-        let dims = shape.as_ref();
+        let dims: &[i64] = &**shape;
         Array3::from_shape_vec(
             (dims[0] as usize, dims[1] as usize, dims[2] as usize),
             data.to_vec(),

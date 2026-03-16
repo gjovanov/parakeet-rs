@@ -403,6 +403,7 @@ impl RealtimeTdtVad {
 
                 self.pending_segments.push(TranscriptionSegment {
                     text: new_text,
+                    raw_text: None,
                     start_time: new_start,
                     end_time,
                     speaker,
@@ -461,6 +462,7 @@ impl RealtimeTdtVad {
 
             self.pending_segments.push(TranscriptionSegment {
                 text,
+                raw_text: None,
                 start_time,
                 end_time,
                 speaker,
@@ -560,6 +562,7 @@ impl RealtimeTdtVad {
 
         self.pending_segments.push(TranscriptionSegment {
             text,
+            raw_text: None,
             start_time: segment.start_time,
             end_time: segment.end_time,
             speaker,

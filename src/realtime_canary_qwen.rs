@@ -747,6 +747,7 @@ impl StreamingTranscriber for RealtimeCanaryQwen {
 
             segments.push(TranscriptionSegment {
                 text,
+                raw_text: None,
                 start_time: start,
                 end_time: end,
                 speaker,
@@ -765,6 +766,7 @@ impl StreamingTranscriber for RealtimeCanaryQwen {
 
             segments.push(TranscriptionSegment {
                 text: result.text,
+                raw_text: None,
                 start_time,
                 end_time,
                 speaker,
@@ -798,6 +800,7 @@ impl StreamingTranscriber for RealtimeCanaryQwen {
 
             vec![TranscriptionSegment {
                 text: result.text,
+                raw_text: None,
                 start_time: 0.0,
                 end_time,
                 speaker,

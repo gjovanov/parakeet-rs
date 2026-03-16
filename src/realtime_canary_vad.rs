@@ -664,6 +664,7 @@ impl RealtimeCanaryVad {
 
                 self.pending_segments.push(TranscriptionSegment {
                     text: new_text,
+                    raw_text: None,
                     start_time: new_start,
                     end_time: new_end,
                     speaker,
@@ -772,6 +773,7 @@ impl RealtimeCanaryVad {
 
             self.pending_segments.push(TranscriptionSegment {
                 text,
+                raw_text: None,
                 start_time: segment.start_time,
                 end_time: segment.end_time,
                 speaker,
@@ -833,6 +835,7 @@ impl RealtimeCanaryVad {
 
             self.pending_segments.push(TranscriptionSegment {
                 text,
+                raw_text: None,
                 start_time,
                 end_time,
                 speaker,

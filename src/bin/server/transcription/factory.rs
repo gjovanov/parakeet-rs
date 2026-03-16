@@ -23,6 +23,12 @@ pub struct TranscriberParams {
     pub parallel_config: Option<ParallelConfig>,
     pub pause_config: Option<PauseConfig>,
     pub growing_segments_config: Option<GrowingSegmentsConfig>,
+    /// Enable text formatting on FINAL segments
+    pub enable_formatting: bool,
+    /// Formatting tone hint
+    pub formatting_tone: String,
+    /// User vocabulary for formatting
+    pub formatting_vocabulary: Vec<String>,
 }
 
 /// Create the appropriate transcriber based on model type and mode.
@@ -44,12 +50,15 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
         parallel_config,
         pause_config,
         growing_segments_config,
+        enable_formatting,
+        formatting_tone,
+        formatting_vocabulary,
     } = params;
 
     let is_parallel_mode = mode == "parallel";
     let is_pause_parallel_mode = mode == "pause_parallel";
 
-    if is_canary_qwen && is_pause_parallel_mode {
+    let transcriber = if is_canary_qwen && is_pause_parallel_mode {
         create_canary_qwen_pause_parallel(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
             &language, &parallel_config, &pause_config,
@@ -99,6 +108,58 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
             &session_id, &model_path, diar_path, exec_config,
             &mode, pause_config.as_ref(), growing_segments_config.as_ref(),
         )
+    };
+
+    // Optionally wrap with FormattingTranscriber
+    if enable_formatting {
+        if let Some(inner) = transcriber {
+            use parakeet_rs::text_formatter::{FormattingContext, FormattingTone, LlmFormatter, RuleBasedFormatter};
+            use parakeet_rs::formatting_transcriber::FormattingTranscriber;
+
+            let context = FormattingContext {
+                tone: FormattingTone::from_str(&formatting_tone),
+                language: language.clone(),
+                vocabulary: formatting_vocabulary,
+                recent_text: vec![],
+            };
+
+            // Use LlmFormatter when FORMATTER_MODEL_PATH is set and the path exists,
+            // otherwise fall back to RuleBasedFormatter
+            let formatter: Box<dyn parakeet_rs::text_formatter::TextFormatter> =
+                match std::env::var("FORMATTER_MODEL_PATH") {
+                    Ok(path) if std::path::Path::new(&path).exists() => {
+                        eprintln!(
+                            "[Session {}] Formatter LLM model found at {}, using LlmFormatter",
+                            session_id, path
+                        );
+                        Box::new(LlmFormatter::new(path))
+                    }
+                    _ => {
+                        Box::new(RuleBasedFormatter::new())
+                    }
+                };
+
+            eprintln!(
+                "[Session {}] Wrapping transcriber with {} formatter (tone: {})",
+                session_id, formatter.name(), formatting_tone
+            );
+
+            Some(Box::new(FormattingTranscriber::new(
+                inner,
+                formatter,
+                context,
+                std::time::Duration::from_millis(
+                    std::env::var("FORMATTER_TIMEOUT_MS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(5000u64),
+                ),
+            )))
+        } else {
+            None
+        }
+    } else {
+        transcriber
     }
 }
 
@@ -458,6 +519,8 @@ fn create_canary(
             if let Some(v) = gs.process_interval_secs { canary_config.process_interval_secs = v; }
             if let Some(v) = gs.pause_threshold_ms { canary_config.pause_threshold_secs = v as f32 / 1000.0; }
             if let Some(v) = gs.silence_energy_threshold { canary_config.silence_energy_threshold = v; }
+            if let Some(v) = gs.emit_full_text { canary_config.emit_full_text = v; }
+            if let Some(v) = gs.min_stable_count { canary_config.min_stable_count = Some(v); }
         }
     }
 

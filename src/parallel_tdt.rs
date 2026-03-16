@@ -144,6 +144,7 @@ impl ResultMerger {
 
                 segments.push(TranscriptionSegment {
                     text,
+                    raw_text: None,
                     start_time,
                     end_time,
                     speaker: None,
@@ -516,6 +517,7 @@ impl StreamingTranscriber for ParallelTDT {
 
                 segments.push(TranscriptionSegment {
                     text,
+                    raw_text: None,
                     start_time,
                     end_time,
                     speaker,

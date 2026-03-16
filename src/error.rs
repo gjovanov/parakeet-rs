@@ -39,6 +39,12 @@ impl From<ort::Error> for Error {
     }
 }
 
+impl From<ort::Error<ort::session::builder::SessionBuilder>> for Error {
+    fn from(e: ort::Error<ort::session::builder::SessionBuilder>) -> Self {
+        Error::Ort(e.into())
+    }
+}
+
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
         Error::Config(e.to_string())

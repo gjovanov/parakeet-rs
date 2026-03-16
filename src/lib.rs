@@ -89,12 +89,18 @@ pub mod sentence_buffer;
 pub mod growing_text;
 pub mod german_normalizer;
 pub mod vod_transcriber;
+pub mod text_formatter;
+pub mod formatting_transcriber;
+pub mod user_context;
+pub mod language_detector;
 mod timestamps;
 mod transcriber;
 mod vocab;
 
 pub use error::{Error, Result};
-pub use execution::{ExecutionProvider, ModelConfig as ExecutionConfig};
+pub use execution::{
+    ExecutionProvider, GpuOptimizationLevel, ModelConfig as ExecutionConfig, ModelRole,
+};
 
 /// Initialize ONNX Runtime. Required when using the `load-dynamic` feature.
 /// This must be called before any model loading operations.
@@ -105,13 +111,11 @@ pub fn init_ort() -> Result<()> {
     static mut INIT_RESULT: Option<String> = None;
 
     INIT.call_once(|| {
-        match ort::init().commit() {
-            Ok(_) => {
-                eprintln!("[ORT] ONNX Runtime initialized successfully");
-            }
-            Err(e) => {
-                unsafe { INIT_RESULT = Some(e.to_string()); }
-            }
+        let ok = ort::init().commit();
+        if ok {
+            eprintln!("[ORT] ONNX Runtime initialized successfully");
+        } else {
+            unsafe { INIT_RESULT = Some("ort::init().commit() returned false".to_string()); }
         }
     });
 
@@ -208,5 +212,16 @@ pub use vod_transcriber::{
 // Noise cancellation exports
 pub use noise_cancellation::{
     create_noise_canceller, NoiseCancellationType, NoiseCanceller, RNNoiseProcessor,
+};
+
+// Text formatting exports
+pub use text_formatter::{FormattingContext, FormattingTone, LlmFormatter, RuleBasedFormatter, TextFormatter};
+pub use formatting_transcriber::FormattingTranscriber;
+pub use user_context::{UserContext, UserContextRequest, CorrectionMessage};
+
+// Language detection exports
+pub use language_detector::{
+    LanguageDetection, LanguageDetector, LanguageRouter,
+    SimpleLanguageDetector, SileroLangDetector,
 };
 

@@ -154,6 +154,7 @@ impl OrderedMerger {
                 if result.start_time >= self.last_emitted_end_time - 0.1 {
                     segments.push(TranscriptionSegment {
                         text,
+                        raw_text: None,
                         start_time: result.start_time,
                         end_time: result.end_time,
                         speaker: None,
@@ -683,6 +684,7 @@ impl StreamingTranscriber for PauseParallelCanary {
                 let mid_time = (result.start_time + result.end_time) / 2.0;
                 segments.push(TranscriptionSegment {
                     text,
+                    raw_text: None,
                     start_time: result.start_time,
                     end_time: result.end_time,
                     speaker: self.get_speaker_at(mid_time),

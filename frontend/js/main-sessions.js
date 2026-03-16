@@ -166,6 +166,25 @@ function cacheElements() {
   elements.gsSilenceSensitivity = document.getElementById('gs-silence-sensitivity');
   elements.gsSilenceSensitivityValue = document.getElementById('gs-silence-sensitivity-value');
 
+  // Growing segments advanced tuning elements
+  elements.gsEmitFullText = document.getElementById('gs-emit-full-text');
+  elements.gsMinStableCount = document.getElementById('gs-min-stable-count');
+  elements.gsMinStableCountValue = document.getElementById('gs-min-stable-count-value');
+  elements.gsEchoDedupThreshold = document.getElementById('gs-echo-dedup-threshold');
+  elements.gsEchoDedupThresholdValue = document.getElementById('gs-echo-dedup-threshold-value');
+  elements.gsEchoDedupWindow = document.getElementById('gs-echo-dedup-window');
+  elements.gsEchoDedupWindowValue = document.getElementById('gs-echo-dedup-window-value');
+  elements.gsMinFinalWords = document.getElementById('gs-min-final-words');
+  elements.gsMinFinalWordsValue = document.getElementById('gs-min-final-words-value');
+  elements.gsPromotionEnabled = document.getElementById('gs-promotion-enabled');
+  elements.gsPromotionMinWords = document.getElementById('gs-promotion-min-words');
+  elements.gsPromotionMinWordsValue = document.getElementById('gs-promotion-min-words-value');
+
+  // Formatting config elements
+  elements.formattingEnabledSelect = document.getElementById('formatting-enabled-select');
+  elements.formattingToneGroup = document.getElementById('formatting-tone-group');
+  elements.formattingToneSelect = document.getElementById('formatting-tone-select');
+
   // FAB config elements
   elements.fabEnabledSelect = document.getElementById('fab-enabled-select');
   elements.fabUrlGroup = document.getElementById('fab-url-group');
@@ -352,6 +371,43 @@ function setupEventListeners() {
     });
   }
 
+  // Growing segments advanced sliders
+  if (elements.gsMinStableCount) {
+    elements.gsMinStableCount.addEventListener('input', () => {
+      elements.gsMinStableCountValue.textContent = elements.gsMinStableCount.value;
+    });
+  }
+  if (elements.gsEchoDedupThreshold) {
+    elements.gsEchoDedupThreshold.addEventListener('input', () => {
+      elements.gsEchoDedupThresholdValue.textContent = parseFloat(elements.gsEchoDedupThreshold.value).toFixed(2);
+    });
+  }
+  if (elements.gsEchoDedupWindow) {
+    elements.gsEchoDedupWindow.addEventListener('input', () => {
+      elements.gsEchoDedupWindowValue.textContent = elements.gsEchoDedupWindow.value;
+    });
+  }
+  if (elements.gsMinFinalWords) {
+    elements.gsMinFinalWords.addEventListener('input', () => {
+      elements.gsMinFinalWordsValue.textContent = elements.gsMinFinalWords.value;
+    });
+  }
+  if (elements.gsPromotionMinWords) {
+    elements.gsPromotionMinWords.addEventListener('input', () => {
+      elements.gsPromotionMinWordsValue.textContent = elements.gsPromotionMinWords.value;
+    });
+  }
+
+  // Formatting select - show/hide tone dropdown
+  if (elements.formattingEnabledSelect) {
+    elements.formattingEnabledSelect.addEventListener('change', () => {
+      const show = elements.formattingEnabledSelect.value === 'enabled';
+      if (elements.formattingToneGroup) {
+        elements.formattingToneGroup.style.display = show ? 'flex' : 'none';
+      }
+    });
+  }
+
   // FAB select - show/hide URL input and send type
   if (elements.fabEnabledSelect) {
     elements.fabEnabledSelect.addEventListener('change', () => {
@@ -411,6 +467,10 @@ function setupEventListeners() {
       };
     }
 
+    // Get formatting config
+    const enableFormatting = elements.formattingEnabledSelect?.value === 'enabled';
+    const formattingTone = elements.formattingToneSelect?.value || 'subtitle';
+
     // Get FAB config
     const fabEnabled = elements.fabEnabledSelect?.value || 'default';
     const fabUrl = elements.fabUrlInput?.value?.trim() || '';
@@ -434,7 +494,14 @@ function setupEventListeners() {
         buffer_size_secs: parseFloat(elements.gsBufferSize.value),
         process_interval_secs: parseFloat(elements.gsProcessInterval.value),
         pause_threshold_ms: parseInt(elements.gsPauseThreshold.value, 10),
-        silence_energy_threshold: getSilenceEnergyThreshold(parseInt(elements.gsSilenceSensitivity?.value || 3, 10))
+        silence_energy_threshold: getSilenceEnergyThreshold(parseInt(elements.gsSilenceSensitivity?.value || 3, 10)),
+        emit_full_text: elements.gsEmitFullText?.value === 'true' ? true : undefined,
+        min_stable_count: elements.gsMinStableCount ? parseInt(elements.gsMinStableCount.value, 10) : undefined,
+        echo_dedup_threshold: elements.gsEchoDedupThreshold ? parseFloat(elements.gsEchoDedupThreshold.value) : undefined,
+        echo_dedup_window: elements.gsEchoDedupWindow ? parseInt(elements.gsEchoDedupWindow.value, 10) : undefined,
+        min_final_words: elements.gsMinFinalWords ? parseInt(elements.gsMinFinalWords.value, 10) : undefined,
+        promotion_enabled: elements.gsPromotionEnabled?.value === 'false' ? false : undefined,
+        promotion_min_words: elements.gsPromotionMinWords ? parseInt(elements.gsPromotionMinWords.value, 10) : undefined,
       };
     }
 
@@ -452,6 +519,8 @@ function setupEventListeners() {
         pauseConfig,
         growingSegmentsConfig,
         sentenceCompletion,
+        enableFormatting,
+        formattingTone,
         fabEnabled,
         fabUrl,
         fabSendType,

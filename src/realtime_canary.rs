@@ -135,6 +135,8 @@ pub struct RealtimeCanaryConfig {
     /// word-level confirmation. Use for growing_segments mode where the
     /// GrowingTextMerger handles finalization.
     pub emit_full_text: bool,
+    /// Override MIN_STABLE_COUNT for word confirmation (default: None = use constant 2)
+    pub min_stable_count: Option<u32>,
 }
 
 impl Default for RealtimeCanaryConfig {
@@ -148,6 +150,7 @@ impl Default for RealtimeCanaryConfig {
             pause_threshold_secs: 0.6,
             silence_energy_threshold: 0.008,
             emit_full_text: false,
+            min_stable_count: None,
         }
     }
 }
@@ -442,8 +445,8 @@ impl RealtimeCanary {
     fn process_buffer(&mut self) -> Result<CanaryChunkResult> {
         let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
 
-        // Convert buffer to vec
-        let audio: Vec<f32> = self.audio_buffer.iter().copied().collect();
+        // Get contiguous slice without copying (rearranges VecDeque in-place if needed)
+        let audio = self.audio_buffer.make_contiguous();
 
         // Transcribe with timing
         let inference_start = std::time::Instant::now();
@@ -569,7 +572,8 @@ impl RealtimeCanary {
                 // Only emit as final if the text has been seen before (stability check)
                 if self.pending_text == new_text {
                     self.pending_stable_count += 1;
-                    if self.pending_stable_count >= MIN_STABLE_COUNT {
+                    let stable_threshold = self.config.min_stable_count.unwrap_or(MIN_STABLE_COUNT);
+                    if self.pending_stable_count >= stable_threshold {
                         Some(new_text)
                     } else {
                         None
@@ -740,6 +744,7 @@ impl StreamingTranscriber for RealtimeCanary {
 
             segments.push(TranscriptionSegment {
                 text,
+                raw_text: None,
                 start_time: start,
                 end_time: end,
                 speaker,
@@ -758,6 +763,7 @@ impl StreamingTranscriber for RealtimeCanary {
 
             segments.push(TranscriptionSegment {
                 text: result.text,
+                raw_text: None,
                 start_time,
                 end_time,
                 speaker,
@@ -791,6 +797,7 @@ impl StreamingTranscriber for RealtimeCanary {
 
             vec![TranscriptionSegment {
                 text: result.text,
+                raw_text: None,
                 start_time: 0.0,
                 end_time,
                 speaker,

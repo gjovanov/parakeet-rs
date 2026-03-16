@@ -117,6 +117,9 @@ pub fn run_session_transcription(
     pause_config: Option<PauseConfig>,
     growing_segments_config: Option<GrowingSegmentsConfig>,
     sentence_completion: String,
+    enable_formatting: bool,
+    formatting_tone: String,
+    formatting_vocabulary: Vec<String>,
 ) {
     use std::sync::mpsc as std_mpsc;
 
@@ -178,6 +181,9 @@ pub fn run_session_transcription(
     let transcription_session = session.clone();
     let transcription_running = running.clone();
     let sentence_completion_clone = sentence_completion.clone();
+    let enable_formatting_clone = enable_formatting;
+    let formatting_tone_clone = formatting_tone.clone();
+    let formatting_vocabulary_clone = formatting_vocabulary.clone();
     let transcription_thread = std::thread::spawn(move || {
         let session_id = transcription_session.id.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -200,6 +206,9 @@ pub fn run_session_transcription(
                 pause_config,
                 growing_segments_config,
                 sentence_completion_clone,
+                enable_formatting_clone,
+                formatting_tone_clone,
+                formatting_vocabulary_clone,
             );
         }));
 
@@ -298,6 +307,9 @@ fn run_transcription_inner(
     pause_config: Option<PauseConfig>,
     growing_segments_config: Option<GrowingSegmentsConfig>,
     sentence_completion: String,
+    enable_formatting: bool,
+    formatting_tone: String,
+    formatting_vocabulary: Vec<String>,
 ) {
     use parakeet_rs::sentence_buffer::{SentenceBuffer, SentenceBufferMode};
     use parakeet_rs::streaming_transcriber::StreamingTranscriber;
@@ -305,6 +317,25 @@ fn run_transcription_inner(
 
     let is_parallel_mode = mode == "parallel";
     let is_pause_parallel_mode = mode == "pause_parallel";
+
+    // In growing_segments mode, formatting is applied at the emitter layer (Phase 4/4b)
+    // rather than through the FormattingTranscriber wrapper, because the wrapper only
+    // sees raw push_audio results (mostly PARTIALs), while real FINALs are constructed
+    // by the GrowingTextMerger at the emitter layer.
+    let is_growing_segments = mode == "growing_segments";
+    let emitter_formatting = enable_formatting && is_growing_segments;
+
+    // Extract growing segments tuning parameters before config is moved to factory
+    let gs_echo_dedup_threshold = growing_segments_config.as_ref()
+        .and_then(|gs| gs.echo_dedup_threshold).unwrap_or(0.50);
+    let gs_echo_dedup_window = growing_segments_config.as_ref()
+        .and_then(|gs| gs.echo_dedup_window).unwrap_or(15);
+    let gs_min_final_words = growing_segments_config.as_ref()
+        .and_then(|gs| gs.min_final_words).unwrap_or(4);
+    let gs_promotion_enabled = growing_segments_config.as_ref()
+        .and_then(|gs| gs.promotion_enabled).unwrap_or(true);
+    let gs_promotion_min_words = growing_segments_config.as_ref()
+        .and_then(|gs| gs.promotion_min_words).unwrap_or(8);
 
     // Create the appropriate transcriber
     let mut transcriber: Box<dyn StreamingTranscriber> = match factory::create_transcriber(
@@ -320,10 +351,14 @@ fn run_transcription_inner(
             mode: mode.clone(),
             vad_base_mode,
             vad_model_path,
-            language,
+            language: language.clone(),
             parallel_config,
             pause_config,
             growing_segments_config,
+            // Skip FormattingTranscriber wrapper for growing_segments — we format at emitter layer
+            enable_formatting: enable_formatting && !is_growing_segments,
+            formatting_tone: formatting_tone.clone(),
+            formatting_vocabulary: formatting_vocabulary.clone(),
         },
     ) {
         Some(t) => t,
@@ -358,12 +393,74 @@ fn run_transcription_inner(
         transcription_session.id
     );
 
+    // Create emitter-layer formatter for growing_segments mode
+    let mut emitter_formatter: Option<(Box<dyn parakeet_rs::text_formatter::TextFormatter>, parakeet_rs::text_formatter::FormattingContext)> =
+        if emitter_formatting {
+            use parakeet_rs::text_formatter::{FormattingContext, FormattingTone, LlmFormatter, RuleBasedFormatter, TextFormatter};
+            let context = FormattingContext {
+                tone: FormattingTone::from_str(&formatting_tone),
+                language: language.clone(),
+                vocabulary: formatting_vocabulary,
+                recent_text: vec![],
+            };
+            let formatter: Box<dyn TextFormatter> = match std::env::var("FORMATTER_MODEL_PATH") {
+                Ok(path) if std::path::Path::new(&path).exists() => {
+                    eprintln!(
+                        "[Session {}] Emitter-layer formatter: LLM ({})",
+                        transcription_session.id, path
+                    );
+                    Box::new(LlmFormatter::new(path))
+                }
+                _ => {
+                    eprintln!(
+                        "[Session {}] Emitter-layer formatter: RuleBased",
+                        transcription_session.id
+                    );
+                    Box::new(RuleBasedFormatter::new())
+                }
+            };
+            Some((formatter, context))
+        } else {
+            None
+        };
+    let formatter_timeout = std::time::Duration::from_millis(
+        std::env::var("FORMATTER_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5000u64),
+    );
+
     // For canary growing_segments: accumulate confirmed words instead of pushing raw full-buffer text
     let is_growing_canary = mode == "growing_segments" && is_canary && !is_canary_flash;
+    if is_growing_canary {
+        eprintln!(
+            "[Session {}] Growing canary pipeline: echo_dedup={:.2}/{}, min_final_words={}, promotion={}/{}words",
+            transcription_session.id,
+            gs_echo_dedup_threshold, gs_echo_dedup_window, gs_min_final_words,
+            if gs_promotion_enabled { "on" } else { "off" }, gs_promotion_min_words,
+        );
+    }
     let mut confirmed_accumulator = String::new();
     let mut finalized_word_count: usize = 0;
-    let mut recent_finals: Vec<String> = Vec::new(); // Track recent FINALs for dedup
+    let mut recent_finals: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     let mut last_growing_sentence = String::new(); // Track previous growing_text for sentence promotion
+    let mut pending_fragment = String::new(); // Buffer short fragments for merge with next FINAL
+    // Cross-cycle emission buffer: (text, timestamp, start_time, end_time, speaker, inference_ms)
+    let mut pending_emissions: Vec<(String, std::time::Instant, f32, f32, Option<usize>, Option<u32>)> = Vec::new();
+
+    // Stopwords for content-word echo dedup (German + English) — built once, reused
+    let stopwords: std::collections::HashSet<&str> = [
+        "der", "die", "das", "und", "ist", "in", "von", "zu", "mit",
+        "für", "auf", "ein", "eine", "es", "sie", "er", "wir", "ich",
+        "nicht", "auch", "den", "dem", "des", "am", "im", "an", "um",
+        "nach", "bei", "aus", "wie", "oder", "aber", "noch", "wird",
+        "hat", "sind", "war", "dass", "sich", "nur", "so", "vor",
+        "mich", "mir", "dich", "dir", "uns", "ihr", "ihm",
+        "kann", "soll", "muss", "will", "darf", "mag",
+        "durch", "gegen", "über", "unter", "zwischen", "ohne",
+        "the", "a", "an", "and", "is", "in", "of", "to", "with",
+        "for", "on", "it", "he", "she", "we", "i", "not", "also",
+    ].iter().copied().collect();
 
     // Process audio samples as they arrive
     let mut chunks_processed = 0u64;
@@ -426,10 +523,12 @@ fn run_transcription_inner(
                 }
 
                 // Apply hallucination truncation and text normalization
+                let normalize_start = std::time::Instant::now();
                 for segment in &mut result.segments {
                     segment.text = emitters::truncate_hallucination_text(&segment.text);
                     segment.text = emitters::normalize_text(&segment.text);
                 }
+                let normalize_ms = normalize_start.elapsed().as_millis();
 
                 if is_growing_canary {
                     // Canary growing_segments: accumulate confirmed words, push full growing
@@ -437,6 +536,7 @@ fn run_transcription_inner(
                     // Filter out fragment FINALs (< 4 words) to avoid noisy short emissions.
 
                     // Phase 1: Accumulate confirmed words, capture unstable tail
+                    let phase1_start = std::time::Instant::now();
                     let mut unstable_text = String::new();
                     let mut last_segment: Option<&parakeet_rs::streaming_transcriber::TranscriptionSegment> = None;
                     for segment in &result.segments {
@@ -460,7 +560,10 @@ fn run_transcription_inner(
                         continue;
                     };
 
+                    let phase1_ms = phase1_start.elapsed().as_millis();
+
                     // Phase 2: Build full growing text from non-finalized confirmed + unstable
+                    let phase2_start = std::time::Instant::now();
                     let acc_words: Vec<&str> = confirmed_accumulator.split_whitespace().collect();
                     let remaining: String = if finalized_word_count < acc_words.len() {
                         acc_words[finalized_word_count..].join(" ")
@@ -474,11 +577,15 @@ fn run_transcription_inner(
                         (false, false) => format!("{} {}", remaining, unstable_text),
                     };
 
+                    let phase2_ms = phase2_start.elapsed().as_millis();
+
                     if !full_text.is_empty() {
                         // Phase 3: Push once to growing_merger (as partial — let merger detect sentence boundaries)
+                        let phase3_start = std::time::Instant::now();
                         let prev_finalized = growing_merger.get_finalized_sentences().len();
                         let growing_result = growing_merger.push(&full_text, false);
                         let new_finalized = growing_merger.get_finalized_sentences().len();
+                        let phase3_ms = phase3_start.elapsed().as_millis();
 
                         // Phase 4: Collect FINALs for newly finalized sentences
                         // - Always advance finalized_word_count
@@ -486,18 +593,8 @@ fn run_transcription_inner(
                         // - Skip FINALs that overlap with recent emissions (stopword-filtered)
                         // - Suppress fragment FINALs (< 4 words AND < 15 chars)
                         // - Merge consecutive short FINALs (< 5 words) into one
+                        let phase4_start = std::time::Instant::now();
                         let mut collected_finals: Vec<String> = Vec::new();
-
-                        // Stopwords for content-word echo dedup (German + English)
-                        let stopwords: std::collections::HashSet<&str> = [
-                            "der", "die", "das", "und", "ist", "in", "von", "zu", "mit",
-                            "für", "auf", "ein", "eine", "es", "sie", "er", "wir", "ich",
-                            "nicht", "auch", "den", "dem", "des", "am", "im", "an", "um",
-                            "nach", "bei", "aus", "wie", "oder", "aber", "noch", "wird",
-                            "hat", "sind", "war", "dass", "sich", "nur", "so", "vor",
-                            "the", "a", "an", "and", "is", "in", "of", "to", "with",
-                            "for", "on", "it", "he", "she", "we", "i", "not", "also",
-                        ].iter().copied().collect();
 
                         for i in prev_finalized..new_finalized {
                             let fs = &growing_merger.get_finalized_sentences()[i];
@@ -509,7 +606,8 @@ fn run_transcription_inner(
                             finalized_word_count += fs.text.split_whitespace().count();
 
                             // Strip trailing echo fragments: split by sentence boundaries,
-                            // remove trailing parts with < 3 words (echoes from sliding window)
+                            // remove trailing parts with < 3 words UNLESS they end with .!?
+                            // (short complete sentences like "Genau." should be preserved)
                             let cleaned = {
                                 let parts: Vec<&str> = trimmed
                                     .split_inclusive(|c: char| c == '.' || c == '!' || c == '?')
@@ -519,8 +617,15 @@ fn run_transcription_inner(
                                         .filter(|w| w.len() > 1 || w.chars().any(|c| c.is_alphanumeric()))
                                         .count()
                                 };
+                                let ends_with_terminator = |s: &str| -> bool {
+                                    let t = s.trim();
+                                    t.ends_with('.') || t.ends_with('!') || t.ends_with('?')
+                                };
                                 let mut end = parts.len();
-                                while end > 1 && count_words(parts[end - 1]) < 3 {
+                                while end > 1
+                                    && count_words(parts[end - 1]) < 3
+                                    && !ends_with_terminator(parts[end - 1])
+                                {
                                     end -= 1;
                                 }
                                 parts[..end].join("").trim().to_string()
@@ -528,11 +633,11 @@ fn run_transcription_inner(
 
                             // After stripping, re-check minimum length
                             let clean_words = cleaned.split_whitespace().count();
-                            if clean_words < 4 && cleaned.len() < 15 {
+                            if clean_words < gs_min_final_words && cleaned.len() < 15 {
                                 continue;
                             }
 
-                            // Echo dedup: check overlap with recent FINALs (last 8)
+                            // Echo dedup: check overlap with recent FINALs
                             // Uses stopword-filtered content words for more accurate overlap
                             let cleaned_lower = cleaned.to_lowercase();
                             let curr_all_words: std::collections::HashSet<String> = cleaned_lower
@@ -545,14 +650,14 @@ fn run_transcription_inner(
                                 .filter(|w| !stopwords.contains(w.as_str()))
                                 .collect();
 
-                            let is_echo = recent_finals.iter().rev().take(15).any(|prev| {
+                            let is_echo = recent_finals.iter().rev().take(gs_echo_dedup_window).any(|prev| {
                                 let prev_lower = prev.to_lowercase();
                                 // Exact duplicate
                                 if cleaned_lower == prev_lower { return true; }
                                 // Substring check for short FINALs
-                                if curr_all_words.len() < 4 && prev_lower.contains(&cleaned_lower) { return true; }
-                                if curr_all_words.len() < 4 && cleaned_lower.contains(&prev_lower) { return true; }
-                                // Content-word overlap (stopword-filtered, threshold 0.65)
+                                if curr_all_words.len() < gs_min_final_words && prev_lower.contains(&cleaned_lower) { return true; }
+                                if curr_all_words.len() < gs_min_final_words && cleaned_lower.contains(&prev_lower) { return true; }
+                                // Content-word overlap (stopword-filtered, conjunctive threshold)
                                 if curr_content.len() >= 2 {
                                     let prev_all: std::collections::HashSet<String> = prev_lower
                                         .split_whitespace()
@@ -569,7 +674,15 @@ fn run_transcription_inner(
                                         .count();
                                     let overlap_curr = common as f64 / curr_content.len() as f64;
                                     let overlap_prev = common as f64 / prev_content.len() as f64;
-                                    if overlap_curr > 0.50 || overlap_prev > 0.50 { return true; }
+                                    // Asymmetric dedup: if either side has strong overlap (>0.65)
+                                    // AND both sides have at least minimal overlap (>0.30),
+                                    // it's an echo. This catches long-vs-short FINAL pairs.
+                                    let high_threshold = gs_echo_dedup_threshold.max(0.50);
+                                    let low_threshold = gs_echo_dedup_threshold * 0.60; // ~0.30 for default 0.50
+                                    if (overlap_curr > high_threshold || overlap_prev > high_threshold)
+                                        && overlap_curr > low_threshold
+                                        && overlap_prev > low_threshold
+                                    { return true; }
                                 }
                                 false
                             });
@@ -581,15 +694,61 @@ fn run_transcription_inner(
                             collected_finals.push(cleaned);
                         }
 
-                        // Phase 4a: Merge consecutive short FINALs (< 5 words) into one
+                        // Phase 4a-i: Intra-FINAL echo detection
+                        // If a FINAL contains consecutive sentences with >60% word overlap,
+                        // keep only the longer one (sliding window produces two wordings of same content)
+                        let collected_finals: Vec<String> = collected_finals.into_iter().map(|text| {
+                            let sentences: Vec<&str> = text
+                                .split_inclusive(|c: char| c == '.' || c == '!' || c == '?')
+                                .collect();
+                            if sentences.len() < 2 {
+                                return text;
+                            }
+                            let mut kept: Vec<&str> = vec![sentences[0]];
+                            for i in 1..sentences.len() {
+                                let prev_words: std::collections::HashSet<&str> = kept.last().unwrap()
+                                    .split_whitespace()
+                                    .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+                                    .filter(|w| !w.is_empty())
+                                    .collect();
+                                let curr_words: std::collections::HashSet<&str> = sentences[i]
+                                    .split_whitespace()
+                                    .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+                                    .filter(|w| !w.is_empty())
+                                    .collect();
+                                if prev_words.len() >= 3 && curr_words.len() >= 3 {
+                                    let common = prev_words.intersection(&curr_words).count();
+                                    let overlap = common as f64 / prev_words.len().min(curr_words.len()) as f64;
+                                    if overlap > 0.60 {
+                                        // Duplicate sentence — keep the longer one
+                                        if curr_words.len() > prev_words.len() {
+                                            *kept.last_mut().unwrap() = sentences[i];
+                                        }
+                                        continue; // skip adding this sentence
+                                    }
+                                }
+                                kept.push(sentences[i]);
+                            }
+                            kept.join("").trim().to_string()
+                        }).filter(|t| !t.is_empty()).collect();
+
+                        // Phase 4a-ii: Strip leading punctuation/fragments
+                        // FINALs like ". Tante Bertuti am 15." have punctuation leaking from previous segment
+                        let collected_finals: Vec<String> = collected_finals.into_iter().map(|text| {
+                            text.trim_start_matches(|c: char| c == '.' || c == ',' || c == ';' || c == ':' || c == ' ')
+                                .trim()
+                                .to_string()
+                        }).filter(|t| !t.is_empty() && t.split_whitespace().count() >= 2).collect();
+
+                        // Phase 4a-iii: Merge consecutive short FINALs (< 8 words) into one
                         let mut merged_finals: Vec<String> = Vec::new();
                         for text in collected_finals {
                             let wc = text.split_whitespace().count();
-                            if wc < 5 {
+                            if wc < 8 {
                                 // Short FINAL — try merging with previous
                                 if let Some(last) = merged_finals.last_mut() {
                                     let combined_wc = last.split_whitespace().count() + wc;
-                                    if combined_wc <= 15 {
+                                    if combined_wc <= 25 {
                                         last.push(' ');
                                         last.push_str(&text);
                                         continue;
@@ -599,34 +758,130 @@ fn run_transcription_inner(
                             merged_finals.push(text);
                         }
 
-                        // Emit merged FINALs
-                        for cleaned in merged_finals {
-                            let normalized = emitters::normalize_text(&cleaned);
+                        // Phase 4a-iv: Buffer fragment FINALs (< min_final_words) for merge with next cycle
+                        // Instead of emitting tiny fragments standalone, hold them and prepend to next FINAL
+                        let mut final_to_emit: Vec<String> = Vec::new();
+                        for text in merged_finals {
+                            let wc = text.split_whitespace().count();
+                            if wc < gs_min_final_words {
+                                // Buffer this fragment
+                                pending_fragment.push_str(if pending_fragment.is_empty() { "" } else { " " });
+                                pending_fragment.push_str(&text);
+                            } else {
+                                // Prepend any buffered fragment
+                                if !pending_fragment.is_empty() {
+                                    let mut combined = std::mem::take(&mut pending_fragment);
+                                    combined.push(' ');
+                                    combined.push_str(&text);
+                                    final_to_emit.push(combined);
+                                } else {
+                                    final_to_emit.push(text);
+                                }
+                            }
+                        }
 
-                            recent_finals.push(normalized.clone());
+                        let phase4_dedup_ms = phase4_start.elapsed().as_millis();
+
+                        // Phase 4a-v: Cross-cycle FINAL buffering
+                        // Add new FINALs to pending_emissions buffer with timestamps.
+                        // FINALs are held for 2s to allow merging with adjacent-cycle fragments.
+                        let now = std::time::Instant::now();
+                        for cleaned in final_to_emit {
+                            let normalized = emitters::normalize_text(&cleaned);
+                            // Try to merge with the most recent pending emission
+                            let merged = if let Some((ref mut prev_text, ref prev_time, ..)) = pending_emissions.last_mut() {
+                                let prev_wc = prev_text.split_whitespace().count();
+                                let curr_wc = normalized.split_whitespace().count();
+                                // Merge if both are short and recent
+                                if (prev_wc < 10 || curr_wc < 10) && prev_wc + curr_wc <= 30
+                                    && now.duration_since(*prev_time).as_millis() < 2000
+                                {
+                                    prev_text.push(' ');
+                                    prev_text.push_str(&normalized);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if !merged {
+                                pending_emissions.push((normalized, now, ref_segment.start_time, ref_segment.end_time, ref_segment.speaker, ref_segment.inference_time_ms));
+                            }
+                        }
+
+                        // Emit any pending FINALs that are older than 2 seconds
+                        let mut total_format_ms: u128 = 0;
+                        let emit_start = std::time::Instant::now();
+                        let emission_delay = std::time::Duration::from_secs(2);
+                        while let Some((text, time, start_t, end_t, speaker, inf_ms)) = pending_emissions.first() {
+                            if now.duration_since(*time) < emission_delay {
+                                break; // Not old enough yet
+                            }
+                            let (text, _time, start_t, end_t, speaker, inf_ms) = pending_emissions.remove(0);
+
+                            recent_finals.push_back(text.clone());
                             if recent_finals.len() > 20 {
-                                recent_finals.remove(0);
+                                recent_finals.pop_front();
                             }
 
                             let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
-                                text: normalized,
-                                start_time: ref_segment.start_time,
-                                end_time: ref_segment.end_time,
-                                speaker: ref_segment.speaker,
+                                text: text.clone(),
+                                raw_text: None,
+                                start_time: start_t,
+                                end_time: end_t,
+                                speaker,
                                 confidence: None,
                                 is_final: true,
-                                inference_time_ms: ref_segment.inference_time_ms,
+                                inference_time_ms: inf_ms,
                             };
                             emitters::emit_final_subtitle(&transcription_session, &final_segment, &growing_result);
-                            // Reset after emitting a real FINAL (prevents double-promotion)
+
+                            // Try formatting
+                            if let Some((ref formatter, ref mut ctx)) = emitter_formatter {
+                                let fmt_start = std::time::Instant::now();
+                                let formatted = formatter.format(&text, ctx);
+                                let fmt_elapsed = fmt_start.elapsed();
+                                total_format_ms += fmt_elapsed.as_millis();
+
+                                let valid = fmt_elapsed <= formatter_timeout
+                                    && !formatted.is_empty()
+                                    && formatted.len() <= text.len() * 3;
+
+                                if valid && formatted != text {
+                                    ctx.recent_text.push(formatted.clone());
+                                    if ctx.recent_text.len() > 5 { ctx.recent_text.remove(0); }
+                                    if let Some(last) = recent_finals.back_mut() {
+                                        *last = formatted.clone();
+                                    }
+                                    let formatted_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                                        text: formatted,
+                                        raw_text: Some(text),
+                                        start_time: start_t,
+                                        end_time: end_t,
+                                        speaker,
+                                        confidence: None,
+                                        is_final: true,
+                                        inference_time_ms: inf_ms,
+                                    };
+                                    emitters::emit_final_subtitle(&transcription_session, &formatted_segment, &growing_result);
+                                } else if !valid && fmt_elapsed > formatter_timeout {
+                                    eprintln!(
+                                        "[Session {}] [Timing] Format REJECTED ({}ms)",
+                                        transcription_session.id, fmt_elapsed.as_millis()
+                                    );
+                                }
+                            }
+
                             last_growing_sentence.clear();
                         }
+                        let emit_ms = emit_start.elapsed().as_millis();
 
                         // Phase 4b: Promote unconfirmed sentences
                         // If the growing sentence transitioned (previous ended with .!? and
                         // current is different) but no FINAL was emitted, emit the previous
                         // sentence as a promoted FINAL.
-                        if prev_finalized == new_finalized && !last_growing_sentence.is_empty() {
+                        if gs_promotion_enabled && prev_finalized == new_finalized && !last_growing_sentence.is_empty() {
                             let prev_trimmed = last_growing_sentence.trim();
                             let curr_sentence = growing_result.current_sentence.trim();
                             let prev_ends_sentence = prev_trimmed.ends_with('.')
@@ -643,7 +898,7 @@ fn run_transcription_inner(
                                 let overlap = if prev_words.is_empty() { 1.0 }
                                     else { common as f64 / prev_words.len() as f64 };
 
-                                if overlap < 0.15 && prev_words.len() >= 8 {
+                                if overlap < 0.15 && prev_words.len() >= gs_promotion_min_words {
                                     // Transition detected — check not already in recent_finals (dedup)
                                     let prev_lower = prev_trimmed.to_lowercase();
                                     let already_emitted = recent_finals.iter().rev().take(15).any(|f| {
@@ -667,21 +922,39 @@ fn run_transcription_inner(
                                     });
 
                                     if !already_emitted {
-                                        let promoted_text = emitters::normalize_text(prev_trimmed);
+                                        let promoted_normalized = emitters::normalize_text(prev_trimmed);
+
+                                        // Apply emitter-layer formatting if enabled
+                                        let (display_text, raw_text) = if let Some((ref formatter, ref mut ctx)) = emitter_formatter {
+                                            let start = std::time::Instant::now();
+                                            let formatted = formatter.format(&promoted_normalized, ctx);
+                                            let elapsed = start.elapsed();
+                                            if elapsed > formatter_timeout || formatted.is_empty() || formatted.len() > promoted_normalized.len() * 3 {
+                                                (promoted_normalized.clone(), None)
+                                            } else {
+                                                ctx.recent_text.push(formatted.clone());
+                                                if ctx.recent_text.len() > 5 { ctx.recent_text.remove(0); }
+                                                (formatted, Some(promoted_normalized.clone()))
+                                            }
+                                        } else {
+                                            (promoted_normalized.clone(), None)
+                                        };
+
                                         eprintln!(
                                             "[Session {} | PROMOTED | Speaker {}] \"{}\"",
                                             transcription_session.id,
                                             ref_segment.speaker.map(|s| s.to_string()).unwrap_or_else(|| "?".to_string()),
-                                            &promoted_text.chars().take(80).collect::<String>(),
+                                            &display_text.chars().take(80).collect::<String>(),
                                         );
 
-                                        recent_finals.push(promoted_text.clone());
+                                        recent_finals.push_back(display_text.clone());
                                         if recent_finals.len() > 20 {
-                                            recent_finals.remove(0);
+                                            recent_finals.pop_front();
                                         }
 
                                         let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
-                                            text: promoted_text,
+                                            text: display_text,
+                                            raw_text,
                                             start_time: ref_segment.start_time,
                                             end_time: ref_segment.end_time,
                                             speaker: ref_segment.speaker,
@@ -700,13 +973,31 @@ fn run_transcription_inner(
                         // Update tracking
                         last_growing_sentence = growing_result.current_sentence.clone();
 
+                        // Log step-by-step timing
+                        let total_pipeline_ms = inference_start.elapsed().as_millis();
+                        eprintln!(
+                            "[Session {}] [Timing] inference={}ms normalize={}ms P1={}ms P2={}ms P3_merger={}ms P4_dedup={}ms emit={}ms (format={}ms) total={}ms",
+                            transcription_session.id,
+                            inference_time_ms,
+                            normalize_ms,
+                            phase1_ms,
+                            phase2_ms,
+                            phase3_ms,
+                            phase4_dedup_ms,
+                            emit_ms,
+                            total_format_ms,
+                            total_pipeline_ms,
+                        );
+
                         // Phase 5: Emit PARTIAL with full growing text (suppress if stale)
-                        let growing_text = &growing_result.current_sentence;
-                        let is_stale = emitters::is_stale_partial(growing_text, &recent_finals);
+                        // Use full_text for both stale check and emission (consistency)
+                        let recent_finals_vec: Vec<String> = recent_finals.iter().cloned().collect();
+                        let is_stale = emitters::is_stale_partial(&full_text, &recent_finals_vec);
 
                         if !is_stale {
                             let display_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
                                 text: full_text,
+                                raw_text: None,
                                 start_time: ref_segment.start_time,
                                 end_time: ref_segment.end_time,
                                 speaker: ref_segment.speaker,
@@ -739,6 +1030,7 @@ fn run_transcription_inner(
                             }
                             let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
                                 text: fs.text.clone(),
+                                raw_text: None,
                                 start_time: segment.start_time,
                                 end_time: segment.end_time,
                                 speaker: segment.speaker,
@@ -767,6 +1059,29 @@ fn run_transcription_inner(
                 transcription_session.id
             );
             break;
+        }
+    }
+
+    // Flush any remaining pending emissions
+    if is_growing_canary && !pending_emissions.is_empty() {
+        let growing_result = growing_merger.push("", false);
+        for (text, _time, start_t, end_t, speaker, inf_ms) in pending_emissions.drain(..) {
+            recent_finals.push_back(text.clone());
+            if recent_finals.len() > 20 { recent_finals.pop_front(); }
+            let seg = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                text, raw_text: None, start_time: start_t, end_time: end_t,
+                speaker, confidence: None, is_final: true, inference_time_ms: inf_ms,
+            };
+            emitters::emit_final_subtitle(&transcription_session, &seg, &growing_result);
+        }
+        // Also flush pending fragment
+        if !pending_fragment.is_empty() {
+            let text = std::mem::take(&mut pending_fragment);
+            let seg = parakeet_rs::streaming_transcriber::TranscriptionSegment {
+                text, raw_text: None, start_time: 0.0, end_time: 0.0,
+                speaker: None, confidence: None, is_final: true, inference_time_ms: None,
+            };
+            emitters::emit_final_subtitle(&transcription_session, &seg, &growing_result);
         }
     }
 
@@ -825,6 +1140,7 @@ fn run_transcription_inner(
         let growing_result = growing_merger.push("", false);
         let flush_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
             text: flushed_text,
+            raw_text: None,
             start_time: 0.0,
             end_time: 0.0,
             speaker: None,

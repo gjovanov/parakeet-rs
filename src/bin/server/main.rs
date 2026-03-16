@@ -403,6 +403,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fab_url,
         fab_client,
         fab_configs: RwLock::new(HashMap::new()),
+        formatting_configs: RwLock::new(HashMap::new()),
     });
 
     // Build router

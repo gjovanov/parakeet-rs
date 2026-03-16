@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 /// A segment of transcribed text with timing and optional speaker information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionSegment {
-    /// The transcribed text
+    /// The transcribed text (may be formatted if formatting is enabled)
     pub text: String,
+    /// Original unformatted ASR output (set when formatting is enabled)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
     /// Start time in seconds
     pub start_time: f32,
     /// End time in seconds
@@ -142,6 +145,7 @@ mod tests {
     fn make_segment(text: &str, is_final: bool) -> TranscriptionSegment {
         TranscriptionSegment {
             text: text.to_string(),
+            raw_text: None,
             start_time: 0.0,
             end_time: 1.0,
             speaker: None,
@@ -167,6 +171,7 @@ mod tests {
 
         result.segments.push(TranscriptionSegment {
             text: "Hello".to_string(),
+            raw_text: None,
             start_time: 0.0,
             end_time: 1.0,
             speaker: Some(0),
@@ -177,6 +182,7 @@ mod tests {
 
         result.segments.push(TranscriptionSegment {
             text: "world".to_string(),
+            raw_text: None,
             start_time: 1.0,
             end_time: 2.0,
             speaker: Some(0),
@@ -222,6 +228,7 @@ mod tests {
     fn test_segment_with_all_fields() {
         let seg = TranscriptionSegment {
             text: "Full segment".to_string(),
+            raw_text: Some("Full segment raw".to_string()),
             start_time: 1.5,
             end_time: 3.2,
             speaker: Some(2),
@@ -261,14 +268,16 @@ mod tests {
         let json = serde_json::to_string(&seg).unwrap();
         assert!(json.contains("\"text\":\"test\""));
         assert!(json.contains("\"is_final\":true"));
-        // inference_time_ms should be skipped when None
+        // inference_time_ms and raw_text should be skipped when None
         assert!(!json.contains("inference_time_ms"));
+        assert!(!json.contains("raw_text"));
     }
 
     #[test]
     fn test_segment_serialization_with_inference_time() {
         let seg = TranscriptionSegment {
             text: "test".to_string(),
+            raw_text: None,
             start_time: 0.0,
             end_time: 1.0,
             speaker: None,

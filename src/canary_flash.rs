@@ -170,26 +170,26 @@ impl CanaryFlashModel {
 
         // Load encoder
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let encoder = builder.commit_from_file(&encoder_path)?;
 
         // Load decoder
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let decoder = builder.commit_from_file(&decoder_path)?;
 
         // Check if decoder has KV cache support
-        let has_kv_cache = decoder.outputs.iter().any(|o| {
-            o.name.contains("present") || o.name.contains("cache") || o.name.contains("past")
+        let has_kv_cache = decoder.outputs().iter().any(|o| {
+            o.name().contains("present") || o.name().contains("cache") || o.name().contains("past")
         });
 
         eprintln!("[CanaryFlash] Models loaded successfully");
         eprintln!("[CanaryFlash] Encoder inputs: {:?}",
-            encoder.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
+            encoder.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
         eprintln!("[CanaryFlash] Decoder inputs: {:?}",
-            decoder.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
+            decoder.inputs().iter().map(|i| i.name()).collect::<Vec<_>>());
         eprintln!("[CanaryFlash] Decoder outputs: {:?}",
-            decoder.outputs.iter().map(|o| &o.name).collect::<Vec<_>>());
+            decoder.outputs().iter().map(|o| o.name()).collect::<Vec<_>>());
         eprintln!("[CanaryFlash] KV cache support: {}", has_kv_cache);
 
         Ok(Self {
@@ -426,11 +426,11 @@ impl CanaryFlashModel {
         let past_kv = cache.get_past_key_values(1);
 
         // Try to find the correct input names for this model
-        let decoder_inputs = self.decoder.inputs.iter()
-            .map(|i| i.name.as_str())
-            .collect::<Vec<_>>();
+        let decoder_inputs = self.decoder.inputs().iter()
+            .map(|i| i.name().to_string())
+            .collect::<Vec<String>>();
 
-        let has_past_key_values = decoder_inputs.iter().any(|n| n.contains("past"));
+        let has_past_key_values = decoder_inputs.iter().any(|n: &String| n.contains("past"));
 
         // First step: process all prompt tokens
         let (first_token, present_kv_name) = {
@@ -459,13 +459,13 @@ impl CanaryFlashModel {
 
             // Try to get present_key_values from output
             let present_kv_name: Option<String> = outputs.keys()
-                .find(|k| k.contains("present") || k.contains("cache"))
-                .map(|s| s.to_string());
+                .find(|k: &&str| k.contains("present") || k.contains("cache"))
+                .map(|s: &str| s.to_string());
 
             // Update cache if we found present_key_values
             if let Some(ref name) = present_kv_name {
                 if let Ok((shape, data)) = outputs[name.as_str()].try_extract_tensor::<f32>() {
-                    let dims: &[i64] = shape.as_ref();
+                    let dims: &[i64] = &**shape;
                     if dims.len() == 4 {
                         if let Ok(present) = Array4::from_shape_vec(
                             (dims[0] as usize, dims[1] as usize, dims[2] as usize, dims[3] as usize),
@@ -525,7 +525,7 @@ impl CanaryFlashModel {
             // Update cache if available
             if let Some(ref name) = present_kv_name {
                 if let Ok((shape, data)) = outputs[name.as_str()].try_extract_tensor::<f32>() {
-                    let dims: &[i64] = shape.as_ref();
+                    let dims: &[i64] = &**shape;
                     if dims.len() == 4 {
                         if let Ok(present) = Array4::from_shape_vec(
                             (dims[0] as usize, dims[1] as usize, dims[2] as usize, dims[3] as usize),
