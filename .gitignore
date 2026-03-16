@@ -19,7 +19,12 @@ DS_Store
 start.sh
 **.wav
 onnxruntime/
+ort-cpu/
+ort-gpu/
 node_modules
 canary-qwen
 canary
 tdt
+__pycache__/
+**/__pycache__/
+*.pyc
