@@ -336,6 +336,10 @@ fn run_transcription_inner(
         .and_then(|gs| gs.promotion_enabled).unwrap_or(true);
     let gs_promotion_min_words = growing_segments_config.as_ref()
         .and_then(|gs| gs.promotion_min_words).unwrap_or(8);
+    let gs_use_word_confirmer = growing_segments_config.as_ref()
+        .and_then(|gs| gs.use_word_confirmer).unwrap_or(false);
+    let gs_word_confirm_threshold = growing_segments_config.as_ref()
+        .and_then(|gs| gs.word_confirm_threshold).unwrap_or(3);
 
     // Create the appropriate transcriber
     let mut transcriber: Box<dyn StreamingTranscriber> = match factory::create_transcriber(
@@ -439,7 +443,25 @@ fn run_transcription_inner(
             gs_echo_dedup_threshold, gs_echo_dedup_window, gs_min_final_words,
             if gs_promotion_enabled { "on" } else { "off" }, gs_promotion_min_words,
         );
+        if gs_use_word_confirmer {
+            eprintln!(
+                "[Session {}] Word confirmer ENABLED (threshold={})",
+                transcription_session.id, gs_word_confirm_threshold,
+            );
+        }
     }
+
+    // Create word confirmer if enabled
+    let mut word_confirmer: Option<parakeet_rs::word_confirmer::WordConfirmer> = if is_growing_canary && gs_use_word_confirmer {
+        let wc_config = parakeet_rs::word_confirmer::WordConfirmerConfig {
+            confirmation_threshold: gs_word_confirm_threshold,
+            ..Default::default()
+        };
+        Some(parakeet_rs::word_confirmer::WordConfirmer::with_config(wc_config))
+    } else {
+        None
+    };
+
     let mut confirmed_accumulator = String::new();
     let mut finalized_word_count: usize = 0;
     let mut recent_finals: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -531,12 +553,12 @@ fn run_transcription_inner(
                 let normalize_ms = normalize_start.elapsed().as_millis();
 
                 if is_growing_canary {
-                    // Canary growing_segments: accumulate confirmed words, push full growing
-                    // text (confirmed + unstable) to the merger once per inference pass.
-                    // Filter out fragment FINALs (< 4 words) to avoid noisy short emissions.
+                    // Canary growing_segments: process model output into text for the merger.
+                    // Two paths: WordConfirmer (word-level) or standard (sentence-level).
 
-                    // Phase 1: Accumulate confirmed words, capture unstable tail
+                    // Extract all text and ref_segment from result
                     let phase1_start = std::time::Instant::now();
+                    let mut all_text = String::new();
                     let mut unstable_text = String::new();
                     let mut last_segment: Option<&parakeet_rs::streaming_transcriber::TranscriptionSegment> = None;
                     for segment in &result.segments {
@@ -553,6 +575,9 @@ fn run_transcription_inner(
                         } else {
                             unstable_text = text.to_string();
                         }
+                        // Collect all text for word confirmer path
+                        if !all_text.is_empty() { all_text.push(' '); }
+                        all_text.push_str(text);
                     }
 
                     // Need at least one non-empty segment to proceed
@@ -562,19 +587,33 @@ fn run_transcription_inner(
 
                     let phase1_ms = phase1_start.elapsed().as_millis();
 
-                    // Phase 2: Build full growing text from non-finalized confirmed + unstable
+                    // Phase 2: Build full_text for the merger
+                    // WordConfirmer path: confirmed words go to merger, tail is for PARTIAL display
+                    // Standard path: remaining confirmed + unstable tail
                     let phase2_start = std::time::Instant::now();
-                    let acc_words: Vec<&str> = confirmed_accumulator.split_whitespace().collect();
-                    let remaining: String = if finalized_word_count < acc_words.len() {
-                        acc_words[finalized_word_count..].join(" ")
+                    let (full_text, wc_tail) = if let Some(ref mut wc) = word_confirmer {
+                        // WordConfirmer path: push raw text, get confirmed + tail
+                        let wc_result = wc.push(&all_text);
+                        let confirmed = wc_result.confirmed_text.clone();
+                        let tail = wc_result.unconfirmed_tail.clone();
+                        // full_text for merger = confirmed text (clean, deduplicated)
+                        // wc_tail for PARTIAL display = confirmed + unconfirmed
+                        (confirmed, Some(format!("{} {}", wc_result.confirmed_text, tail).trim().to_string()))
                     } else {
-                        String::new()
-                    };
-                    let full_text = match (remaining.is_empty(), unstable_text.is_empty()) {
-                        (true, true) => String::new(),
-                        (true, false) => unstable_text,
-                        (false, true) => remaining,
-                        (false, false) => format!("{} {}", remaining, unstable_text),
+                        // Standard path: remaining confirmed + unstable tail
+                        let acc_words: Vec<&str> = confirmed_accumulator.split_whitespace().collect();
+                        let remaining: String = if finalized_word_count < acc_words.len() {
+                            acc_words[finalized_word_count..].join(" ")
+                        } else {
+                            String::new()
+                        };
+                        let ft = match (remaining.is_empty(), unstable_text.is_empty()) {
+                            (true, true) => String::new(),
+                            (true, false) => unstable_text,
+                            (false, true) => remaining,
+                            (false, false) => format!("{} {}", remaining, unstable_text),
+                        };
+                        (ft, None)
                     };
 
                     let phase2_ms = phase2_start.elapsed().as_millis();
@@ -990,13 +1029,14 @@ fn run_transcription_inner(
                         );
 
                         // Phase 5: Emit PARTIAL with full growing text (suppress if stale)
-                        // Use full_text for both stale check and emission (consistency)
+                        // Word confirmer path: use confirmed+tail for display
+                        let partial_text = wc_tail.unwrap_or(full_text);
                         let recent_finals_vec: Vec<String> = recent_finals.iter().cloned().collect();
-                        let is_stale = emitters::is_stale_partial(&full_text, &recent_finals_vec);
+                        let is_stale = emitters::is_stale_partial(&partial_text, &recent_finals_vec);
 
                         if !is_stale {
                             let display_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
-                                text: full_text,
+                                text: partial_text,
                                 raw_text: None,
                                 start_time: ref_segment.start_time,
                                 end_time: ref_segment.end_time,

@@ -673,6 +673,23 @@
               <input type="range" id="gs-promotion-min-words" min="4" max="15" value="8" step="1">
               <small style="color: #666;">Minimum words for sentence promotion</small>
             </div>
+
+            <hr style="border-color: #333; margin: 12px 0;">
+            <small style="color: #888; display: block; margin-bottom: 8px;">Experimental: Word-Level Confirmation</small>
+
+            <div class="form-group">
+              <label for="gs-use-word-confirmer">Word Confirmer</label>
+              <select id="gs-use-word-confirmer">
+                <option value="false" selected>Disabled (sentence-level merger)</option>
+                <option value="true">Enabled (per-word consensus across passes)</option>
+              </select>
+              <small style="color: #666;">Track individual words across passes; confirm after K stable appearances</small>
+            </div>
+            <div class="form-group">
+              <label for="gs-word-confirm-threshold">Confirm Threshold (K): <span id="gs-word-confirm-threshold-value">3</span></label>
+              <input type="range" id="gs-word-confirm-threshold" min="2" max="5" value="3" step="1">
+              <small style="color: #666;">Passes before a word is confirmed (higher = more accurate, slower)</small>
+            </div>
           </div>
 
           <div class="form-actions">

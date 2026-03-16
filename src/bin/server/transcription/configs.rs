@@ -361,10 +361,10 @@ mod tests {
         let config = create_canary_config("growing_segments", "de".to_string());
         assert_eq!(config.buffer_size_secs, 8.0);
         assert_eq!(config.min_audio_secs, 1.0);
-        assert_eq!(config.process_interval_secs, 0.5);
+        assert_eq!(config.process_interval_secs, 1.0);
         assert!(config.pause_based_confirm);
         assert_eq!(config.pause_threshold_secs, 0.5);
-        assert!(!config.emit_full_text, "growing_segments should use word-level confirmation");
+        assert!(config.emit_full_text, "growing_segments should bypass word confirmation by default");
     }
 
     #[test]
@@ -577,7 +577,7 @@ mod tests {
         };
         let config = apply_gs_canary("growing_segments", Some(&gs));
         assert_eq!(config.buffer_size_secs, 12.0);
-        assert_eq!(config.process_interval_secs, 0.5); // unchanged default
+        assert_eq!(config.process_interval_secs, 1.0); // unchanged default
         assert_eq!(config.pause_threshold_secs, 0.6);
         assert_eq!(config.silence_energy_threshold, 0.008); // unchanged default
     }
@@ -660,7 +660,7 @@ mod tests {
     fn test_gs_none_config_uses_defaults() {
         let config = apply_gs_canary("growing_segments", None);
         assert_eq!(config.buffer_size_secs, 8.0);
-        assert_eq!(config.process_interval_secs, 0.5);
+        assert_eq!(config.process_interval_secs, 1.0);
         assert_eq!(config.pause_threshold_secs, 0.5);
     }
 }

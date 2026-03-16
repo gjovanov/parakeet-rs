@@ -179,6 +179,9 @@ function cacheElements() {
   elements.gsPromotionEnabled = document.getElementById('gs-promotion-enabled');
   elements.gsPromotionMinWords = document.getElementById('gs-promotion-min-words');
   elements.gsPromotionMinWordsValue = document.getElementById('gs-promotion-min-words-value');
+  elements.gsUseWordConfirmer = document.getElementById('gs-use-word-confirmer');
+  elements.gsWordConfirmThreshold = document.getElementById('gs-word-confirm-threshold');
+  elements.gsWordConfirmThresholdValue = document.getElementById('gs-word-confirm-threshold-value');
 
   // Formatting config elements
   elements.formattingEnabledSelect = document.getElementById('formatting-enabled-select');
@@ -398,6 +401,13 @@ function setupEventListeners() {
     });
   }
 
+  // Word confirmer threshold slider
+  if (elements.gsWordConfirmThreshold) {
+    elements.gsWordConfirmThreshold.addEventListener('input', () => {
+      elements.gsWordConfirmThresholdValue.textContent = elements.gsWordConfirmThreshold.value;
+    });
+  }
+
   // Formatting select - show/hide tone dropdown
   if (elements.formattingEnabledSelect) {
     elements.formattingEnabledSelect.addEventListener('change', () => {
@@ -502,6 +512,8 @@ function setupEventListeners() {
         min_final_words: elements.gsMinFinalWords ? parseInt(elements.gsMinFinalWords.value, 10) : undefined,
         promotion_enabled: elements.gsPromotionEnabled?.value === 'false' ? false : undefined,
         promotion_min_words: elements.gsPromotionMinWords ? parseInt(elements.gsPromotionMinWords.value, 10) : undefined,
+        use_word_confirmer: elements.gsUseWordConfirmer?.value === 'true' ? true : undefined,
+        word_confirm_threshold: elements.gsWordConfirmThreshold ? parseInt(elements.gsWordConfirmThreshold.value, 10) : undefined,
       };
     }
 

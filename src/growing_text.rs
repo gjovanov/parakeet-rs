@@ -1405,10 +1405,10 @@ mod tests {
     fn test_inner_sentence_finalization() {
         let mut merger = GrowingTextMerger::new();
 
-        // Push text with a complete inner sentence (≥5 words before terminator)
-        merger.push("Dies ist der erste komplette Satz. Zweiter Satz folgt hier. Dritter Teil", false);
+        // Push text with a complete inner sentence (≥8 words before terminator, ≥3 after, uppercase after)
+        merger.push("Dies ist der erste komplette und sehr lange Satz hier. Der zweite Satz folgt jetzt hier drüben. Dritter Teil", false);
 
-        // The inner sentences should be finalized (since there are ≥2 words after the last terminator)
+        // The inner sentence should be finalized (8+ words before ".", 3+ words after, uppercase "Der")
         let finalized = merger.get_finalized_sentences();
         assert!(finalized.len() >= 1, "Expected at least 1 finalized sentence, got {}", finalized.len());
     }
@@ -1765,11 +1765,10 @@ mod tests {
     fn test_current_sentence_extraction() {
         let mut merger = GrowingTextMerger::new();
 
-        merger.push("This is the very first complete sentence. Second partial text here", false);
+        merger.push("This is the very first truly complete and long sentence here. Second partial text continues now here", false);
         let finalized = merger.get_finalized_sentences();
-        // Inner finalization should have finalized the first sentence (≥5 words before terminator)
-        // and current_sentence should be something about the partial
-        assert!(finalized.len() >= 1);
+        // Inner finalization should have finalized the first sentence (≥8 words before terminator, ≥3 after, uppercase)
+        assert!(finalized.len() >= 1, "Expected finalization: {} finalized", finalized.len());
     }
 
     // ========================================================================

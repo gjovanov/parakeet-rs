@@ -123,6 +123,13 @@ pub struct GrowingSegmentsConfig {
     /// Minimum words for promoted FINALs (default: 8)
     #[serde(default)]
     pub promotion_min_words: Option<usize>,
+    /// Use word-level confirmation (consensus across passes) instead of sentence-level merger.
+    /// When true, individual words are confirmed after K stable passes before entering transcript.
+    #[serde(default)]
+    pub use_word_confirmer: Option<bool>,
+    /// Word confirmer: passes before confirmation (default: 3)
+    #[serde(default)]
+    pub word_confirm_threshold: Option<u32>,
 }
 
 /// Request to create a new session

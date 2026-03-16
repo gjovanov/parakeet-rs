@@ -87,6 +87,7 @@ pub mod realtime_tdt_vad;
 pub mod noise_cancellation;
 pub mod sentence_buffer;
 pub mod growing_text;
+pub mod word_confirmer;
 pub mod german_normalizer;
 pub mod vod_transcriber;
 pub mod text_formatter;
