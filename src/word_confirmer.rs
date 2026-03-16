@@ -247,15 +247,6 @@ impl WordConfirmer {
             .join(" ")
     }
 
-    /// Get confirmed text that hasn't been emitted yet (new since last advance)
-    pub fn unemitted_confirmed_text(&self) -> String {
-        self.consensus[self.emitted_cursor..].iter()
-            .filter(|w| w.is_confirmed)
-            .map(|w| w.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
     /// Advance the emitted cursor past all currently confirmed words
     pub fn advance_cursor(&mut self, count: usize) {
         self.emitted_cursor = (self.emitted_cursor + count).min(self.consensus.len());
@@ -324,21 +315,76 @@ impl WordConfirmer {
     }
 
     // ========================================================================
-    // Banded edit-distance alignment
+    // Banded DP alignment
     // ========================================================================
 
-    /// Align new pass words to the consensus sequence using banded DP.
-    /// Returns a mapping: for each new word index, the consensus index it aligns to
-    /// (or None if it's an insertion).
+    /// Find the best-matching contiguous region in the consensus for the new pass.
+    /// Returns (start_idx, score) — the consensus index where the new pass text
+    /// best overlaps. Uses a sliding window of n-gram matches.
+    fn find_best_region(&self, new_norms: &[String]) -> (usize, f32) {
+        let m = self.consensus.len();
+        let n = new_norms.len();
+        if m == 0 || n == 0 { return (0, 0.0); }
+
+        let sample_size = n.min(8);
+        let min_overlap = n.min(m).min(3); // Need at least 3 matching positions
+        let mut best_offset = 0usize;
+        let mut best_score = 0.0f32;
+        let mut best_matched = 0usize;
+
+        // Slide new words across consensus to find best overlap position
+        // Only consider offsets near the emitted cursor (new text can't be far from it)
+        let search_start = if self.emitted_cursor > n + 5 { self.emitted_cursor - n - 5 } else { 0 };
+        let search_end = m.min(self.emitted_cursor + n * 2 + 10);
+
+        for offset in search_start..search_end {
+            // How many words can overlap at this offset?
+            let overlap = n.min(m.saturating_sub(offset));
+            if overlap < min_overlap { continue; }
+
+            let check_count = overlap.min(sample_size);
+            let mut score = 0.0f32;
+            let mut matched = 0usize;
+
+            // Check consecutive words in the overlap region
+            for i in 0..check_count {
+                let ci = offset + i;
+                if ci < m && i < n {
+                    let sim = token_similarity_normalized(&new_norms[i], &self.consensus[ci].normalized);
+                    if sim >= 0.5 { matched += 1; }
+                    score += sim;
+                }
+            }
+
+            if check_count > 0 {
+                let avg = score / check_count as f32;
+                // Prefer higher scores, break ties by preferring more overlap
+                if avg > best_score || (avg == best_score && matched > best_matched) {
+                    best_score = avg;
+                    best_offset = offset;
+                    best_matched = matched;
+                }
+            }
+        }
+
+        (best_offset, best_score)
+    }
+
+    /// Align new pass words to the consensus using banded DP.
+    ///
+    /// The DP finds the optimal alignment between `new_words` and a region of the
+    /// consensus starting at `region_start`. Each cell `dp[i][j]` represents the
+    /// best score for aligning `new_words[0..i]` with `consensus[region_start..region_start+j]`.
+    ///
+    /// Operations: match (score = similarity), gap in new (skip consensus word),
+    /// gap in consensus (skip new word = insertion).
     fn align_to_consensus(&self, new_words: &[String]) -> Vec<Option<usize>> {
         let n = new_words.len();
         let m = self.consensus.len();
 
         if m == 0 {
-            // No consensus yet — all words are new
             return vec![None; n];
         }
-
         if n == 0 {
             return vec![];
         }
@@ -346,89 +392,140 @@ impl WordConfirmer {
         let band = self.config.alignment_band_width;
         let sim_threshold = self.config.similarity_threshold;
 
-        // Build similarity matrix (banded — only compute within band)
-        // DP for edit-distance alignment with substitution cost based on token similarity
-        // State: dp[i][j] = best alignment score for new_words[..i] and consensus[..j]
-        // We want to maximize total similarity of aligned pairs
+        // Pre-compute normalized forms for new words
+        let new_norms: Vec<String> = new_words.iter().map(|w| normalize_token(w)).collect();
 
-        // Use a simpler greedy anchored approach for efficiency:
-        // 1. Find the best matching position in consensus for the first new word
-        // 2. Align forward from there, allowing small gaps
+        // Step 1: Find the best-matching region in the consensus
+        let (region_start, region_score) = self.find_best_region(&new_norms);
 
-        // Find the starting anchor: where does the first new word match in consensus?
-        let first_norm = normalize_token(&new_words[0]);
-        let mut best_start = 0usize;
-        let mut best_sim = 0.0f32;
-
-        // Search within a reasonable window from the emitted cursor
-        let search_start = if self.emitted_cursor > band { self.emitted_cursor - band } else { 0 };
-        let search_end = m.min(self.emitted_cursor + n + band);
-
-        for j in search_start..search_end {
-            let sim = token_similarity_normalized(&first_norm, &self.consensus[j].normalized);
-            if sim > best_sim {
-                best_sim = sim;
-                best_start = j;
-            }
-        }
-
-        // If no good anchor found, treat all words as new
-        if best_sim < sim_threshold * 0.7 {
+        // If no good region found, all words are new
+        if region_score < sim_threshold * 0.5 {
             return vec![None; n];
         }
 
-        // Forward alignment from the anchor
-        let mut alignment = vec![None; n];
-        let mut ci = best_start; // consensus index
-        let mut ni = 0usize;     // new word index
+        // Step 2: Banded DP alignment within the region
+        // Align new_words[0..n] against consensus[region_start..region_end]
+        let region_end = m.min(region_start + n + band);
+        let region_len = region_end - region_start;
 
-        while ni < n && ci < m {
-            let sim = token_similarity_normalized(
-                &normalize_token(&new_words[ni]),
-                &self.consensus[ci].normalized,
-            );
+        // DP matrix: dp[i][j] = best alignment score for new[0..i] vs region[0..j]
+        // We want to maximize total similarity.
+        // Operations:
+        //   match/substitute: dp[i-1][j-1] + similarity(new[i], consensus[region_start+j])
+        //   gap in consensus (insert new word): dp[i-1][j] + gap_penalty
+        //   gap in new (skip consensus word): dp[i][j-1] + gap_penalty
+        let gap_penalty: f32 = -0.1;
 
-            if sim >= sim_threshold {
-                // Good match — align
-                alignment[ni] = Some(ci);
-                ni += 1;
-                ci += 1;
-            } else {
-                // Mismatch — try to recover by looking ahead in both sequences
-                // Check: is the next consensus word a better match? (deletion in new)
-                let skip_consensus = if ci + 1 < m {
-                    token_similarity_normalized(
-                        &normalize_token(&new_words[ni]),
-                        &self.consensus[ci + 1].normalized,
-                    )
-                } else { 0.0 };
+        // Only allocate within band: for row i, columns from max(0, i-band) to min(region_len, i+band)
+        // Use full DP for simplicity (n * region_len is typically 60 * 80 = 4800, fast enough)
+        let rows = n + 1;
+        let cols = region_len + 1;
+        let mut dp = vec![vec![f32::NEG_INFINITY; cols]; rows];
+        let mut trace = vec![vec![0u8; cols]; rows]; // 0=none, 1=match, 2=gap_consensus, 3=gap_new
 
-                // Check: is the next new word a better match? (insertion in new)
-                let skip_new = if ni + 1 < n {
-                    token_similarity_normalized(
-                        &normalize_token(&new_words[ni + 1]),
-                        &self.consensus[ci].normalized,
-                    )
-                } else { 0.0 };
+        // Base cases
+        dp[0][0] = 0.0;
+        for j in 1..cols {
+            if j <= band {
+                dp[0][j] = dp[0][j - 1] + gap_penalty;
+                trace[0][j] = 3; // skip consensus word
+            }
+        }
+        for i in 1..rows {
+            if i <= band {
+                dp[i][0] = dp[i - 1][0] + gap_penalty;
+                trace[i][0] = 2; // skip new word
+            }
+        }
 
-                if skip_consensus >= sim_threshold && skip_consensus > skip_new {
-                    // Skip one consensus word (it was deleted from new pass)
-                    ci += 1;
-                } else if skip_new >= sim_threshold {
-                    // Current new word is an insertion — don't align it
-                    alignment[ni] = None;
-                    ni += 1;
-                } else {
-                    // Neither works — both are different. Mark as insertion and advance both.
-                    alignment[ni] = None;
-                    ni += 1;
-                    ci += 1;
+        // Fill DP within band
+        for i in 1..rows {
+            let j_min = if i > band { i - band } else { 1 };
+            let j_max = (i + band + 1).min(cols);
+
+            for j in j_min..j_max {
+                let ci = region_start + j - 1; // consensus index
+                let sim = token_similarity_normalized(&new_norms[i - 1], &self.consensus[ci].normalized);
+
+                // Match/substitute
+                if dp[i - 1][j - 1] > f32::NEG_INFINITY {
+                    let score = dp[i - 1][j - 1] + if sim >= sim_threshold { sim } else { sim - 0.5 };
+                    if score > dp[i][j] {
+                        dp[i][j] = score;
+                        trace[i][j] = 1;
+                    }
+                }
+
+                // Gap in consensus (skip new word = insertion)
+                if dp[i - 1][j] > f32::NEG_INFINITY {
+                    let score = dp[i - 1][j] + gap_penalty;
+                    if score > dp[i][j] {
+                        dp[i][j] = score;
+                        trace[i][j] = 2;
+                    }
+                }
+
+                // Gap in new (skip consensus word)
+                if dp[i][j - 1] > f32::NEG_INFINITY {
+                    let score = dp[i][j - 1] + gap_penalty;
+                    if score > dp[i][j] {
+                        dp[i][j] = score;
+                        trace[i][j] = 3;
+                    }
                 }
             }
         }
 
-        // Remaining new words have no consensus match
-        // (alignment[ni..] stays None by default)
+        // Step 3: Traceback from best endpoint
+        // Find the best score in the last row (all new words consumed)
+        let mut best_j = 0;
+        let mut best_score = f32::NEG_INFINITY;
+        for j in 0..cols {
+            if dp[n][j] > best_score {
+                best_score = dp[n][j];
+                best_j = j;
+            }
+        }
+
+        // If DP produced no good alignment, all words are new
+        if best_score < 0.0 {
+            return vec![None; n];
+        }
+
+        // Traceback
+        let mut alignment = vec![None; n];
+        let mut i = n;
+        let mut j = best_j;
+
+        while i > 0 && j > 0 {
+            match trace[i][j] {
+                1 => {
+                    // Match: new[i-1] aligns to consensus[region_start + j - 1]
+                    let ci = region_start + j - 1;
+                    let sim = token_similarity_normalized(&new_norms[i - 1], &self.consensus[ci].normalized);
+                    if sim >= sim_threshold {
+                        alignment[i - 1] = Some(ci);
+                    }
+                    // else: substitution (low similarity), treat as unaligned
+                    i -= 1;
+                    j -= 1;
+                }
+                2 => {
+                    // Gap in consensus: new[i-1] has no match (insertion)
+                    i -= 1;
+                }
+                3 => {
+                    // Gap in new: consensus word skipped
+                    j -= 1;
+                }
+                _ => {
+                    // Shouldn't happen, but break to avoid infinite loop
+                    i -= 1;
+                }
+            }
+        }
+        // Handle remaining new words (if traceback ended at j=0)
+        // They stay as None (insertions)
 
         alignment
     }
@@ -448,48 +545,54 @@ impl WordConfirmer {
         let mut newly_confirmed = Vec::new();
         let threshold = self.config.confirmation_threshold;
 
-        // Track which consensus words were matched this pass
-        let mut matched_consensus: Vec<bool> = vec![false; self.consensus.len()];
-
-        // Process aligned words
-        let mut insert_after: Vec<(usize, String)> = Vec::new();
-
+        // Phase 1: Update existing consensus words that have alignments
         for (ni, aligned_ci) in alignment.iter().enumerate() {
-            match aligned_ci {
-                Some(ci) => {
-                    // Word aligned to existing consensus entry — update it
-                    let cw = &mut self.consensus[*ci];
-                    cw.record_appearance(&new_words[ni], pass_idx);
-                    matched_consensus[*ci] = true;
+            if let Some(ci) = aligned_ci {
+                let cw = &mut self.consensus[*ci];
+                cw.record_appearance(&new_words[ni], pass_idx);
 
-                    // Check if this word just became confirmed
-                    if !cw.is_confirmed && cw.appearances >= threshold {
-                        cw.is_confirmed = true;
-                        newly_confirmed.push(cw.text.clone());
-                    }
-                }
-                None => {
-                    // New word not in consensus — find insertion position
-                    // Insert after the last aligned consensus word, or at end
-                    let insert_pos = alignment[..ni].iter().rev()
-                        .find_map(|a| *a)
-                        .map(|ci| ci + 1)
-                        .unwrap_or(if self.consensus.is_empty() { 0 } else { self.consensus.len() });
-
-                    insert_after.push((insert_pos, new_words[ni].clone()));
+                if !cw.is_confirmed && cw.appearances >= threshold {
+                    cw.is_confirmed = true;
+                    newly_confirmed.push(cw.text.clone());
                 }
             }
         }
 
-        // Insert new words into consensus (reverse order to preserve indices)
-        // Group insertions by position and insert in order
-        insert_after.sort_by_key(|(pos, _)| *pos);
+        // Phase 2: Insert unaligned words at correct positions
+        // Find the last aligned consensus index — new words after this extend the consensus
+        let last_aligned_ci = alignment.iter().rev().find_map(|a| *a);
+        let first_aligned_ci = alignment.iter().find_map(|a| *a);
+
+        // Collect insertions: (position_in_consensus, word)
+        let mut insertions: Vec<(usize, String)> = Vec::new();
+
+        for (ni, aligned_ci) in alignment.iter().enumerate() {
+            if aligned_ci.is_some() { continue; }
+
+            // Find the nearest aligned neighbors to determine insertion position
+            let prev_aligned = alignment[..ni].iter().rev().find_map(|a| *a);
+            let next_aligned = alignment[ni + 1..].iter().find_map(|a| *a);
+
+            let insert_pos = match (prev_aligned, next_aligned) {
+                (Some(prev), _) => prev + 1,           // After previous aligned word
+                (None, Some(next)) => next,             // Before next aligned word
+                (None, None) => {
+                    // No aligned neighbors at all — append after consensus
+                    self.consensus.len()
+                }
+            };
+
+            insertions.push((insert_pos, new_words[ni].clone()));
+        }
+
+        // Sort insertions by position (ascending) and apply with offset tracking.
+        // Each insertion shifts subsequent positions by 1.
+        insertions.sort_by_key(|(pos, _)| *pos);
         let mut offset = 0usize;
-        for (pos, word) in insert_after {
+        for (pos, word) in insertions {
             let actual_pos = (pos + offset).min(self.consensus.len());
             self.consensus.insert(actual_pos, ConsensusWord::new(&word, pass_idx));
             offset += 1;
-            // Adjust emitted_cursor if insertion is before it (keeps cursor pointing to same word)
             if actual_pos < self.emitted_cursor {
                 self.emitted_cursor += 1;
             }

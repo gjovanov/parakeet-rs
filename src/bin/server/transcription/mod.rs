@@ -468,7 +468,7 @@ fn run_transcription_inner(
     let mut last_growing_sentence = String::new(); // Track previous growing_text for sentence promotion
     let mut pending_fragment = String::new(); // Buffer short fragments for merge with next FINAL
     // Cross-cycle emission buffer: (text, timestamp, start_time, end_time, speaker, inference_ms)
-    let mut pending_emissions: Vec<(String, std::time::Instant, f32, f32, Option<usize>, Option<u32>)> = Vec::new();
+    let mut pending_emissions: std::collections::VecDeque<(String, std::time::Instant, f32, f32, Option<usize>, Option<u32>)> = std::collections::VecDeque::new();
 
     // Stopwords for content-word echo dedup (German + English) — built once, reused
     let stopwords: std::collections::HashSet<&str> = [
@@ -828,7 +828,7 @@ fn run_transcription_inner(
                         for cleaned in final_to_emit {
                             let normalized = emitters::normalize_text(&cleaned);
                             // Try to merge with the most recent pending emission
-                            let merged = if let Some((ref mut prev_text, ref prev_time, ..)) = pending_emissions.last_mut() {
+                            let merged = if let Some((ref mut prev_text, ref prev_time, ..)) = pending_emissions.back_mut() {
                                 let prev_wc = prev_text.split_whitespace().count();
                                 let curr_wc = normalized.split_whitespace().count();
                                 // Merge if both are short and recent
@@ -845,7 +845,7 @@ fn run_transcription_inner(
                                 false
                             };
                             if !merged {
-                                pending_emissions.push((normalized, now, ref_segment.start_time, ref_segment.end_time, ref_segment.speaker, ref_segment.inference_time_ms));
+                                pending_emissions.push_back((normalized, now, ref_segment.start_time, ref_segment.end_time, ref_segment.speaker, ref_segment.inference_time_ms));
                             }
                         }
 
@@ -853,11 +853,11 @@ fn run_transcription_inner(
                         let mut total_format_ms: u128 = 0;
                         let emit_start = std::time::Instant::now();
                         let emission_delay = std::time::Duration::from_secs(2);
-                        while let Some((text, time, start_t, end_t, speaker, inf_ms)) = pending_emissions.first() {
+                        while let Some((_text, time, _start_t, _end_t, _speaker, _inf_ms)) = pending_emissions.front() {
                             if now.duration_since(*time) < emission_delay {
                                 break; // Not old enough yet
                             }
-                            let (text, _time, start_t, end_t, speaker, inf_ms) = pending_emissions.remove(0);
+                            let (text, _time, start_t, end_t, speaker, inf_ms) = pending_emissions.pop_front().unwrap();
 
                             recent_finals.push_back(text.clone());
                             if recent_finals.len() > 20 {
@@ -915,6 +915,19 @@ fn run_transcription_inner(
                             last_growing_sentence.clear();
                         }
                         let emit_ms = emit_start.elapsed().as_millis();
+
+                        // Advance word confirmer cursor after emitting FINALs
+                        // so confirmed text moves forward and doesn't re-emit.
+                        // We advance by the confirmed_text length that was consumed
+                        // (not the merger output, which may differ due to unconfirmed gaps).
+                        if let Some(ref mut wc) = word_confirmer {
+                            if new_finalized > prev_finalized {
+                                // The confirmed_text we pushed was consumed by the merger.
+                                // Advance cursor past all confirmed words that were in the push.
+                                let consumed = full_text.split_whitespace().count();
+                                wc.advance_cursor(consumed);
+                            }
+                        }
 
                         // Phase 4b: Promote unconfirmed sentences
                         // If the growing sentence transitioned (previous ended with .!? and
