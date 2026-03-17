@@ -215,6 +215,24 @@ impl ModelRegistry {
             languages: vec!["en".to_string()],
         });
 
+        // Register Voxtral 4B if available
+        #[cfg(feature = "voxtral")]
+        {
+            let voxtral_path = std::env::var("VOXTRAL_MODEL_PATH")
+                .unwrap_or_else(|_| "./voxtral-q4".to_string());
+            let voxtral_available = std::path::Path::new(&voxtral_path).join("onnx").exists()
+                || std::path::Path::new(&voxtral_path).join("audio_encoder_q4.onnx").exists();
+            registry.register(RegisteredModel {
+                model_type: ModelType::Voxtral4B,
+                model_path: PathBuf::from(&voxtral_path),
+                diarization_path: diar_path.clone(),
+                exec_config: registry.default_exec_config.clone(),
+                is_available: voxtral_available,
+                description: "Mistral's Voxtral Mini 4B Realtime - multilingual encoder-decoder ASR".to_string(),
+                languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
+            });
+        }
+
         // Register Formatter LLM if FORMATTER_MODEL_PATH is set
         if let Ok(formatter_path) = std::env::var("FORMATTER_MODEL_PATH") {
             let path = PathBuf::from(&formatter_path);
