@@ -17,7 +17,7 @@ const state = {
 };
 
 // Pause-related modes that show pause config
-const PAUSE_MODES = ['speedy', 'pause_based', 'lookahead', 'vad_speedy', 'vad_pause_based', 'pause_parallel'];
+const PAUSE_MODES = ['speedy', 'pause_based', 'lookahead', 'vad_speedy', 'vad_pause_based', 'pause_parallel', 'pause_segmented'];
 
 // Map slider value (1-5) to actual silence_energy_threshold
 function getSilenceEnergyThreshold(sliderValue) {
@@ -155,6 +155,15 @@ function cacheElements() {
   elements.contextBuffer = document.getElementById('context-buffer');
   elements.contextBufferValue = document.getElementById('context-buffer-value');
 
+  // Pause-segmented config elements
+  elements.pauseSegmentedConfig = document.getElementById('pause-segmented-config');
+  elements.psContextSegments = document.getElementById('ps-context-segments');
+  elements.psContextSegmentsValue = document.getElementById('ps-context-segments-value');
+  elements.psMinSegment = document.getElementById('ps-min-segment');
+  elements.psMinSegmentValue = document.getElementById('ps-min-segment-value');
+  elements.psPartialInterval = document.getElementById('ps-partial-interval');
+  elements.psPartialIntervalValue = document.getElementById('ps-partial-interval-value');
+
   // Growing segments config elements
   elements.growingSegmentsConfig = document.getElementById('growing-segments-config');
   elements.gsBufferSize = document.getElementById('gs-buffer-size');
@@ -272,6 +281,7 @@ function setupEventListeners() {
         elements.fabSendTypeGroup,
         elements.parallelConfig,
         elements.pauseConfig,
+        elements.pauseSegmentedConfig,
         elements.growingSegmentsConfig,
       ];
 
@@ -302,6 +312,11 @@ function setupEventListeners() {
       // Show/hide pause config
       if (elements.pauseConfig) {
         elements.pauseConfig.style.display = isPauseMode ? 'block' : 'none';
+      }
+
+      // Show/hide pause-segmented config
+      if (elements.pauseSegmentedConfig) {
+        elements.pauseSegmentedConfig.style.display = mode === 'pause_segmented' ? 'block' : 'none';
       }
 
       // Show/hide growing segments config
@@ -408,6 +423,23 @@ function setupEventListeners() {
     });
   }
 
+  // Pause-segmented sliders
+  if (elements.psContextSegments) {
+    elements.psContextSegments.addEventListener('input', () => {
+      elements.psContextSegmentsValue.textContent = elements.psContextSegments.value;
+    });
+  }
+  if (elements.psMinSegment) {
+    elements.psMinSegment.addEventListener('input', () => {
+      elements.psMinSegmentValue.textContent = parseFloat(elements.psMinSegment.value).toFixed(1);
+    });
+  }
+  if (elements.psPartialInterval) {
+    elements.psPartialInterval.addEventListener('input', () => {
+      elements.psPartialIntervalValue.textContent = parseFloat(elements.psPartialInterval.value).toFixed(1);
+    });
+  }
+
   // Formatting select - show/hide tone dropdown
   if (elements.formattingEnabledSelect) {
     elements.formattingEnabledSelect.addEventListener('change', () => {
@@ -493,7 +525,8 @@ function setupEventListeners() {
         pause_threshold_ms: parseInt(elements.pauseThreshold.value, 10),
         silence_energy_threshold: getSilenceEnergyThreshold(parseInt(elements.silenceEnergy?.value || 3, 10)),
         max_segment_secs: parseFloat(elements.maxSegment?.value || 5),
-        context_buffer_secs: parseFloat(elements.contextBuffer?.value || 0)
+        context_buffer_secs: parseFloat(elements.contextBuffer?.value || 0),
+        context_segments: elements.psContextSegments ? parseInt(elements.psContextSegments.value, 10) : 1,
       };
     }
 
