@@ -25,6 +25,9 @@ pub enum ModelType {
     Canary180MFlash,
     /// Canary-Qwen 2.5B SALM model (FastConformer + Qwen3 LLM decoder)
     CanaryQwen2B,
+    /// Voxtral Mini 4B Realtime (Mistral encoder-decoder ASR)
+    #[cfg(feature = "voxtral")]
+    Voxtral4B,
     /// Small LLM for text formatting (e.g. Qwen2.5-0.5B-Instruct ONNX INT4)
     FormatterLlm,
 }
@@ -37,6 +40,8 @@ impl ModelType {
             ModelType::Canary1B => "canary-1b",
             ModelType::Canary180MFlash => "canary-180m-flash",
             ModelType::CanaryQwen2B => "canary-qwen-2b",
+            #[cfg(feature = "voxtral")]
+            ModelType::Voxtral4B => "voxtral-4b",
             ModelType::FormatterLlm => "formatter-llm",
         }
     }
@@ -48,6 +53,8 @@ impl ModelType {
             ModelType::Canary1B => "Canary 1B",
             ModelType::Canary180MFlash => "Canary 180M Flash",
             ModelType::CanaryQwen2B => "Canary-Qwen 2.5B",
+            #[cfg(feature = "voxtral")]
+            ModelType::Voxtral4B => "Voxtral Mini 4B",
             ModelType::FormatterLlm => "Formatter LLM",
         }
     }
@@ -59,6 +66,8 @@ impl ModelType {
             "canary-1b" => Some(ModelType::Canary1B),
             "canary-180m-flash" => Some(ModelType::Canary180MFlash),
             "canary-qwen-2b" => Some(ModelType::CanaryQwen2B),
+            #[cfg(feature = "voxtral")]
+            "voxtral-4b" => Some(ModelType::Voxtral4B),
             "formatter-llm" => Some(ModelType::FormatterLlm),
             _ => None,
         }
@@ -68,6 +77,8 @@ impl ModelType {
     pub fn languages(&self) -> Vec<&'static str> {
         match self {
             ModelType::ParakeetTdt => vec!["en"],
+            #[cfg(feature = "voxtral")]
+            ModelType::Voxtral4B => vec!["en", "de", "fr", "es", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko"],
             ModelType::Canary1B => vec!["en", "de", "fr", "es"],
             ModelType::Canary180MFlash => vec!["en", "de", "fr", "es"],
             ModelType::CanaryQwen2B => vec!["en"],
@@ -377,6 +388,12 @@ impl ModelRegistry {
                 )?;
 
                 Ok(Box::new(transcriber))
+            }
+            #[cfg(feature = "voxtral")]
+            ModelType::Voxtral4B => {
+                Err(Error::Model(
+                    "Voxtral4B uses pause_segmented mode — create via session API with mode=pause_segmented".to_string()
+                ))
             }
             ModelType::FormatterLlm => {
                 Err(Error::Model(

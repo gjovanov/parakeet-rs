@@ -158,6 +158,7 @@ pub fn run_session_transcription(
     }
 
     let is_canary_qwen = model_id == "canary-qwen-2b";
+    let is_voxtral = model_id == "voxtral-4b";
     let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash" || is_canary_qwen;
     let is_canary_flash = model_id == "canary-180m-flash";
 
@@ -196,6 +197,7 @@ pub fn run_session_transcription(
                 is_canary,
                 is_canary_flash,
                 is_canary_qwen,
+                is_voxtral,
                 is_vad_mode,
                 mode,
                 vad_base_mode,
@@ -297,6 +299,7 @@ fn run_transcription_inner(
     is_canary: bool,
     is_canary_flash: bool,
     is_canary_qwen: bool,
+    is_voxtral: bool,
     is_vad_mode: bool,
     mode: String,
     vad_base_mode: String,
@@ -351,6 +354,7 @@ fn run_transcription_inner(
             is_canary,
             is_canary_flash,
             is_canary_qwen,
+            is_voxtral,
             is_vad_mode,
             mode: mode.clone(),
             vad_base_mode,

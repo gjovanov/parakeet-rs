@@ -175,17 +175,17 @@ impl VoxtralModel {
 
         // Load ONNX sessions using the standard builder pattern
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let encoder_session = builder.commit_from_file(&encoder_path)?;
         eprintln!("[Voxtral] Encoder loaded: {:?}", encoder_path.file_name().unwrap());
 
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let decoder_session = builder.commit_from_file(&decoder_path)?;
         eprintln!("[Voxtral] Decoder loaded: {:?}", decoder_path.file_name().unwrap());
 
         let builder = Session::builder()?;
-        let builder = exec_config.apply_to_session_builder(builder)?;
+        let mut builder = exec_config.apply_to_session_builder(builder)?;
         let embed_tokens_session = builder.commit_from_file(&embed_path)?;
         eprintln!("[Voxtral] Embed tokens loaded: {:?}", embed_path.file_name().unwrap());
 
@@ -296,8 +296,9 @@ impl VoxtralModel {
         });
 
         // Reshape to [batch=1, n_mels, n_frames]
-        let shape = mel_spec.shape();
-        Ok(mel_spec.into_shape_with_order((1, shape[0], shape[1]))
+        let (n_mels_dim, n_frames_dim) = (mel_spec.shape()[0], mel_spec.shape()[1]);
+        let flat = mel_spec.into_raw_vec();
+        Ok(Array3::from_shape_vec((1, n_mels_dim, n_frames_dim), flat)
             .map_err(|e| Error::Config(format!("Reshape error: {}", e)))?)
     }
 
@@ -350,7 +351,7 @@ impl VoxtralModel {
 
         let outputs = self.encoder_session.run(ort::inputs!(
             "input_features" => input_value
-        )?)?;
+        ))?;
 
         let enc_out = &outputs[0];
         let (shape, data) = enc_out
@@ -370,131 +371,169 @@ impl VoxtralModel {
     // Autoregressive decoder
     // ========================================================================
 
+    /// Embed token IDs via embed_tokens ONNX session
+    fn embed_tokens(&mut self, token_ids: &[i64]) -> Result<Array3<f32>> {
+        let input = ndarray::Array2::from_shape_vec((1, token_ids.len()), token_ids.to_vec())
+            .map_err(|e| Error::Model(format!("embed input: {}", e)))?;
+        let input_value = ort::value::Value::from_array(input)?;
+        let outputs = self.embed_tokens_session.run(ort::inputs!("input_ids" => input_value))?;
+
+        let (shape, data) = outputs[0]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| Error::Model(format!("embed extract: {}", e)))?;
+        let dims = shape.as_ref();
+        Array3::from_shape_vec(
+            (dims[0] as usize, dims[1] as usize, dims[2] as usize),
+            data.to_vec(),
+        ).map_err(|e| Error::Model(format!("embed reshape: {}", e)))
+    }
+
+    /// Extract a 4D tensor from ONNX outputs by name
+    fn extract_4d(outputs: &ort::session::SessionOutputs, name: &str) -> Result<Array4<f32>> {
+        let (shape, data) = outputs[name]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| Error::Model(format!("extract {}: {}", name, e)))?;
+        let dims = shape.as_ref();
+        if dims.len() != 4 {
+            return Err(Error::Model(format!("{}: expected 4D, got {}D", name, dims.len())));
+        }
+        Array4::from_shape_vec(
+            (dims[0] as usize, dims[1] as usize, dims[2] as usize, dims[3] as usize),
+            data.to_vec(),
+        ).map_err(|e| Error::Model(format!("{} reshape: {}", name, e)))
+    }
+
+    /// Extract next token from logits with repetition penalty
+    fn extract_next_token(
+        outputs: &ort::session::SessionOutputs,
+        past_tokens: &[i64],
+        rep_penalty: f32,
+        vocab_size: usize,
+    ) -> Result<i64> {
+        let (logits_shape, logits_data) = outputs["logits"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| Error::Model(format!("logits extract: {}", e)))?;
+        let dims = logits_shape.as_ref();
+
+        let mut last_logits: Vec<f32> = match dims.len() {
+            2 => logits_data[..vocab_size].to_vec(),
+            3 => {
+                let seq_len = dims[1] as usize;
+                let start = (seq_len - 1) * vocab_size;
+                logits_data[start..start + vocab_size].to_vec()
+            }
+            _ => return Err(Error::Model(format!("logits: unexpected dims {:?}", dims))),
+        };
+
+        if rep_penalty != 1.0 {
+            for &tok in past_tokens {
+                let idx = tok as usize;
+                if idx < last_logits.len() {
+                    if last_logits[idx] > 0.0 { last_logits[idx] /= rep_penalty; }
+                    else { last_logits[idx] *= rep_penalty; }
+                }
+            }
+        }
+
+        Ok(last_logits.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(idx, _)| idx as i64)
+            .unwrap_or(EOS_TOKEN_ID))
+    }
+
+    /// Autoregressive greedy decoding with KV cache
     fn greedy_decode(&mut self, encoder_output: &Array3<f32>) -> Result<Vec<i64>> {
-        let max_tokens = self.config.max_sequence_length.min(500); // Safety limit
-        let mut tokens: Vec<i64> = vec![BOS_TOKEN_ID];
-        let vocab_size = self.config.vocab_size;
-        let rep_penalty = self.config.repetition_penalty;
+        self.kv_cache.reset();
+        let max_tokens = self.config.max_sequence_length.min(500);
+        let mut generated: Vec<i64> = Vec::new();
 
-        // Get embed tokens for BOS
-        let mut current_ids = ndarray::Array2::<i64>::from_shape_vec(
-            (1, 1), vec![BOS_TOKEN_ID]
-        ).unwrap();
+        // Step 0: Embed BOS token and feed with encoder output (prefill)
+        let bos_embed = self.embed_tokens(&[BOS_TOKEN_ID])?;
+        let encoder_value = ort::value::Value::from_array(encoder_output.clone())?;
 
-        // Feed encoder output as the first input
-        let encoder_hidden = ort::value::Value::from_array(encoder_output.view())?;
+        let first_token = {
+            let mut inputs = ort::inputs!(
+                "inputs_embeds" => ort::value::Value::from_array(bos_embed)?,
+                "encoder_hidden_states" => encoder_value
+            );
 
-        for step in 0..max_tokens {
-            // Get token embeddings
-            let input_ids_val = ort::value::Value::from_array(current_ids.view())?;
-            let embed_output = self.embed_tokens_session.run(
-                ort::inputs!["input_ids" => input_ids_val]?
-            )?;
-            let inputs_embeds = embed_output[0].try_extract_tensor::<f32>()?;
-
-            // Build decoder inputs
-            let use_cache = step > 0;
-            let mut decoder_inputs = Vec::new();
-
-            // inputs_embeds
-            decoder_inputs.push(("inputs_embeds".to_string(),
-                ort::value::Value::from_array(inputs_embeds.view())?));
-
-            // encoder_hidden_states (only on first step, or always for cross-attention)
-            decoder_inputs.push(("encoder_hidden_states".to_string(),
-                encoder_hidden.view().try_clone()?));
-
-            // KV cache
+            // Empty KV cache
             for layer in 0..self.kv_cache.num_layers {
-                let key_name = format!("past_key_values.{}.key", layer);
-                let value_name = format!("past_key_values.{}.value", layer);
-                decoder_inputs.push((key_name,
-                    ort::value::Value::from_array(self.kv_cache.past_keys[layer].view())?));
-                decoder_inputs.push((value_name,
-                    ort::value::Value::from_array(self.kv_cache.past_values[layer].view())?));
+                inputs.push((
+                    format!("past_key_values.{}.key", layer).into(),
+                    ort::value::Value::from_array(self.kv_cache.past_keys[layer].clone())?.into(),
+                ));
+                inputs.push((
+                    format!("past_key_values.{}.value", layer).into(),
+                    ort::value::Value::from_array(self.kv_cache.past_values[layer].clone())?.into(),
+                ));
             }
 
-            // use_cache_branch
-            let use_cache_val = ndarray::Array1::<bool>::from_vec(vec![use_cache]);
-            decoder_inputs.push(("use_cache_branch".to_string(),
-                ort::value::Value::from_array(use_cache_val.view())?));
+            // use_cache_branch = false (prefill)
+            let ucb = ndarray::Array1::<bool>::from_vec(vec![false]);
+            inputs.push(("use_cache_branch".into(), ort::value::Value::from_array(ucb)?.into()));
 
-            // Run decoder
-            let outputs = self.decoder_session.run(
-                decoder_inputs.into_iter().map(|(k, v)| (k.into(), v)).collect::<Vec<_>>()
-            )?;
+            let outputs = self.decoder_session.run(inputs)?;
 
-            // Extract logits (first output)
-            let logits = outputs[0].try_extract_tensor::<f32>()?;
-            let logits_shape = logits.shape();
-            let seq_len = logits_shape[1];
-
-            // Get logits for the last token
-            let mut last_logits: Vec<f32> = (0..vocab_size)
-                .map(|i| logits[[0, seq_len - 1, i]])
-                .collect();
-
-            // Apply repetition penalty
-            if rep_penalty != 1.0 {
-                for &tok in &tokens {
-                    let idx = tok as usize;
-                    if idx < last_logits.len() {
-                        if last_logits[idx] > 0.0 {
-                            last_logits[idx] /= rep_penalty;
-                        } else {
-                            last_logits[idx] *= rep_penalty;
-                        }
-                    }
-                }
-            }
-
-            // Greedy selection
-            let next_token = last_logits.iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(idx, _)| idx as i64)
-                .unwrap_or(EOS_TOKEN_ID);
-
-            // Check for EOS
-            if next_token == EOS_TOKEN_ID {
-                break;
-            }
-
-            tokens.push(next_token);
-
-            // Update KV cache from decoder outputs
-            let mut present_keys = Vec::new();
-            let mut present_values = Vec::new();
+            // Update KV cache
+            let mut pk = Vec::new();
+            let mut pv = Vec::new();
             for layer in 0..self.kv_cache.num_layers {
-                let key_idx = 1 + layer * 2;
-                let val_idx = 2 + layer * 2;
-                if key_idx < outputs.len() && val_idx < outputs.len() {
-                    let key = outputs[key_idx].try_extract_tensor::<f32>()?.to_owned();
-                    let val = outputs[val_idx].try_extract_tensor::<f32>()?.to_owned();
-                    let k_shape = key.shape();
-                    let v_shape = val.shape();
-                    present_keys.push(key.into_shape_with_order((k_shape[0], k_shape[1], k_shape[2], k_shape[3]))
-                        .map_err(|e| Error::Config(format!("KV key reshape: {}", e)))?);
-                    present_values.push(val.into_shape_with_order((v_shape[0], v_shape[1], v_shape[2], v_shape[3]))
-                        .map_err(|e| Error::Config(format!("KV val reshape: {}", e)))?);
-                }
+                pk.push(Self::extract_4d(&outputs, &format!("present.{}.key", layer))?);
+                pv.push(Self::extract_4d(&outputs, &format!("present.{}.value", layer))?);
             }
-            if present_keys.len() == self.kv_cache.num_layers {
-                self.kv_cache.update(present_keys, present_values);
+            self.kv_cache.update(pk, pv);
+
+            Self::extract_next_token(&outputs, &generated, self.config.repetition_penalty, self.config.vocab_size)?
+        };
+
+        if first_token == EOS_TOKEN_ID { return Ok(generated); }
+        generated.push(first_token);
+
+        // Steps 1..N: one token at a time with KV cache
+        for _step in 1..max_tokens {
+            let last_tok = *generated.last().unwrap();
+            let tok_embed = self.embed_tokens(&[last_tok])?;
+
+            // Encoder output as empty on cached steps (cross-attention uses cached KV)
+            let empty_encoder = Array3::<f32>::zeros((1, 0, self.config.hidden_size));
+
+            let mut inputs = ort::inputs!(
+                "inputs_embeds" => ort::value::Value::from_array(tok_embed)?,
+                "encoder_hidden_states" => ort::value::Value::from_array(empty_encoder)?
+            );
+
+            for layer in 0..self.kv_cache.num_layers {
+                inputs.push((
+                    format!("past_key_values.{}.key", layer).into(),
+                    ort::value::Value::from_array(self.kv_cache.past_keys[layer].clone())?.into(),
+                ));
+                inputs.push((
+                    format!("past_key_values.{}.value", layer).into(),
+                    ort::value::Value::from_array(self.kv_cache.past_values[layer].clone())?.into(),
+                ));
             }
 
-            // Prepare next input
-            current_ids = ndarray::Array2::<i64>::from_shape_vec(
-                (1, 1), vec![next_token]
-            ).unwrap();
+            let ucb = ndarray::Array1::<bool>::from_vec(vec![true]);
+            inputs.push(("use_cache_branch".into(), ort::value::Value::from_array(ucb)?.into()));
+
+            let outputs = self.decoder_session.run(inputs)?;
+
+            let mut pk = Vec::new();
+            let mut pv = Vec::new();
+            for layer in 0..self.kv_cache.num_layers {
+                pk.push(Self::extract_4d(&outputs, &format!("present.{}.key", layer))?);
+                pv.push(Self::extract_4d(&outputs, &format!("present.{}.value", layer))?);
+            }
+            self.kv_cache.update(pk, pv);
+
+            let next = Self::extract_next_token(&outputs, &generated, self.config.repetition_penalty, self.config.vocab_size)?;
+            if next == EOS_TOKEN_ID { break; }
+            generated.push(next);
         }
 
-        // Remove BOS token
-        if !tokens.is_empty() && tokens[0] == BOS_TOKEN_ID {
-            tokens.remove(0);
-        }
-
-        Ok(tokens)
+        Ok(generated)
     }
 
     pub fn set_language(&mut self, lang: &str) {

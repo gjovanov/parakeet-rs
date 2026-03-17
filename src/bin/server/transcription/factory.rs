@@ -15,6 +15,7 @@ pub struct TranscriberParams {
     pub is_canary: bool,
     pub is_canary_flash: bool,
     pub is_canary_qwen: bool,
+    pub is_voxtral: bool,
     pub is_vad_mode: bool,
     pub mode: String,
     pub vad_base_mode: String,
@@ -42,6 +43,7 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
         is_canary,
         is_canary_flash,
         is_canary_qwen,
+        is_voxtral,
         is_vad_mode,
         mode,
         vad_base_mode,
@@ -103,6 +105,19 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
             &session_id, &model_path, diar_path.as_ref(), exec_config,
             &language, pause_config.as_ref(),
         )
+    } else if mode == "pause_segmented" && is_voxtral {
+        #[cfg(feature = "voxtral")]
+        {
+            create_pause_segmented_voxtral(
+                &session_id, &model_path, diar_path.as_ref(), exec_config,
+                &language, pause_config.as_ref(),
+            )
+        }
+        #[cfg(not(feature = "voxtral"))]
+        {
+            eprintln!("[Session {}] Voxtral feature not enabled", session_id);
+            None
+        }
     } else if mode == "pause_segmented" {
         create_pause_segmented_tdt(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
@@ -1032,5 +1047,41 @@ fn create_pause_segmented_tdt(
     match result {
         Ok(t) => Some(Box::new(t)),
         Err(e) => { eprintln!("[Session {}] Failed to create Pause-Segmented TDT: {}", session_id, e); None }
+    }
+}
+
+#[cfg(feature = "voxtral")]
+fn create_pause_segmented_voxtral(
+    session_id: &str,
+    model_path: &std::path::PathBuf,
+    diar_path: Option<&std::path::PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    language: &str,
+    pause_config: Option<&PauseConfig>,
+) -> Option<Box<dyn parakeet_rs::streaming_transcriber::StreamingTranscriber>> {
+    use parakeet_rs::pause_segmented::PauseSegmentedConfig;
+    use parakeet_rs::pause_segmented_voxtral::PauseSegmentedVoxtral;
+
+    let mut config = PauseSegmentedConfig {
+        language: language.to_string(),
+        ..Default::default()
+    };
+    if let Some(pc) = pause_config {
+        config.pause_threshold_secs = pc.pause_threshold_ms as f32 / 1000.0;
+        config.silence_energy_threshold = pc.silence_energy_threshold;
+        config.max_segment_secs = pc.max_segment_secs;
+        if pc.context_segments >= 1 { config.context_segments = pc.context_segments; }
+    }
+
+    eprintln!(
+        "[Session {}] Creating Pause-Segmented Voxtral (language: {}, pause: {:.0}ms, ctx_seg: {})",
+        session_id, language, config.pause_threshold_secs * 1000.0, config.context_segments
+    );
+
+    let result = PauseSegmentedVoxtral::new(model_path, Some(exec_config), Some(config));
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => { eprintln!("[Session {}] Failed to create Pause-Segmented Voxtral: {}", session_id, e); None }
     }
 }
