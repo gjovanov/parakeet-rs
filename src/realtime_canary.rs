@@ -202,6 +202,8 @@ pub struct RealtimeCanary {
     pause_boundary_time: Option<f32>,
     /// When the last detected pause ended
     last_pause_end_time: f32,
+    /// Whether the last push_audio detected a pause (consumed after read)
+    last_pause_detected: bool,
 
     /// Optional speaker diarizer (requires sortformer feature)
     #[cfg(feature = "sortformer")]
@@ -249,6 +251,7 @@ impl RealtimeCanary {
             silence_start_time: None,
             pause_boundary_time: None,
             last_pause_end_time: 0.0,
+            last_pause_detected: false,
             #[cfg(feature = "sortformer")]
             diarizer: None,
         })
@@ -308,6 +311,7 @@ impl RealtimeCanary {
             silence_start_time: None,
             pause_boundary_time: None,
             last_pause_end_time: 0.0,
+            last_pause_detected: false,
             diarizer,
         })
     }
@@ -412,6 +416,7 @@ impl RealtimeCanary {
                 text: String::new(),
                 is_partial: true,
                 buffer_time: buffer_secs,
+                pause_detected: false,
             });
         }
 
@@ -420,6 +425,7 @@ impl RealtimeCanary {
                 text: String::new(),
                 is_partial: true,
                 buffer_time: buffer_secs,
+                pause_detected: false,
             });
         }
 
@@ -467,6 +473,7 @@ impl RealtimeCanary {
                 text: String::new(),
                 is_partial: true,
                 buffer_time: buffer_secs,
+                pause_detected: false,
             });
         }
 
@@ -492,11 +499,14 @@ impl RealtimeCanary {
         // In emit_full_text mode, return the full buffer transcription as partial
         // and skip word-level confirmation. The growing text merger handles finalization.
         if self.config.emit_full_text {
+            // Consume pause signal — store on self for pipeline to query
+            self.last_pause_detected = self.pause_boundary_time.take().is_some();
             self.last_transcription = text.clone();
             return Ok(CanaryChunkResult {
                 text,
                 is_partial: true,
                 buffer_time: buffer_secs,
+                pause_detected: self.last_pause_detected,
             });
         }
 
@@ -633,6 +643,7 @@ impl RealtimeCanary {
             text: partial_text,
             is_partial: true,
             buffer_time: buffer_secs,
+            pause_detected: false,
         })
     }
 
@@ -643,6 +654,7 @@ impl RealtimeCanary {
                 text: self.last_transcription.clone(),
                 is_partial: false,
                 buffer_time: 0.0,
+                pause_detected: false,
             });
         }
 
@@ -656,6 +668,7 @@ impl RealtimeCanary {
             text,
             is_partial: false,
             buffer_time: 0.0,
+            pause_detected: false,
         })
     }
 
@@ -693,6 +706,12 @@ impl RealtimeCanary {
         self.total_samples_received as f32 / SAMPLE_RATE as f32
     }
 
+    /// Check and consume the pause detected flag.
+    /// Returns true if a pause was detected since the last call to this method.
+    pub fn take_pause_detected(&mut self) -> bool {
+        std::mem::replace(&mut self.last_pause_detected, false)
+    }
+
     /// Set the target language
     pub fn set_language(&mut self, lang: &str) {
         self.model.set_language(lang);
@@ -709,6 +728,8 @@ pub struct CanaryChunkResult {
     pub is_partial: bool,
     /// Current buffer duration in seconds
     pub buffer_time: f32,
+    /// Whether a speech pause was detected since last result
+    pub pause_detected: bool,
 }
 
 // ============================================================================
@@ -826,6 +847,10 @@ impl StreamingTranscriber for RealtimeCanary {
 
     fn total_duration(&self) -> f32 {
         RealtimeCanary::total_duration(self)
+    }
+
+    fn take_pause_detected(&mut self) -> bool {
+        RealtimeCanary::take_pause_detected(self)
     }
 }
 

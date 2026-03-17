@@ -619,11 +619,24 @@ fn run_transcription_inner(
                     let phase2_ms = phase2_start.elapsed().as_millis();
 
                     if !full_text.is_empty() {
-                        // Phase 3: Push once to growing_merger (as partial — let merger detect sentence boundaries)
+                        // Phase 3: Push once to growing_merger
+                        // If a pause was detected, push as is_final=true to force finalization
                         let phase3_start = std::time::Instant::now();
+                        let pause_detected = transcriber.take_pause_detected();
                         let prev_finalized = growing_merger.get_finalized_sentences().len();
-                        let growing_result = growing_merger.push(&full_text, false);
-                        let new_finalized = growing_merger.get_finalized_sentences().len();
+                        let growing_result = growing_merger.push(&full_text, pause_detected);
+                        let mut new_finalized = growing_merger.get_finalized_sentences().len();
+
+                        // If pause detected but merger didn't finalize (e.g., text doesn't end
+                        // with punctuation), force-flush the working buffer
+                        if pause_detected && new_finalized == prev_finalized {
+                            if let Some(flushed) = growing_merger.flush() {
+                                if flushed.split_whitespace().count() >= 3 {
+                                    // Re-read finalized count after flush
+                                    new_finalized = growing_merger.get_finalized_sentences().len();
+                                }
+                            }
+                        }
                         let phase3_ms = phase3_start.elapsed().as_millis();
 
                         // Phase 4: Collect FINALs for newly finalized sentences

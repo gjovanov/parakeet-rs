@@ -133,6 +133,11 @@ pub trait StreamingTranscriber: Send {
 
     /// Get the total audio duration processed
     fn total_duration(&self) -> f32;
+
+    /// Check and consume the pause detected flag.
+    /// Returns true if an acoustic pause was detected since the last call.
+    /// Default: false (only RealtimeCanary implements pause detection).
+    fn take_pause_detected(&mut self) -> bool { false }
 }
 
 /// Factory function type for creating transcribers
