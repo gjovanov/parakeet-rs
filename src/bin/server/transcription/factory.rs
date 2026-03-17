@@ -911,11 +911,14 @@ fn create_pause_segmented_canary(
         config.pause_threshold_secs = pc.pause_threshold_ms as f32 / 1000.0;
         config.silence_energy_threshold = pc.silence_energy_threshold;
         config.max_segment_secs = pc.max_segment_secs;
+        if pc.context_segments >= 1 {
+            config.context_segments = pc.context_segments;
+        }
     }
 
     eprintln!(
-        "[Session {}] Creating Pause-Segmented Canary (language: {}, pause: {:.0}ms, max_seg: {:.0}s, diar: {:?})",
-        session_id, language, config.pause_threshold_secs * 1000.0, config.max_segment_secs, diar_path
+        "[Session {}] Creating Pause-Segmented Canary (language: {}, pause: {:.0}ms, max_seg: {:.0}s, ctx_seg: {}, diar: {:?})",
+        session_id, language, config.pause_threshold_secs * 1000.0, config.max_segment_secs, config.context_segments, diar_path
     );
 
     #[cfg(feature = "sortformer")]

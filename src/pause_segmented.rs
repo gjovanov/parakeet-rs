@@ -41,6 +41,65 @@ fn truncate_hallucination(text: &str) -> String {
     text.to_string()
 }
 
+/// Strip the known context prefix text from a full transcription.
+/// The model transcribes [context_audio + current_audio], producing text that
+/// starts with (approximately) the context text. We find the best split point.
+fn strip_context_prefix(full_text: &str, context_text: &str) -> String {
+    let full_words: Vec<&str> = full_text.split_whitespace().collect();
+    let ctx_words: Vec<&str> = context_text.split_whitespace().collect();
+
+    if ctx_words.is_empty() || full_words.is_empty() {
+        return full_text.to_string();
+    }
+
+    // Find the best split point: the position in full_words where context ends
+    // and new content begins. Use word overlap matching with tolerance.
+    let ctx_len = ctx_words.len();
+
+    // Try matching the last few context words in the full text
+    // to find where the context ends
+    let match_window = ctx_len.min(5); // Check last 5 context words
+    let last_ctx_words: Vec<String> = ctx_words[ctx_len.saturating_sub(match_window)..]
+        .iter()
+        .map(|w| w.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+        .collect();
+
+    let mut best_split = ctx_len.min(full_words.len()); // Default: skip ctx_len words
+    let mut best_score = 0;
+
+    // Search in the region around the expected split point
+    let search_start = ctx_len.saturating_sub(match_window + 5);
+    let search_end = (ctx_len + match_window + 5).min(full_words.len());
+
+    for split_pos in search_start..search_end {
+        // How many of the last context words match just before this split point?
+        let mut score = 0;
+        for (i, ctx_w) in last_ctx_words.iter().enumerate().rev() {
+            let full_idx = split_pos.saturating_sub(match_window - i);
+            if full_idx < full_words.len() {
+                let full_w: String = full_words[full_idx]
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect();
+                if full_w == *ctx_w {
+                    score += 1;
+                }
+            }
+        }
+        if score > best_score {
+            best_score = score;
+            best_split = split_pos;
+        }
+    }
+
+    // Return everything after the split point
+    if best_split >= full_words.len() {
+        return String::new();
+    }
+    full_words[best_split..].join(" ")
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -59,6 +118,10 @@ pub struct PauseSegmentedConfig {
     pub partial_interval_secs: f32,
     /// Target language
     pub language: String,
+    /// Number of previous segments to include as context (default: 1 = no context).
+    /// E.g., context_segments=3 sends [seg_n-2 + seg_n-1 + seg_n] to the model,
+    /// then strips the known prefix text from seg_n-2 and seg_n-1.
+    pub context_segments: usize,
 }
 
 impl Default for PauseSegmentedConfig {
@@ -70,6 +133,7 @@ impl Default for PauseSegmentedConfig {
             max_segment_secs: 15.0,
             partial_interval_secs: 1.5,
             language: "de".to_string(),
+            context_segments: 1,
         }
     }
 }
@@ -98,6 +162,10 @@ pub struct PauseSegmentedCanary {
     pending_segments: Vec<TranscriptionSegment>,
     /// Last emitted FINAL end time (for monotonic timestamps)
     last_final_end_time: f32,
+
+    /// Ring buffer of previous segments' audio (for context)
+    /// Each entry: (audio_samples, emitted_text)
+    context_ring: std::collections::VecDeque<(Vec<f32>, String)>,
 
     /// Optional diarizer
     #[cfg(feature = "sortformer")]
@@ -128,6 +196,7 @@ impl PauseSegmentedCanary {
             samples_since_partial: 0,
             pending_segments: Vec::new(),
             last_final_end_time: 0.0,
+            context_ring: std::collections::VecDeque::new(),
             #[cfg(feature = "sortformer")]
             diarizer: None,
         })
@@ -175,7 +244,9 @@ impl PauseSegmentedCanary {
         None
     }
 
-    /// Transcribe the current speech buffer and emit as FINAL
+    /// Transcribe the current speech buffer and emit as FINAL.
+    /// When context_segments > 1, prepends previous segments' audio for better
+    /// model context, then strips the known prefix text.
     fn transcribe_and_emit_final(&mut self) -> Result<()> {
         if self.speech_buffer.is_empty() {
             return Ok(());
@@ -183,7 +254,6 @@ impl PauseSegmentedCanary {
 
         let duration = self.speech_duration();
         if duration < self.config.min_segment_secs {
-            // Too short — likely noise. Discard.
             self.speech_buffer.clear();
             self.speech_start_sample = None;
             self.samples_since_partial = 0;
@@ -192,9 +262,48 @@ impl PauseSegmentedCanary {
 
         let start_time = self.speech_start_time();
         let end_time = start_time + duration;
+        let ctx = self.config.context_segments;
 
-        // Transcribe
-        let text = self.model.transcribe(&self.speech_buffer)?;
+        // Build audio: context segments + current segment
+        let (audio_to_transcribe, context_text) = if ctx > 1 && !self.context_ring.is_empty() {
+            let mut combined_audio: Vec<f32> = Vec::new();
+            let mut combined_text = String::new();
+
+            // Take the last (ctx-1) segments as context
+            let context_count = (ctx - 1).min(self.context_ring.len());
+            let start_idx = self.context_ring.len() - context_count;
+
+            for (audio, text) in self.context_ring.iter().skip(start_idx) {
+                combined_audio.extend_from_slice(audio);
+                if !combined_text.is_empty() { combined_text.push(' '); }
+                combined_text.push_str(text);
+            }
+
+            // Append current segment
+            combined_audio.extend_from_slice(&self.speech_buffer);
+
+            let ctx_secs = combined_audio.len() as f32 / SAMPLE_RATE as f32;
+            eprintln!(
+                "[PauseSegmented] Transcribing with {} context seg(s) ({:.1}s total audio, {:.1}s current)",
+                context_count, ctx_secs, duration
+            );
+
+            (combined_audio, combined_text)
+        } else {
+            (self.speech_buffer.clone(), String::new())
+        };
+
+        // Transcribe combined audio
+        let full_text = self.model.transcribe(&audio_to_transcribe)?;
+        let full_text = full_text.trim().to_string();
+
+        // Strip the context prefix to get only the new segment's text
+        let text = if !context_text.is_empty() && !full_text.is_empty() {
+            strip_context_prefix(&full_text, &context_text)
+        } else {
+            full_text.clone()
+        };
+
         let text = text.trim().to_string();
 
         if !text.is_empty() {
@@ -208,6 +317,13 @@ impl PauseSegmentedCanary {
                 &text.chars().take(80).collect::<String>()
             );
 
+            // Store in context ring for future segments
+            let max_ctx = self.config.context_segments.max(1);
+            self.context_ring.push_back((self.speech_buffer.clone(), text.clone()));
+            while self.context_ring.len() > max_ctx {
+                self.context_ring.pop_front();
+            }
+
             self.pending_segments.push(TranscriptionSegment {
                 text,
                 raw_text: None,
@@ -220,6 +336,13 @@ impl PauseSegmentedCanary {
             });
 
             self.last_final_end_time = end_time;
+        } else {
+            // Even empty text, store audio in context ring
+            let max_ctx = self.config.context_segments.max(1);
+            self.context_ring.push_back((self.speech_buffer.clone(), String::new()));
+            while self.context_ring.len() > max_ctx {
+                self.context_ring.pop_front();
+            }
         }
 
         // Reset for next chunk
@@ -401,6 +524,7 @@ impl StreamingTranscriber for PauseSegmentedCanary {
         self.samples_since_partial = 0;
         self.pending_segments.clear();
         self.last_final_end_time = 0.0;
+        self.context_ring.clear();
     }
 
     fn buffer_duration(&self) -> f32 {

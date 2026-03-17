@@ -60,6 +60,11 @@ pub struct PauseConfig {
     /// Higher values improve accuracy at segment boundaries but cause text overlap
     #[serde(default = "default_context_buffer_secs")]
     pub context_buffer_secs: f32,
+
+    /// Number of previous segments to include as audio context (1-5, default: 1 = no context)
+    /// For pause_segmented mode: higher values give the model more context but increase latency
+    #[serde(default = "default_context_segments")]
+    pub context_segments: usize,
 }
 
 fn default_pause_threshold_ms() -> u32 {
@@ -78,6 +83,10 @@ fn default_context_buffer_secs() -> f32 {
     0.0
 }
 
+fn default_context_segments() -> usize {
+    1
+}
+
 impl Default for PauseConfig {
     fn default() -> Self {
         Self {
@@ -85,6 +94,7 @@ impl Default for PauseConfig {
             silence_energy_threshold: default_silence_energy(),
             max_segment_secs: default_max_segment_secs(),
             context_buffer_secs: default_context_buffer_secs(),
+            context_segments: default_context_segments(),
         }
     }
 }
