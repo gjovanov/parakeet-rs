@@ -33,6 +33,8 @@ pub enum LatencyMode {
     Vod,
     /// Growing segments: word-by-word PARTIAL updates building toward FINAL sentences
     GrowingSegments,
+    /// Pause-segmented: segment audio by acoustic pauses, transcribe each chunk once
+    PauseSegmented,
 }
 
 impl LatencyMode {
@@ -53,6 +55,7 @@ impl LatencyMode {
             LatencyMode::Confidence => "confidence",
             LatencyMode::Vod => "vod",
             LatencyMode::GrowingSegments => "growing_segments",
+            LatencyMode::PauseSegmented => "pause_segmented",
         }
     }
 
@@ -74,6 +77,7 @@ impl LatencyMode {
             LatencyMode::Confidence => "Confidence (AWS-style streaming)",
             LatencyMode::Vod => "VoD Batch (10-min chunks)",
             LatencyMode::GrowingSegments => "Growing Segments (word-by-word)",
+            LatencyMode::PauseSegmented => "Pause-Segmented (1 chunk per pause)",
         }
     }
 
@@ -112,6 +116,7 @@ impl LatencyMode {
             LatencyMode::Confidence,
             LatencyMode::Vod,
             LatencyMode::GrowingSegments,
+            LatencyMode::PauseSegmented,
         ]
     }
 

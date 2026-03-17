@@ -121,6 +121,12 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
             description: "Real-time growing transcription. Shows words appearing one by one (PARTIAL) \
                           until sentence completion (FINAL). Best for live subtitle display.",
         },
+        ModeInfo {
+            id: "pause_segmented",
+            name: "Pause-Segmented (1 chunk per pause)",
+            description: "Segments audio by acoustic pauses, transcribes each speech chunk exactly once. \
+                          Precise timestamps, no echo dedup. Each FINAL = one speech segment.",
+        },
     ];
     Json(ApiResponse::success(modes))
 }

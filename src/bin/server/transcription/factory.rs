@@ -93,6 +93,11 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
             &session_id, &model_path, diar_path, exec_config,
             is_canary, &vad_base_mode, &vad_model_path, &language,
         )
+    } else if mode == "pause_segmented" && is_canary {
+        create_pause_segmented_canary(
+            &session_id, &model_path, diar_path.as_ref(), exec_config,
+            &language, pause_config.as_ref(),
+        )
     } else if is_canary_flash {
         create_canary_flash(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
@@ -883,5 +888,53 @@ mod tests {
     #[test]
     fn test_model_type_name_tdt() {
         assert_eq!(model_type_name(false, false, false, false, false, false), "TDT");
+    }
+}
+
+fn create_pause_segmented_canary(
+    session_id: &str,
+    model_path: &std::path::PathBuf,
+    diar_path: Option<&std::path::PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    language: &str,
+    pause_config: Option<&PauseConfig>,
+) -> Option<Box<dyn parakeet_rs::streaming_transcriber::StreamingTranscriber>> {
+    use parakeet_rs::pause_segmented::{PauseSegmentedCanary, PauseSegmentedConfig};
+
+    let mut config = PauseSegmentedConfig {
+        language: language.to_string(),
+        ..Default::default()
+    };
+
+    // Apply pause config overrides
+    if let Some(pc) = pause_config {
+        config.pause_threshold_secs = pc.pause_threshold_ms as f32 / 1000.0;
+        config.silence_energy_threshold = pc.silence_energy_threshold;
+        config.max_segment_secs = pc.max_segment_secs;
+    }
+
+    eprintln!(
+        "[Session {}] Creating Pause-Segmented Canary (language: {}, pause: {:.0}ms, max_seg: {:.0}s, diar: {:?})",
+        session_id, language, config.pause_threshold_secs * 1000.0, config.max_segment_secs, diar_path
+    );
+
+    #[cfg(feature = "sortformer")]
+    let result = if diar_path.is_some() {
+        PauseSegmentedCanary::new_with_diarization(
+            model_path, diar_path, Some(exec_config), Some(config),
+        )
+    } else {
+        PauseSegmentedCanary::new(model_path, Some(exec_config), Some(config))
+    };
+
+    #[cfg(not(feature = "sortformer"))]
+    let result = PauseSegmentedCanary::new(model_path, Some(exec_config), Some(config));
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => {
+            eprintln!("[Session {}] Failed to create Pause-Segmented Canary: {}", session_id, e);
+            None
+        }
     }
 }

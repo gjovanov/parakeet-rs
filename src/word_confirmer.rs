@@ -560,8 +560,8 @@ impl WordConfirmer {
 
         // Phase 2: Insert unaligned words at correct positions
         // Find the last aligned consensus index — new words after this extend the consensus
-        let last_aligned_ci = alignment.iter().rev().find_map(|a| *a);
-        let first_aligned_ci = alignment.iter().find_map(|a| *a);
+        let _last_aligned_ci: Option<usize> = alignment.iter().rev().find_map(|a| *a);
+        let _first_aligned_ci = alignment.iter().find_map(|a| *a);
 
         // Collect insertions: (position_in_consensus, word)
         let mut insertions: Vec<(usize, String)> = Vec::new();
