@@ -73,6 +73,11 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
             &session_id, &model_path, diar_path, exec_config,
             &vad_base_mode, &vad_model_path, &language,
         )
+    } else if is_canary_qwen && mode == "pause_segmented" {
+        create_pause_segmented_canary_qwen(
+            &session_id, &model_path, diar_path.as_ref(), exec_config,
+            &language, pause_config.as_ref(),
+        )
     } else if is_canary_qwen {
         create_canary_qwen(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
@@ -92,11 +97,6 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
         create_vad(
             &session_id, &model_path, diar_path, exec_config,
             is_canary, &vad_base_mode, &vad_model_path, &language,
-        )
-    } else if mode == "pause_segmented" && is_canary_qwen {
-        create_pause_segmented_canary_qwen(
-            &session_id, &model_path, diar_path.as_ref(), exec_config,
-            &language, pause_config.as_ref(),
         )
     } else if mode == "pause_segmented" && is_canary {
         create_pause_segmented_canary(
