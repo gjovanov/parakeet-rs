@@ -93,10 +93,20 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
             &session_id, &model_path, diar_path, exec_config,
             is_canary, &vad_base_mode, &vad_model_path, &language,
         )
+    } else if mode == "pause_segmented" && is_canary_qwen {
+        create_pause_segmented_canary_qwen(
+            &session_id, &model_path, diar_path.as_ref(), exec_config,
+            &language, pause_config.as_ref(),
+        )
     } else if mode == "pause_segmented" && is_canary {
         create_pause_segmented_canary(
             &session_id, &model_path, diar_path.as_ref(), exec_config,
             &language, pause_config.as_ref(),
+        )
+    } else if mode == "pause_segmented" {
+        create_pause_segmented_tdt(
+            &session_id, &model_path, diar_path.as_ref(), exec_config,
+            pause_config.as_ref(),
         )
     } else if is_canary_flash {
         create_canary_flash(
@@ -939,5 +949,88 @@ fn create_pause_segmented_canary(
             eprintln!("[Session {}] Failed to create Pause-Segmented Canary: {}", session_id, e);
             None
         }
+    }
+}
+
+fn create_pause_segmented_canary_qwen(
+    session_id: &str,
+    model_path: &std::path::PathBuf,
+    diar_path: Option<&std::path::PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    language: &str,
+    pause_config: Option<&PauseConfig>,
+) -> Option<Box<dyn parakeet_rs::streaming_transcriber::StreamingTranscriber>> {
+    use parakeet_rs::pause_segmented::PauseSegmentedConfig;
+    use parakeet_rs::pause_segmented_canary_qwen::PauseSegmentedCanaryQwen;
+
+    let mut config = PauseSegmentedConfig {
+        language: language.to_string(),
+        ..Default::default()
+    };
+    if let Some(pc) = pause_config {
+        config.pause_threshold_secs = pc.pause_threshold_ms as f32 / 1000.0;
+        config.silence_energy_threshold = pc.silence_energy_threshold;
+        config.max_segment_secs = pc.max_segment_secs;
+        if pc.context_segments >= 1 { config.context_segments = pc.context_segments; }
+    }
+
+    eprintln!(
+        "[Session {}] Creating Pause-Segmented Canary-Qwen (language: {}, pause: {:.0}ms, ctx_seg: {}, diar: {:?})",
+        session_id, language, config.pause_threshold_secs * 1000.0, config.context_segments, diar_path
+    );
+
+    #[cfg(feature = "sortformer")]
+    let result = if diar_path.is_some() {
+        PauseSegmentedCanaryQwen::new_with_diarization(model_path, diar_path, Some(exec_config), Some(config))
+    } else {
+        PauseSegmentedCanaryQwen::new(model_path, Some(exec_config), Some(config))
+    };
+    #[cfg(not(feature = "sortformer"))]
+    let result = PauseSegmentedCanaryQwen::new(model_path, Some(exec_config), Some(config));
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => { eprintln!("[Session {}] Failed to create Pause-Segmented Canary-Qwen: {}", session_id, e); None }
+    }
+}
+
+fn create_pause_segmented_tdt(
+    session_id: &str,
+    model_path: &std::path::PathBuf,
+    diar_path: Option<&std::path::PathBuf>,
+    exec_config: parakeet_rs::ExecutionConfig,
+    pause_config: Option<&PauseConfig>,
+) -> Option<Box<dyn parakeet_rs::streaming_transcriber::StreamingTranscriber>> {
+    use parakeet_rs::pause_segmented::PauseSegmentedConfig;
+    use parakeet_rs::pause_segmented_tdt::PauseSegmentedTDT;
+
+    let mut config = PauseSegmentedConfig {
+        context_segments: 1, // TDT benefits less from context
+        ..Default::default()
+    };
+    if let Some(pc) = pause_config {
+        config.pause_threshold_secs = pc.pause_threshold_ms as f32 / 1000.0;
+        config.silence_energy_threshold = pc.silence_energy_threshold;
+        config.max_segment_secs = pc.max_segment_secs;
+        if pc.context_segments >= 1 { config.context_segments = pc.context_segments; }
+    }
+
+    eprintln!(
+        "[Session {}] Creating Pause-Segmented TDT (pause: {:.0}ms, ctx_seg: {}, diar: {:?})",
+        session_id, config.pause_threshold_secs * 1000.0, config.context_segments, diar_path
+    );
+
+    #[cfg(feature = "sortformer")]
+    let result = if diar_path.is_some() {
+        PauseSegmentedTDT::new_with_diarization(model_path, diar_path, Some(exec_config), Some(config))
+    } else {
+        PauseSegmentedTDT::new(model_path, Some(exec_config), Some(config))
+    };
+    #[cfg(not(feature = "sortformer"))]
+    let result = PauseSegmentedTDT::new(model_path, Some(exec_config), Some(config));
+
+    match result {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => { eprintln!("[Session {}] Failed to create Pause-Segmented TDT: {}", session_id, e); None }
     }
 }

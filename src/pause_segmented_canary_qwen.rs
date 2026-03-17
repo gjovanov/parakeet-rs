@@ -1,149 +1,24 @@
-//! Pause-segmented transcription mode.
-//!
-//! Segments audio by acoustic pauses, transcribes each speech chunk exactly once.
-//! No sliding buffer, no GrowingTextMerger, no echo dedup.
-//! Each FINAL = one speech segment with precise [start_time, end_time].
+//! Pause-segmented transcription for Canary-Qwen 2.5B model.
+//! Same architecture as pause_segmented.rs but uses CanaryQwenModel.
+//! Includes 38s audio limit guard for the model's 40s max.
 
-use crate::canary::{CanaryConfig, CanaryModel};
+use crate::canary_qwen::{CanaryQwenConfig, CanaryQwenModel};
 use crate::error::Result;
 use crate::ExecutionConfig;
+use crate::pause_segmented::{calculate_rms, truncate_hallucination, strip_context_prefix, PauseSegmentedConfig};
 use crate::streaming_transcriber::{ModelInfo, StreamingChunkResult, StreamingTranscriber, TranscriptionSegment};
 use std::path::Path;
 
 const SAMPLE_RATE: usize = 16000;
 
-/// Calculate RMS energy of audio samples
-pub(crate) fn calculate_rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() { return 0.0; }
-    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
-    (sum_sq / samples.len() as f32).sqrt()
-}
-
-/// Truncate text at first detected hallucination (repeated words/phrases)
-pub(crate) fn truncate_hallucination(text: &str) -> String {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    if words.len() < 4 { return text.to_string(); }
-    let mut consecutive_count = 0;
-    for i in 1..words.len() {
-        if words[i].to_lowercase() == words[i - 1].to_lowercase() && words[i].len() > 1 {
-            consecutive_count += 1;
-            if consecutive_count >= 3 {
-                let truncate_at = i - consecutive_count + 1;
-                if truncate_at > 0 {
-                    return words[..truncate_at].join(" ");
-                }
-                return String::new();
-            }
-        } else {
-            consecutive_count = 0;
-        }
-    }
-    text.to_string()
-}
-
-/// Strip the known context prefix text from a full transcription.
-/// The model transcribes [context_audio + current_audio], producing text that
-/// starts with (approximately) the context text. We find the best split point.
-pub(crate) fn strip_context_prefix(full_text: &str, context_text: &str) -> String {
-    let full_words: Vec<&str> = full_text.split_whitespace().collect();
-    let ctx_words: Vec<&str> = context_text.split_whitespace().collect();
-
-    if ctx_words.is_empty() || full_words.is_empty() {
-        return full_text.to_string();
-    }
-
-    // Find the best split point: the position in full_words where context ends
-    // and new content begins. Use word overlap matching with tolerance.
-    let ctx_len = ctx_words.len();
-
-    // Try matching the last few context words in the full text
-    // to find where the context ends
-    let match_window = ctx_len.min(5); // Check last 5 context words
-    let last_ctx_words: Vec<String> = ctx_words[ctx_len.saturating_sub(match_window)..]
-        .iter()
-        .map(|w| w.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>())
-        .collect();
-
-    let mut best_split = ctx_len.min(full_words.len()); // Default: skip ctx_len words
-    let mut best_score = 0;
-
-    // Search in the region around the expected split point
-    let search_start = ctx_len.saturating_sub(match_window + 5);
-    let search_end = (ctx_len + match_window + 5).min(full_words.len());
-
-    for split_pos in search_start..search_end {
-        // How many of the last context words match just before this split point?
-        let mut score = 0;
-        for (i, ctx_w) in last_ctx_words.iter().enumerate().rev() {
-            let full_idx = split_pos.saturating_sub(match_window - i);
-            if full_idx < full_words.len() {
-                let full_w: String = full_words[full_idx]
-                    .to_lowercase()
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect();
-                if full_w == *ctx_w {
-                    score += 1;
-                }
-            }
-        }
-        if score > best_score {
-            best_score = score;
-            best_split = split_pos;
-        }
-    }
-
-    // Return everything after the split point
-    if best_split >= full_words.len() {
-        return String::new();
-    }
-    full_words[best_split..].join(" ")
-}
-
 // ============================================================================
 // Configuration
-// ============================================================================
-
-#[derive(Debug, Clone)]
-pub struct PauseSegmentedConfig {
-    /// Silence duration to trigger transcription (default: 0.3s = 300ms)
-    pub pause_threshold_secs: f32,
-    /// RMS below this is silence (default: 0.008)
-    pub silence_energy_threshold: f32,
-    /// Don't transcribe segments shorter than this (default: 0.5s)
-    pub min_segment_secs: f32,
-    /// Force-transcribe after this duration even without pause (default: 15.0s)
-    pub max_segment_secs: f32,
-    /// How often to emit PARTIALs during speech (default: 1.5s)
-    pub partial_interval_secs: f32,
-    /// Target language
-    pub language: String,
-    /// Number of previous segments to include as context (default: 1 = no context).
-    /// E.g., context_segments=3 sends [seg_n-2 + seg_n-1 + seg_n] to the model,
-    /// then strips the known prefix text from seg_n-2 and seg_n-1.
-    pub context_segments: usize,
-}
-
-impl Default for PauseSegmentedConfig {
-    fn default() -> Self {
-        Self {
-            pause_threshold_secs: 0.3,
-            silence_energy_threshold: 0.008,
-            min_segment_secs: 0.5,
-            max_segment_secs: 15.0,
-            partial_interval_secs: 1.5,
-            language: "de".to_string(),
-            context_segments: 1,
-        }
-    }
-}
-
 // ============================================================================
 // Core struct
 // ============================================================================
 
-pub struct PauseSegmentedCanary {
-    model: CanaryModel,
+pub struct PauseSegmentedCanaryQwen {
+    model: CanaryQwenModel,
     config: PauseSegmentedConfig,
 
     /// Accumulated speech samples for the current chunk
@@ -172,18 +47,18 @@ pub struct PauseSegmentedCanary {
     diarizer: Option<crate::sortformer_stream::SortformerStream>,
 }
 
-impl PauseSegmentedCanary {
+impl PauseSegmentedCanaryQwen {
     pub fn new<P: AsRef<Path>>(
         model_path: P,
         exec_config: Option<ExecutionConfig>,
         config: Option<PauseSegmentedConfig>,
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
-        let canary_config = CanaryConfig {
+        let canary_config = CanaryQwenConfig {
             language: config.language.clone(),
             ..Default::default()
         };
-        let model = CanaryModel::from_pretrained(model_path, exec_config, Some(canary_config))?;
+        let model = CanaryQwenModel::from_pretrained(model_path, exec_config, Some(canary_config))?;
 
         Ok(Self {
             model,
@@ -284,7 +159,7 @@ impl PauseSegmentedCanary {
 
             let ctx_secs = combined_audio.len() as f32 / SAMPLE_RATE as f32;
             eprintln!(
-                "[PauseSegmented] Transcribing with {} context seg(s) ({:.1}s total audio, {:.1}s current)",
+                "[PauseSegmentedQwen] Transcribing with {} context seg(s) ({:.1}s total audio, {:.1}s current)",
                 context_count, ctx_secs, duration
             );
 
@@ -312,7 +187,7 @@ impl PauseSegmentedCanary {
             let speaker = self.get_speaker_at(mid_time);
 
             eprintln!(
-                "[PauseSegmented] FINAL [{:.2}s-{:.2}s] ({:.1}s) \"{}\"",
+                "[PauseSegmentedQwen] FINAL [{:.2}s-{:.2}s] ({:.1}s) \"{}\"",
                 start_time, end_time, duration,
                 &text.chars().take(80).collect::<String>()
             );
@@ -420,7 +295,7 @@ impl PauseSegmentedCanary {
             // Check max segment duration — force transcribe
             if self.speech_duration() >= self.config.max_segment_secs {
                 eprintln!(
-                    "[PauseSegmented] Max segment ({:.1}s) reached, force-transcribing",
+                    "[PauseSegmentedQwen] Max segment ({:.1}s) reached, force-transcribing",
                     self.config.max_segment_secs
                 );
                 self.transcribe_and_emit_final()?;
@@ -462,12 +337,12 @@ impl PauseSegmentedCanary {
 // StreamingTranscriber implementation
 // ============================================================================
 
-impl StreamingTranscriber for PauseSegmentedCanary {
+impl StreamingTranscriber for PauseSegmentedCanaryQwen {
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            id: "canary-1b".to_string(),
-            display_name: "Canary 1B (Pause-Segmented)".to_string(),
-            description: "Canary 1B with pause-based audio segmentation".to_string(),
+            id: "canary-qwen-2b".to_string(),
+            display_name: "Canary-Qwen 2.5B (Pause-Segmented)".to_string(),
+            description: "Canary-Qwen 2.5B with pause-based audio segmentation".to_string(),
             supports_diarization: {
                 #[cfg(feature = "sortformer")]
                 { self.diarizer.is_some() }

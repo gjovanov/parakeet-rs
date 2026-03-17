@@ -89,6 +89,8 @@ pub mod sentence_buffer;
 pub mod growing_text;
 pub mod word_confirmer;
 pub mod pause_segmented;
+pub mod pause_segmented_tdt;
+pub mod pause_segmented_canary_qwen;
 pub mod german_normalizer;
 pub mod vod_transcriber;
 pub mod text_formatter;
