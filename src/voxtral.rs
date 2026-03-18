@@ -142,6 +142,8 @@ pub struct VoxtralModel {
     tokenizer: VoxtralTokenizer,
     kv_cache: KVCache,
     config: VoxtralConfig,
+    /// Pre-computed mel filterbank from Python reference [n_fft_bins=201, n_mels=128]
+    mel_filterbank: Option<Array2<f32>>,
 }
 
 impl VoxtralModel {
@@ -196,6 +198,24 @@ impl VoxtralModel {
 
         let kv_cache = KVCache::new(config.num_decoder_layers, config.num_kv_heads, config.head_dim);
 
+        // Try loading pre-computed mel filterbank
+        let fb_path = dir.join("mel_filterbank.bin");
+        let mel_filterbank = if fb_path.exists() {
+            let data = std::fs::read(&fb_path)
+                .map_err(|e| Error::Io(e))?;
+            let n_bins = N_FFT / 2 + 1; // 201
+            let floats: Vec<f32> = data.chunks(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let fb = Array2::from_shape_vec((n_bins, N_MELS), floats)
+                .map_err(|e| Error::Config(format!("Filterbank reshape: {}", e)))?;
+            eprintln!("[Voxtral] Loaded pre-computed mel filterbank: {:?}", fb.shape());
+            Some(fb)
+        } else {
+            eprintln!("[Voxtral] No pre-computed filterbank, using computed one");
+            None
+        };
+
         Ok(Self {
             encoder_session,
             decoder_session,
@@ -203,6 +223,7 @@ impl VoxtralModel {
             tokenizer,
             kv_cache,
             config,
+            mel_filterbank,
         })
     }
 
@@ -247,67 +268,72 @@ impl VoxtralModel {
 
     fn extract_features(&self, audio: &[f32]) -> Result<Array3<f32>> {
         // Clamp to encoder's max_position_embeddings (1500 frames ≈ 15s at hop=160)
-        // n_frames = 1 + samples/hop, so we need samples = (max_frames - 1) * hop
         let max_frames = 1500;
         let max_samples_by_frames = (max_frames - 1) * HOP_LENGTH;
         let max_samples = (self.config.max_audio_secs * SAMPLE_RATE as f32) as usize;
         let max_samples = max_samples.min(max_samples_by_frames);
-        let samples = if audio.len() > max_samples { &audio[..max_samples] } else { audio };
+        let raw_samples = if audio.len() > max_samples { &audio[..max_samples] } else { audio };
 
-        // Compute STFT — ensure frame count is divisible by 8 (encoder's 2-stage downsample)
-        let raw_frames = 1 + (samples.len() / HOP_LENGTH);
-        let n_frames = (raw_frames / 8) * 8; // Round down to nearest multiple of 8
-        let mut mel_spec = Array2::<f32>::zeros((N_MELS, n_frames));
+        // Center-padding: pad n_fft/2 zeros on each side (matching torch.stft center=True)
+        let pad = N_FFT / 2;
+        let mut padded = vec![0.0f32; pad + raw_samples.len() + pad];
+        padded[pad..pad + raw_samples.len()].copy_from_slice(raw_samples);
 
-        let mel_filterbank = self.create_mel_filterbank();
+        // Compute STFT frames (drop last frame to match torch.stft [..., :-1])
+        let raw_frames = 1 + padded.len() / HOP_LENGTH;
+        let n_frames_stft = raw_frames - 1; // Drop last frame
+        let n_frames = (n_frames_stft / 8) * 8; // Round down to multiple of 8
+        if n_frames == 0 {
+            return Ok(Array3::<f32>::zeros((1, N_MELS, 0)));
+        }
+
+        let n_fft_bins = N_FFT / 2 + 1;
         let window = self.hann_window();
+
+        // Use pre-computed filterbank or compute one
+        let fb = self.mel_filterbank.as_ref().map(|f| f.clone())
+            .unwrap_or_else(|| self.create_mel_filterbank());
+
+        // Pre-allocate FFT planner
+        use rustfft::{FftPlanner, num_complex::Complex};
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(N_FFT);
+
+        let mut mel_spec = Array2::<f32>::zeros((N_MELS, n_frames));
 
         for frame_idx in 0..n_frames {
             let start = frame_idx * HOP_LENGTH;
-            let mut frame = vec![0.0f32; N_FFT];
-            let copy_len = N_FFT.min(samples.len().saturating_sub(start));
-            for i in 0..copy_len {
-                frame[i] = samples[start + i] * window[i];
-            }
+            let mut complex_buf: Vec<Complex<f32>> = (0..N_FFT).map(|i| {
+                let sample = if start + i < padded.len() { padded[start + i] } else { 0.0 };
+                Complex { re: sample * window[i], im: 0.0 }
+            }).collect();
 
-            // FFT using rustfft for correct results
-            let n_fft_bins = N_FFT / 2 + 1;
-            let mut power_spectrum = vec![0.0f32; n_fft_bins];
-            {
-                use rustfft::{FftPlanner, num_complex::Complex};
-                let mut planner = FftPlanner::<f32>::new();
-                let fft = planner.plan_fft_forward(N_FFT);
-                let mut complex_buf: Vec<Complex<f32>> = frame.iter()
-                    .map(|&x| Complex { re: x, im: 0.0 })
-                    .collect();
-                fft.process(&mut complex_buf);
-                for k in 0..n_fft_bins {
-                    power_spectrum[k] = complex_buf[k].re * complex_buf[k].re + complex_buf[k].im * complex_buf[k].im;
-                }
-            }
+            fft.process(&mut complex_buf);
 
-            // Apply mel filterbank (store raw power, log10 applied in normalization)
+            // Power spectrum
+            let power: Vec<f32> = (0..n_fft_bins)
+                .map(|k| complex_buf[k].re * complex_buf[k].re + complex_buf[k].im * complex_buf[k].im)
+                .collect();
+
+            // Apply mel filterbank: fb is [n_bins, n_mels], we want fb.T @ power
             for mel_idx in 0..N_MELS {
                 let mut energy = 0.0f32;
                 for k in 0..n_fft_bins {
-                    energy += mel_filterbank[[mel_idx, k]] * power_spectrum[k];
+                    energy += fb[[k, mel_idx]] * power[k];
                 }
                 mel_spec[[mel_idx, frame_idx]] = energy;
             }
         }
 
-        // Normalize (matching VoxtralRealtimeFeatureExtractor):
-        // 1. log10 (not ln)
-        // 2. Bottom clamp to (global_log_mel_max - 8.0) = -6.5
-        // 3. Scale: (x + 4.0) / 4.0
-        let bottom_clamp = GLOBAL_LOG_MEL_MAX - 8.0; // -6.5
+        // Normalize (matching VoxtralRealtimeFeatureExtractor exactly):
+        // log10(clamp(mel, 1e-10)) → max(x, global_max - 8) → (x + 4) / 4
+        let bottom_clamp = GLOBAL_LOG_MEL_MAX - 8.0;
         mel_spec.mapv_inplace(|v| {
             let log10_val = v.max(1e-10).log10();
             let clamped = log10_val.max(bottom_clamp);
             (clamped + 4.0) / 4.0
         });
 
-        // Reshape to [batch=1, n_mels, n_frames]
         let (n_mels_dim, n_frames_dim) = (mel_spec.shape()[0], mel_spec.shape()[1]);
         let flat = mel_spec.into_raw_vec();
         Ok(Array3::from_shape_vec((1, n_mels_dim, n_frames_dim), flat)
