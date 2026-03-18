@@ -105,6 +105,15 @@ pub fn create_transcriber(params: TranscriberParams) -> Option<Box<dyn Streaming
             &session_id, &model_path, diar_path.as_ref(), exec_config,
             &language, pause_config.as_ref(),
         )
+    } else if mode == "voxtral_streaming" && is_voxtral {
+        #[cfg(feature = "voxtral")]
+        {
+            create_voxtral_streaming(
+                &session_id, &model_path, exec_config, &language,
+            )
+        }
+        #[cfg(not(feature = "voxtral"))]
+        { eprintln!("[Session {}] Voxtral feature not enabled", session_id); None }
     } else if mode == "pause_segmented" && is_voxtral {
         #[cfg(feature = "voxtral")]
         {
@@ -1083,5 +1092,30 @@ fn create_pause_segmented_voxtral(
     match result {
         Ok(t) => Some(Box::new(t)),
         Err(e) => { eprintln!("[Session {}] Failed to create Pause-Segmented Voxtral: {}", session_id, e); None }
+    }
+}
+
+#[cfg(feature = "voxtral")]
+fn create_voxtral_streaming(
+    session_id: &str,
+    model_path: &std::path::PathBuf,
+    exec_config: parakeet_rs::ExecutionConfig,
+    language: &str,
+) -> Option<Box<dyn parakeet_rs::streaming_transcriber::StreamingTranscriber>> {
+    use parakeet_rs::voxtral_streaming::{VoxtralStreaming, VoxtralStreamingConfig};
+
+    let config = VoxtralStreamingConfig {
+        language: language.to_string(),
+        ..Default::default()
+    };
+
+    eprintln!(
+        "[Session {}] Creating Voxtral Streaming (language: {}, min_audio_tok: {}, delay: {})",
+        session_id, language, config.min_audio_tokens, config.num_delay_tokens
+    );
+
+    match VoxtralStreaming::new(model_path, Some(exec_config), Some(config)) {
+        Ok(t) => Some(Box::new(t)),
+        Err(e) => { eprintln!("[Session {}] Failed: {}", session_id, e); None }
     }
 }

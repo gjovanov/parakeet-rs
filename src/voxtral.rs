@@ -664,6 +664,173 @@ impl VoxtralModel {
     pub fn set_language(&mut self, lang: &str) {
         self.config.language = lang.to_string();
     }
+
+    // ========================================================================
+    // Streaming API — for incremental encoding and decoding
+    // ========================================================================
+
+    /// Encoder state for incremental processing
+    pub fn new_encoder_state(&self) -> EncoderState {
+        EncoderState {
+            kv_keys: (0..32).map(|_| Array4::<f32>::zeros((1, 32, 0, 64))).collect(),
+            kv_values: (0..32).map(|_| Array4::<f32>::zeros((1, 32, 0, 64))).collect(),
+            padding_cache: ndarray::Array3::<f32>::zeros((1, 1408, 2)),
+            position_offset: 0,
+        }
+    }
+
+    /// Decoder state for incremental generation
+    pub fn new_decoder_state(&self) -> DecoderState {
+        DecoderState {
+            kv_keys: (0..self.config.num_decoder_layers).map(|_| Array4::<f32>::zeros((1, self.config.num_kv_heads, 0, self.config.head_dim))).collect(),
+            kv_values: (0..self.config.num_decoder_layers).map(|_| Array4::<f32>::zeros((1, self.config.num_kv_heads, 0, self.config.head_dim))).collect(),
+            total_seq_len: 0,
+            generated_tokens: Vec::new(),
+        }
+    }
+
+    /// Encode a chunk of mel frames incrementally (updates encoder state)
+    pub fn encode_chunk(
+        &mut self,
+        mel_chunk: &Array3<f32>,  // [1, 128, chunk_frames] — must be divisible by 2
+        enc_state: &mut EncoderState,
+    ) -> Result<Array3<f32>> {
+        let chunk_frames = mel_chunk.shape()[2];
+        let pos_len = chunk_frames / 2;  // After initial conv downsample
+
+        let mut inputs = ort::inputs!(
+            "input_features" => ort::value::Value::from_array(mel_chunk.clone())?,
+            "attention_mask" => ort::value::Value::from_array(
+                ndarray::Array2::<i64>::from_elem((1, enc_state.position_offset + pos_len), 1)
+            )?,
+            "position_ids" => ort::value::Value::from_array(
+                ndarray::Array2::<i64>::from_shape_vec(
+                    (1, pos_len),
+                    (enc_state.position_offset..enc_state.position_offset + pos_len).map(|x| x as i64).collect(),
+                ).map_err(|e| Error::Model(format!("pos_ids: {}", e)))?
+            )?,
+            "past_padding_cache" => ort::value::Value::from_array(enc_state.padding_cache.clone())?
+        );
+
+        for i in 0..32 {
+            inputs.push((
+                format!("past_key_values.{}.key", i).into(),
+                ort::value::Value::from_array(enc_state.kv_keys[i].clone())?.into(),
+            ));
+            inputs.push((
+                format!("past_key_values.{}.value", i).into(),
+                ort::value::Value::from_array(enc_state.kv_values[i].clone())?.into(),
+            ));
+        }
+
+        let outputs = self.encoder_session.run(inputs)?;
+
+        // Extract audio embeddings
+        let (shape, data) = outputs["audio_embeds"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| Error::Model(format!("audio_embeds: {}", e)))?;
+        let dims = shape.as_ref();
+        let embeds = Array3::from_shape_vec(
+            (dims[0] as usize, dims[1] as usize, dims[2] as usize),
+            data.to_vec(),
+        ).map_err(|e| Error::Model(format!("embeds reshape: {}", e)))?;
+
+        // Update encoder state
+        enc_state.padding_cache = {
+            let (s, d) = outputs["present_padding_cache"]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| Error::Model(format!("padding: {}", e)))?;
+            let ds = s.as_ref();
+            ndarray::Array3::from_shape_vec(
+                (ds[0] as usize, ds[1] as usize, ds[2] as usize), d.to_vec(),
+            ).map_err(|e| Error::Model(format!("padding reshape: {}", e)))?
+        };
+
+        for i in 0..32 {
+            enc_state.kv_keys[i] = Self::extract_4d(&outputs, &format!("present.{}.key", i))?;
+            enc_state.kv_values[i] = Self::extract_4d(&outputs, &format!("present.{}.value", i))?;
+        }
+        enc_state.position_offset += pos_len;
+
+        Ok(embeds)
+    }
+
+    /// Feed embeddings to decoder and get next token (updates decoder state)
+    pub fn decoder_step(
+        &mut self,
+        embeds: &Array3<f32>,  // [1, seq_len, 3072]
+        dec_state: &mut DecoderState,
+    ) -> Result<i64> {
+        let seq_len = embeds.shape()[1];
+
+        let mut inputs = ort::inputs!(
+            "inputs_embeds" => ort::value::Value::from_array(embeds.clone())?,
+            "attention_mask" => ort::value::Value::from_array(
+                ndarray::Array2::<i64>::from_elem((1, dec_state.total_seq_len + seq_len), 1)
+            )?
+        );
+
+        for i in 0..self.config.num_decoder_layers {
+            inputs.push((
+                format!("past_key_values.{}.key", i).into(),
+                ort::value::Value::from_array(dec_state.kv_keys[i].clone())?.into(),
+            ));
+            inputs.push((
+                format!("past_key_values.{}.value", i).into(),
+                ort::value::Value::from_array(dec_state.kv_values[i].clone())?.into(),
+            ));
+        }
+
+        let outputs = self.decoder_session.run(inputs)?;
+
+        // Update decoder KV cache
+        for i in 0..self.config.num_decoder_layers {
+            dec_state.kv_keys[i] = Self::extract_4d(&outputs, &format!("present.{}.key", i))?;
+            dec_state.kv_values[i] = Self::extract_4d(&outputs, &format!("present.{}.value", i))?;
+        }
+        dec_state.total_seq_len += seq_len;
+
+        // Get next token
+        let token = Self::extract_next_token(
+            &outputs,
+            &dec_state.generated_tokens,
+            self.config.repetition_penalty,
+            self.config.vocab_size,
+        )?;
+
+        Ok(token)
+    }
+
+    /// Embed token IDs (public for streaming use)
+    pub fn embed_tokens_public(&mut self, token_ids: &[i64]) -> Result<Array3<f32>> {
+        self.embed_tokens(token_ids)
+    }
+
+    /// Decode token IDs to text
+    pub fn decode_tokens(&self, token_ids: &[i64]) -> Result<String> {
+        self.tokenizer.decode(&token_ids.iter().map(|&x| x as u32).collect::<Vec<_>>())
+    }
+
+    /// Get config reference
+    pub fn config(&self) -> &VoxtralConfig {
+        &self.config
+    }
+}
+
+/// Encoder KV cache state for incremental processing
+pub struct EncoderState {
+    pub kv_keys: Vec<Array4<f32>>,
+    pub kv_values: Vec<Array4<f32>>,
+    pub padding_cache: ndarray::Array3<f32>,
+    pub position_offset: usize,
+}
+
+/// Decoder KV cache state for incremental generation
+pub struct DecoderState {
+    pub kv_keys: Vec<Array4<f32>>,
+    pub kv_values: Vec<Array4<f32>>,
+    pub total_seq_len: usize,
+    pub generated_tokens: Vec<i64>,
 }
 
 // ============================================================================

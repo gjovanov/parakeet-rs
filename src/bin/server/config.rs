@@ -35,6 +35,8 @@ pub enum LatencyMode {
     GrowingSegments,
     /// Pause-segmented: segment audio by acoustic pauses, transcribe each chunk once
     PauseSegmented,
+    /// Voxtral streaming: true real-time streaming with ~480ms latency
+    VoxtralStreaming,
 }
 
 impl LatencyMode {
@@ -56,6 +58,7 @@ impl LatencyMode {
             LatencyMode::Vod => "vod",
             LatencyMode::GrowingSegments => "growing_segments",
             LatencyMode::PauseSegmented => "pause_segmented",
+            LatencyMode::VoxtralStreaming => "voxtral_streaming",
         }
     }
 
@@ -78,6 +81,7 @@ impl LatencyMode {
             LatencyMode::Vod => "VoD Batch (10-min chunks)",
             LatencyMode::GrowingSegments => "Growing Segments (word-by-word)",
             LatencyMode::PauseSegmented => "Pause-Segmented (1 chunk per pause)",
+            LatencyMode::VoxtralStreaming => "Voxtral Streaming (~480ms latency)",
         }
     }
 
@@ -117,6 +121,7 @@ impl LatencyMode {
             LatencyMode::Vod,
             LatencyMode::GrowingSegments,
             LatencyMode::PauseSegmented,
+            LatencyMode::VoxtralStreaming,
         ]
     }
 

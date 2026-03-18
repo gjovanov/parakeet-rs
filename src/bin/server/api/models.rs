@@ -127,6 +127,12 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
             description: "Segments audio by acoustic pauses, transcribes each speech chunk exactly once. \
                           Precise timestamps, no echo dedup. Each FINAL = one speech segment.",
         },
+        ModeInfo {
+            id: "voxtral_streaming",
+            name: "Voxtral Streaming (~480ms latency)",
+            description: "True real-time streaming with Voxtral 4B. Audio processed incrementally via \
+                          encoder KV cache. Text appears ~480ms after speech. Requires Voxtral model.",
+        },
     ];
     Json(ApiResponse::success(modes))
 }

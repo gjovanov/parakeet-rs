@@ -95,6 +95,8 @@ pub mod pause_segmented_canary_qwen;
 pub mod pause_segmented_voxtral;
 #[cfg(feature = "voxtral")]
 pub mod voxtral;
+#[cfg(feature = "voxtral")]
+pub mod voxtral_streaming;
 pub mod german_normalizer;
 pub mod vod_transcriber;
 pub mod text_formatter;
