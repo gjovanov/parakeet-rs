@@ -246,11 +246,17 @@ impl VoxtralModel {
     // ========================================================================
 
     fn extract_features(&self, audio: &[f32]) -> Result<Array3<f32>> {
+        // Clamp to encoder's max_position_embeddings (1500 frames ≈ 15s at hop=160)
+        // n_frames = 1 + samples/hop, so we need samples = (max_frames - 1) * hop
+        let max_frames = 1500;
+        let max_samples_by_frames = (max_frames - 1) * HOP_LENGTH;
         let max_samples = (self.config.max_audio_secs * SAMPLE_RATE as f32) as usize;
+        let max_samples = max_samples.min(max_samples_by_frames);
         let samples = if audio.len() > max_samples { &audio[..max_samples] } else { audio };
 
-        // Compute STFT
-        let n_frames = 1 + (samples.len() / HOP_LENGTH);
+        // Compute STFT — ensure frame count is divisible by 8 (encoder's 2-stage downsample)
+        let raw_frames = 1 + (samples.len() / HOP_LENGTH);
+        let n_frames = (raw_frames / 8) * 8; // Round down to nearest multiple of 8
         let mut mel_spec = Array2::<f32>::zeros((N_MELS, n_frames));
 
         let mel_filterbank = self.create_mel_filterbank();
@@ -347,22 +353,68 @@ impl VoxtralModel {
     // ========================================================================
 
     fn run_encoder(&mut self, features: &Array3<f32>) -> Result<Array3<f32>> {
+        // Voxtral encoder is a causal transformer with KV cache.
+        // For non-streaming (full chunk), provide full attention mask and empty KV cache.
+        let seq_len = features.shape()[2]; // [batch=1, n_mels=128, audio_seq_len]
+
         let input_value = ort::value::Value::from_array(features.clone())?;
 
-        let outputs = self.encoder_session.run(ort::inputs!(
-            "input_features" => input_value
-        ))?;
+        // The encoder has 2-stage downsampling:
+        // 1. Conv downsample by 2 before transformer (mel_frames → mel_frames/2)
+        // 2. Projector downsample by 4 after transformer (→ mel_frames/8 output tokens)
+        // position_ids must match the post-conv, pre-transformer length = mel_frames / 2
+        let transformer_seq_len = seq_len / 2;
 
-        let enc_out = &outputs[0];
-        let (shape, data) = enc_out
+        // Attention mask: all ones for the transformer sequence length
+        let attention_mask = ndarray::Array2::<i64>::from_elem((1, transformer_seq_len), 1);
+
+        // Position IDs: 0..transformer_seq_len (not mel frame count)
+        let position_ids = ndarray::Array2::<i64>::from_shape_vec(
+            (1, transformer_seq_len), (0..transformer_seq_len as i64).collect(),
+        ).map_err(|e| Error::Model(format!("Encoder position_ids: {}", e)))?;
+
+        // Past padding cache: zeros [batch=1, 1408, 2]
+        let past_padding = ndarray::Array3::<f32>::zeros((1, 1408, 2));
+
+        let num_encoder_layers = 32; // Voxtral encoder has 32 layers
+        let num_heads = 32;
+        let head_dim = 64;
+
+        let mut inputs = ort::inputs!(
+            "input_features" => input_value,
+            "attention_mask" => ort::value::Value::from_array(attention_mask)?,
+            "position_ids" => ort::value::Value::from_array(position_ids)?,
+            "past_padding_cache" => ort::value::Value::from_array(past_padding)?
+        );
+
+        // Add empty KV cache for all 32 encoder layers
+        for layer in 0..num_encoder_layers {
+            let empty_key = Array4::<f32>::zeros((1, num_heads, 0, head_dim));
+            let empty_val = Array4::<f32>::zeros((1, num_heads, 0, head_dim));
+            inputs.push((
+                format!("past_key_values.{}.key", layer).into(),
+                ort::value::Value::from_array(empty_key)?.into(),
+            ));
+            inputs.push((
+                format!("past_key_values.{}.value", layer).into(),
+                ort::value::Value::from_array(empty_val)?.into(),
+            ));
+        }
+
+        let outputs = self.encoder_session.run(inputs)?;
+
+        // Extract audio_embeds [batch, num_audio_tokens, 3072]
+        let (shape, data) = outputs["audio_embeds"]
             .try_extract_tensor::<f32>()
-            .map_err(|e| Error::Model(format!("Encoder extract: {}", e)))?;
+            .map_err(|e| Error::Model(format!("Encoder audio_embeds extract: {}", e)))?;
         let dims = shape.as_ref();
 
         let output = Array3::from_shape_vec(
             (dims[0] as usize, dims[1] as usize, dims[2] as usize),
             data.to_vec(),
         ).map_err(|e| Error::Model(format!("Encoder reshape: {}", e)))?;
+
+        eprintln!("[Voxtral] Encoder output: [{}, {}, {}]", dims[0], dims[1], dims[2]);
 
         Ok(output)
     }
@@ -442,20 +494,57 @@ impl VoxtralModel {
             .unwrap_or(EOS_TOKEN_ID))
     }
 
-    /// Autoregressive greedy decoding with KV cache
+    /// Autoregressive greedy decoding with KV cache.
+    /// Voxtral uses a decoder-only architecture where audio_embeds from the encoder
+    /// are concatenated with text token embeds as inputs_embeds (no cross-attention).
     fn greedy_decode(&mut self, encoder_output: &Array3<f32>) -> Result<Vec<i64>> {
         self.kv_cache.reset();
         let max_tokens = self.config.max_sequence_length.min(500);
         let mut generated: Vec<i64> = Vec::new();
+        let audio_len = encoder_output.shape()[1]; // num_audio_tokens
 
-        // Step 0: Embed BOS token and feed with encoder output (prefill)
-        let bos_embed = self.embed_tokens(&[BOS_TOKEN_ID])?;
-        let encoder_value = ort::value::Value::from_array(encoder_output.clone())?;
-
+        // Step 0: Prefill — concatenate [BOS, INST_prompt_embeds, audio_embeds, /INST_embed]
+        // Voxtral uses Mistral instruction format: [INST] prompt [/INST] <audio> response
         let first_token = {
+            // Build instruction: <s>[INST] Transcribe: [/INST]
+            let inst_token: i64 = 3;   // [INST]
+            let inst_end: i64 = 4;     // [/INST]
+            let prompt_ids: Vec<i64> = vec![BOS_TOKEN_ID, inst_token];
+            let prompt_embed = self.embed_tokens(&prompt_ids)?;
+            let end_embed = self.embed_tokens(&[inst_end])?;
+
+            // Concatenate: [prompt_embeds, audio_embeds, end_embed]
+            let prompt_len = prompt_embed.shape()[1];
+            let end_len = 1;
+            let total_len = prompt_len + audio_len + end_len;
+            let hidden = self.config.hidden_size;
+            let mut combined = ndarray::Array3::<f32>::zeros((1, total_len, hidden));
+            let mut pos = 0;
+            // Copy prompt embeds (BOS + [INST])
+            for t in 0..prompt_len {
+                for h in 0..hidden {
+                    combined[[0, pos + t, h]] = prompt_embed[[0, t, h]];
+                }
+            }
+            pos += prompt_len;
+            // Copy audio embeds
+            for t in 0..audio_len {
+                for h in 0..hidden {
+                    combined[[0, pos + t, h]] = encoder_output[[0, t, h]];
+                }
+            }
+            pos += audio_len;
+            // Copy [/INST] embed
+            for h in 0..hidden {
+                combined[[0, pos, h]] = end_embed[[0, 0, h]];
+            }
+
+            // Attention mask: all ones
+            let attention_mask = ndarray::Array2::<i64>::from_elem((1, total_len), 1);
+
             let mut inputs = ort::inputs!(
-                "inputs_embeds" => ort::value::Value::from_array(bos_embed)?,
-                "encoder_hidden_states" => encoder_value
+                "inputs_embeds" => ort::value::Value::from_array(combined)?,
+                "attention_mask" => ort::value::Value::from_array(attention_mask)?
             );
 
             // Empty KV cache
@@ -469,10 +558,6 @@ impl VoxtralModel {
                     ort::value::Value::from_array(self.kv_cache.past_values[layer].clone())?.into(),
                 ));
             }
-
-            // use_cache_branch = false (prefill)
-            let ucb = ndarray::Array1::<bool>::from_vec(vec![false]);
-            inputs.push(("use_cache_branch".into(), ort::value::Value::from_array(ucb)?.into()));
 
             let outputs = self.decoder_session.run(inputs)?;
 
@@ -494,14 +579,15 @@ impl VoxtralModel {
         // Steps 1..N: one token at a time with KV cache
         for _step in 1..max_tokens {
             let last_tok = *generated.last().unwrap();
-            let tok_embed = self.embed_tokens(&[last_tok])?;
+            let tok_embed = self.embed_tokens(&[last_tok])?; // [1, 1, 3072]
 
-            // Encoder output as empty on cached steps (cross-attention uses cached KV)
-            let empty_encoder = Array3::<f32>::zeros((1, 0, self.config.hidden_size));
+            // Attention mask covers all previous tokens + current
+            let total_seq = audio_len + generated.len() + 1; // audio + BOS + generated so far
+            let attention_mask = ndarray::Array2::<i64>::from_elem((1, total_seq), 1);
 
             let mut inputs = ort::inputs!(
                 "inputs_embeds" => ort::value::Value::from_array(tok_embed)?,
-                "encoder_hidden_states" => ort::value::Value::from_array(empty_encoder)?
+                "attention_mask" => ort::value::Value::from_array(attention_mask)?
             );
 
             for layer in 0..self.kv_cache.num_layers {
@@ -514,9 +600,6 @@ impl VoxtralModel {
                     ort::value::Value::from_array(self.kv_cache.past_values[layer].clone())?.into(),
                 ));
             }
-
-            let ucb = ndarray::Array1::<bool>::from_vec(vec![true]);
-            inputs.push(("use_cache_branch".into(), ort::value::Value::from_array(ucb)?.into()));
 
             let outputs = self.decoder_session.run(inputs)?;
 
