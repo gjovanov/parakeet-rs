@@ -338,10 +338,12 @@ impl VoxtralModel {
                     filterbank[[m, k]] = (bin_points[m + 2] - kf) / (bin_points[m + 2] - bin_points[m + 1]).max(1e-10);
                 }
             }
-            // Slaney normalization: divide by bandwidth (2 / (high_freq - low_freq))
-            let bandwidth = mel_points[m + 2] - mel_points[m];
-            if bandwidth > 0.0 {
-                let norm_factor = 2.0 / bandwidth;
+            // Slaney normalization: divide by bandwidth in Hz (2 / (f_high - f_low))
+            let f_low = mel_points[m];    // mel_points are already in Hz
+            let f_high = mel_points[m + 2];
+            let bandwidth_hz = f_high - f_low;
+            if bandwidth_hz > 0.0 {
+                let norm_factor = 2.0 / bandwidth_hz;
                 for k in 0..n_fft_bins {
                     filterbank[[m, k]] *= norm_factor;
                 }
