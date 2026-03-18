@@ -160,8 +160,11 @@ impl VoxtralModel {
         let onnx_dir = dir.join("onnx");
         let base_dir = if onnx_dir.exists() { onnx_dir } else { dir.to_path_buf() };
 
-        // Select quantization variant
-        let use_quantized = config.prefer_quantized.unwrap_or(true); // Default Q4
+        // Select quantization variant: auto-detect based on available files
+        // FP16 preferred when available (better quality), Q4 as fallback
+        let fp16_exists = base_dir.join("audio_encoder_fp16.onnx").exists();
+        let q4_exists = base_dir.join("audio_encoder_q4.onnx").exists();
+        let use_quantized = config.prefer_quantized.unwrap_or(!fp16_exists && q4_exists);
 
         let (enc_name, dec_name, emb_name) = if use_quantized {
             ("audio_encoder_q4.onnx", "decoder_model_merged_q4.onnx", "embed_tokens_q4.onnx")
