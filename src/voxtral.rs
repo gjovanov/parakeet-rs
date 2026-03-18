@@ -270,18 +270,20 @@ impl VoxtralModel {
                 frame[i] = samples[start + i] * window[i];
             }
 
-            // FFT (real-valued, use simple DFT for correctness)
+            // FFT using rustfft for correct results
             let n_fft_bins = N_FFT / 2 + 1;
             let mut power_spectrum = vec![0.0f32; n_fft_bins];
-            for k in 0..n_fft_bins {
-                let mut re = 0.0f32;
-                let mut im = 0.0f32;
-                for n in 0..N_FFT {
-                    let angle = -2.0 * std::f32::consts::PI * k as f32 * n as f32 / N_FFT as f32;
-                    re += frame[n] * angle.cos();
-                    im += frame[n] * angle.sin();
+            {
+                use rustfft::{FftPlanner, num_complex::Complex};
+                let mut planner = FftPlanner::<f32>::new();
+                let fft = planner.plan_fft_forward(N_FFT);
+                let mut complex_buf: Vec<Complex<f32>> = frame.iter()
+                    .map(|&x| Complex { re: x, im: 0.0 })
+                    .collect();
+                fft.process(&mut complex_buf);
+                for k in 0..n_fft_bins {
+                    power_spectrum[k] = complex_buf[k].re * complex_buf[k].re + complex_buf[k].im * complex_buf[k].im;
                 }
-                power_spectrum[k] = re * re + im * im;
             }
 
             // Apply mel filterbank (store raw power, log10 applied in normalization)
@@ -517,40 +519,37 @@ impl VoxtralModel {
         let mut generated: Vec<i64> = Vec::new();
         let audio_len = encoder_output.shape()[1]; // num_audio_tokens
 
-        // Step 0: Prefill — concatenate [BOS, INST_prompt_embeds, audio_embeds, /INST_embed]
-        // Voxtral uses Mistral instruction format: [INST] prompt [/INST] <audio> response
+        // Step 0: Prefill using Voxtral's streaming token protocol:
+        // Token IDs: [BOS=1, AUDIO_TOKEN=24 × n_audio_tokens, DELAY_TOKEN=11 × 6]
+        // Embed tokens → text_embeds, then ADD audio_embeds at AUDIO positions
         let first_token = {
-            // Build instruction: <s>[INST] Transcribe: [/INST]
-            let inst_token: i64 = 3;   // [INST]
-            let inst_end: i64 = 4;     // [/INST]
-            let prompt_ids: Vec<i64> = vec![BOS_TOKEN_ID, inst_token];
-            let prompt_embed = self.embed_tokens(&prompt_ids)?;
-            let end_embed = self.embed_tokens(&[inst_end])?;
+            let audio_token_id: i64 = 24; // [AUDIO]
+            let delay_token_id: i64 = PAD_TOKEN_ID; // PAD=11 used as delay token
+            let num_delay = 6;
 
-            // Concatenate: [prompt_embeds, audio_embeds, end_embed]
-            let prompt_len = prompt_embed.shape()[1];
-            let end_len = 1;
-            let total_len = prompt_len + audio_len + end_len;
+            // Build token sequence
+            let mut token_ids: Vec<i64> = vec![BOS_TOKEN_ID];
+            for _ in 0..audio_len { token_ids.push(audio_token_id); }
+            for _ in 0..num_delay { token_ids.push(delay_token_id); }
+            let total_len = token_ids.len();
+
+            // Embed all tokens
+            let text_embeds = self.embed_tokens(&token_ids)?; // [1, total_len, 3072]
+
+            // ADD audio_embeds to text_embeds at AUDIO positions (indices 1..1+audio_len)
             let hidden = self.config.hidden_size;
             let mut combined = ndarray::Array3::<f32>::zeros((1, total_len, hidden));
-            let mut pos = 0;
-            // Copy prompt embeds (BOS + [INST])
-            for t in 0..prompt_len {
+            // Copy text embeds
+            for t in 0..total_len {
                 for h in 0..hidden {
-                    combined[[0, pos + t, h]] = prompt_embed[[0, t, h]];
+                    combined[[0, t, h]] = text_embeds[[0, t, h]];
                 }
             }
-            pos += prompt_len;
-            // Copy audio embeds
+            // ADD audio embeds at AUDIO token positions
             for t in 0..audio_len {
                 for h in 0..hidden {
-                    combined[[0, pos + t, h]] = encoder_output[[0, t, h]];
+                    combined[[0, 1 + t, h]] += encoder_output[[0, t, h]];
                 }
-            }
-            pos += audio_len;
-            // Copy [/INST] embed
-            for h in 0..hidden {
-                combined[[0, pos, h]] = end_embed[[0, 0, h]];
             }
 
             // Attention mask: all ones
