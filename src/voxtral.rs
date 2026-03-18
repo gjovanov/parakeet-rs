@@ -284,21 +284,25 @@ impl VoxtralModel {
                 power_spectrum[k] = re * re + im * im;
             }
 
-            // Apply mel filterbank
+            // Apply mel filterbank (store raw power, log10 applied in normalization)
             for mel_idx in 0..N_MELS {
                 let mut energy = 0.0f32;
                 for k in 0..n_fft_bins {
                     energy += mel_filterbank[[mel_idx, k]] * power_spectrum[k];
                 }
-                mel_spec[[mel_idx, frame_idx]] = energy.max(1e-10).ln();
+                mel_spec[[mel_idx, frame_idx]] = energy;
             }
         }
 
-        // Normalize: clamp to global_log_mel_max, then scale to [-1, 1]
-        let max_val = GLOBAL_LOG_MEL_MAX;
+        // Normalize (matching VoxtralRealtimeFeatureExtractor):
+        // 1. log10 (not ln)
+        // 2. Bottom clamp to (global_log_mel_max - 8.0) = -6.5
+        // 3. Scale: (x + 4.0) / 4.0
+        let bottom_clamp = GLOBAL_LOG_MEL_MAX - 8.0; // -6.5
         mel_spec.mapv_inplace(|v| {
-            let clamped = v.min(max_val);
-            clamped / max_val // Scale to [-inf/max, 1.0]
+            let log10_val = v.max(1e-10).log10();
+            let clamped = log10_val.max(bottom_clamp);
+            (clamped + 4.0) / 4.0
         });
 
         // Reshape to [batch=1, n_mels, n_frames]
@@ -332,6 +336,14 @@ impl VoxtralModel {
                     filterbank[[m, k]] = (kf - bin_points[m]) / (bin_points[m + 1] - bin_points[m]).max(1e-10);
                 } else if kf >= bin_points[m + 1] && kf <= bin_points[m + 2] {
                     filterbank[[m, k]] = (bin_points[m + 2] - kf) / (bin_points[m + 2] - bin_points[m + 1]).max(1e-10);
+                }
+            }
+            // Slaney normalization: divide by bandwidth (2 / (high_freq - low_freq))
+            let bandwidth = mel_points[m + 2] - mel_points[m];
+            if bandwidth > 0.0 {
+                let norm_factor = 2.0 / bandwidth;
+                for k in 0..n_fft_bins {
+                    filterbank[[m, k]] *= norm_factor;
                 }
             }
         }
