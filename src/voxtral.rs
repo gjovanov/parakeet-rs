@@ -182,12 +182,25 @@ impl VoxtralModel {
         let decoder_path = base_dir.join(dec_name);
         let embed_path = base_dir.join(emb_name);
 
-        // Load ONNX sessions using the standard builder pattern
-        let builder = Session::builder()?;
-        let mut builder = exec_config.apply_to_session_builder(builder)?;
-        let encoder_session = builder.commit_from_file(&encoder_path)?;
-        eprintln!("[Voxtral] Encoder loaded: {:?}", encoder_path.file_name().unwrap());
+        // Load ONNX sessions
+        // FP16 encoder has GQA with attention_bias which CUDA doesn't support,
+        // so load encoder on CPU even when GPU is available
+        let encoder_session = if use_fp16 {
+            eprintln!("[Voxtral] Loading encoder on CPU (FP16 GQA attention_bias not supported on CUDA)");
+            let builder = Session::builder()?;
+            // Don't apply GPU config — use CPU for encoder
+            let num_threads = std::env::var("INTRA_THREADS").ok()
+                .and_then(|s| s.parse::<usize>().ok()).unwrap_or(8);
+            let mut builder = builder.with_intra_threads(num_threads)?;
+            builder.commit_from_file(&encoder_path)?
+        } else {
+            let builder = Session::builder()?;
+            let mut builder = exec_config.apply_to_session_builder(builder)?;
+            builder.commit_from_file(&encoder_path)?
+        };
+        eprintln!("[Voxtral] Encoder loaded: {:?} (fp16_cpu_fallback: {})", encoder_path.file_name().unwrap(), use_fp16);
 
+        // Decoder and embed_tokens can use GPU
         let builder = Session::builder()?;
         let mut builder = exec_config.apply_to_session_builder(builder)?;
         let decoder_session = builder.commit_from_file(&decoder_path)?;
