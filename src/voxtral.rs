@@ -6,6 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::ExecutionConfig;
+use half::f16;
 use ndarray::{Array1, Array2, Array3, Array4, s};
 use ort::session::Session;
 use std::path::{Path, PathBuf};
@@ -144,6 +145,8 @@ pub struct VoxtralModel {
     config: VoxtralConfig,
     /// Pre-computed mel filterbank from Python reference [n_fft_bins=201, n_mels=128]
     mel_filterbank: Option<Array2<f32>>,
+    /// Whether the model uses FP16 inputs (auto-detected from model files)
+    use_fp16: bool,
 }
 
 impl VoxtralModel {
@@ -172,7 +175,8 @@ impl VoxtralModel {
             ("audio_encoder_fp16.onnx", "decoder_model_merged_fp16.onnx", "embed_tokens_fp16.onnx")
         };
 
-        eprintln!("[Voxtral] Loading model from {:?} (quantized: {})", dir, use_quantized);
+        let use_fp16 = !use_quantized;
+        eprintln!("[Voxtral] Loading model from {:?} (quantized: {}, fp16: {})", dir, use_quantized, use_fp16);
 
         let encoder_path = base_dir.join(enc_name);
         let decoder_path = base_dir.join(dec_name);
@@ -227,7 +231,32 @@ impl VoxtralModel {
             kv_cache,
             config,
             mel_filterbank,
+            use_fp16,
         })
+    }
+
+    /// Convert f32 ndarray to f16 ORT Value (for FP16 models)
+    fn to_f16_value(arr: &ndarray::ArrayD<f32>) -> Result<ort::value::Value> {
+        let f16_data: Vec<f16> = arr.iter().map(|&v| f16::from_f32(v)).collect();
+        let shape: Vec<usize> = arr.shape().to_vec();
+        let f16_arr = ndarray::ArrayD::from_shape_vec(
+            ndarray::IxDyn(&shape), f16_data,
+        ).map_err(|e| Error::Model(format!("f16 reshape: {}", e)))?;
+        Ok(ort::value::Value::from_array(f16_arr)?.into())
+    }
+
+    /// Create an ORT Value from f32 array — always f32 for main data path
+    fn make_float_value(&self, arr: ndarray::ArrayD<f32>) -> Result<ort::value::Value> {
+        Ok(ort::value::Value::from_array(arr)?.into())
+    }
+
+    /// Create an ORT Value for KV cache — f16 if model is FP16, else f32
+    fn make_kv_value(&self, arr: ndarray::ArrayD<f32>) -> Result<ort::value::Value> {
+        if self.use_fp16 {
+            Self::to_f16_value(&arr)
+        } else {
+            Ok(ort::value::Value::from_array(arr)?.into())
+        }
     }
 
     /// Transcribe audio samples to text
@@ -398,69 +427,52 @@ impl VoxtralModel {
     // ========================================================================
 
     fn run_encoder(&mut self, features: &Array3<f32>) -> Result<Array3<f32>> {
-        // Voxtral encoder is a causal transformer with KV cache.
-        // For non-streaming (full chunk), provide full attention mask and empty KV cache.
-        let seq_len = features.shape()[2]; // [batch=1, n_mels=128, audio_seq_len]
-
-        let input_value = ort::value::Value::from_array(features.clone())?;
-
-        // The encoder has 2-stage downsampling:
-        // 1. Conv downsample by 2 before transformer (mel_frames → mel_frames/2)
-        // 2. Projector downsample by 4 after transformer (→ mel_frames/8 output tokens)
-        // position_ids must match the post-conv, pre-transformer length = mel_frames / 2
+        let seq_len = features.shape()[2];
         let transformer_seq_len = seq_len / 2;
+        let num_encoder_layers = 32;
+        let num_heads = 32;
+        let head_dim = 64;
 
-        // Attention mask: all ones for the transformer sequence length
+        // Convert float inputs to f16 if model requires it
+        let input_value = self.make_float_value(features.clone().into_dyn())?;
+        let past_padding = self.make_kv_value(
+            ndarray::Array3::<f32>::zeros((1, 1408, 2)).into_dyn()
+        )?;
+
         let attention_mask = ndarray::Array2::<i64>::from_elem((1, transformer_seq_len), 1);
-
-        // Position IDs: 0..transformer_seq_len (not mel frame count)
         let position_ids = ndarray::Array2::<i64>::from_shape_vec(
             (1, transformer_seq_len), (0..transformer_seq_len as i64).collect(),
         ).map_err(|e| Error::Model(format!("Encoder position_ids: {}", e)))?;
-
-        // Past padding cache: zeros [batch=1, 1408, 2]
-        let past_padding = ndarray::Array3::<f32>::zeros((1, 1408, 2));
-
-        let num_encoder_layers = 32; // Voxtral encoder has 32 layers
-        let num_heads = 32;
-        let head_dim = 64;
 
         let mut inputs = ort::inputs!(
             "input_features" => input_value,
             "attention_mask" => ort::value::Value::from_array(attention_mask)?,
             "position_ids" => ort::value::Value::from_array(position_ids)?,
-            "past_padding_cache" => ort::value::Value::from_array(past_padding)?
+            "past_padding_cache" => past_padding
         );
 
-        // Add empty KV cache for all 32 encoder layers
         for layer in 0..num_encoder_layers {
-            let empty_key = Array4::<f32>::zeros((1, num_heads, 0, head_dim));
-            let empty_val = Array4::<f32>::zeros((1, num_heads, 0, head_dim));
+            let empty_key = self.make_kv_value(
+                Array4::<f32>::zeros((1, num_heads, 0, head_dim)).into_dyn()
+            )?;
+            let empty_val = self.make_kv_value(
+                Array4::<f32>::zeros((1, num_heads, 0, head_dim)).into_dyn()
+            )?;
             inputs.push((
                 format!("past_key_values.{}.key", layer).into(),
-                ort::value::Value::from_array(empty_key)?.into(),
+                empty_key.into(),
             ));
             inputs.push((
                 format!("past_key_values.{}.value", layer).into(),
-                ort::value::Value::from_array(empty_val)?.into(),
+                empty_val.into(),
             ));
         }
 
         let outputs = self.encoder_session.run(inputs)?;
 
-        // Extract audio_embeds [batch, num_audio_tokens, 3072]
-        let (shape, data) = outputs["audio_embeds"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| Error::Model(format!("Encoder audio_embeds extract: {}", e)))?;
-        let dims = shape.as_ref();
-
-        let output = Array3::from_shape_vec(
-            (dims[0] as usize, dims[1] as usize, dims[2] as usize),
-            data.to_vec(),
-        ).map_err(|e| Error::Model(format!("Encoder reshape: {}", e)))?;
-
-        eprintln!("[Voxtral] Encoder output: [{}, {}, {}]", dims[0], dims[1], dims[2]);
-
+        // Extract audio_embeds [batch, num_audio_tokens, 3072] — handles both f32 and f16
+        let output = Self::extract_3d_auto(&outputs, "audio_embeds")?;
+        eprintln!("[Voxtral] Encoder output: {:?}", output.shape());
         Ok(output)
     }
 
@@ -475,29 +487,68 @@ impl VoxtralModel {
         let input_value = ort::value::Value::from_array(input)?;
         let outputs = self.embed_tokens_session.run(ort::inputs!("input_ids" => input_value))?;
 
+        // Try f32 first, fall back to f16
+        if let Ok((shape, data)) = outputs[0].try_extract_tensor::<f32>() {
+            let dims = shape.as_ref();
+            return Array3::from_shape_vec(
+                (dims[0] as usize, dims[1] as usize, dims[2] as usize),
+                data.to_vec(),
+            ).map_err(|e| Error::Model(format!("embed reshape: {}", e)));
+        }
+        // FP16 output
         let (shape, data) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| Error::Model(format!("embed extract: {}", e)))?;
+            .try_extract_tensor::<f16>()
+            .map_err(|e| Error::Model(format!("embed extract f16: {}", e)))?;
         let dims = shape.as_ref();
+        let f32_data: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
         Array3::from_shape_vec(
             (dims[0] as usize, dims[1] as usize, dims[2] as usize),
-            data.to_vec(),
-        ).map_err(|e| Error::Model(format!("embed reshape: {}", e)))
+            f32_data,
+        ).map_err(|e| Error::Model(format!("embed reshape f16: {}", e)))
     }
 
-    /// Extract a 4D tensor from ONNX outputs by name
-    fn extract_4d(outputs: &ort::session::SessionOutputs, name: &str) -> Result<Array4<f32>> {
+    /// Extract a 3D tensor, handling both f32 and f16 outputs
+    fn extract_3d_auto(outputs: &ort::session::SessionOutputs, name: &str) -> Result<Array3<f32>> {
+        if let Ok((shape, data)) = outputs[name].try_extract_tensor::<f32>() {
+            let dims = shape.as_ref();
+            return Array3::from_shape_vec(
+                (dims[0] as usize, dims[1] as usize, dims[2] as usize),
+                data.to_vec(),
+            ).map_err(|e| Error::Model(format!("{} reshape: {}", name, e)));
+        }
         let (shape, data) = outputs[name]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| Error::Model(format!("extract {}: {}", name, e)))?;
+            .try_extract_tensor::<f16>()
+            .map_err(|e| Error::Model(format!("{} extract f16: {}", name, e)))?;
+        let dims = shape.as_ref();
+        let f32_data: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
+        Array3::from_shape_vec(
+            (dims[0] as usize, dims[1] as usize, dims[2] as usize),
+            f32_data,
+        ).map_err(|e| Error::Model(format!("{} reshape f16: {}", name, e)))
+    }
+
+    /// Extract a 4D tensor, handling both f32 and f16 outputs
+    fn extract_4d(outputs: &ort::session::SessionOutputs, name: &str) -> Result<Array4<f32>> {
+        if let Ok((shape, data)) = outputs[name].try_extract_tensor::<f32>() {
+            let dims = shape.as_ref();
+            if dims.len() != 4 { return Err(Error::Model(format!("{}: expected 4D, got {}D", name, dims.len()))); }
+            return Array4::from_shape_vec(
+                (dims[0] as usize, dims[1] as usize, dims[2] as usize, dims[3] as usize),
+                data.to_vec(),
+            ).map_err(|e| Error::Model(format!("{} reshape: {}", name, e)));
+        }
+        let (shape, data) = outputs[name]
+            .try_extract_tensor::<f16>()
+            .map_err(|e| Error::Model(format!("{} extract f16: {}", name, e)))?;
         let dims = shape.as_ref();
         if dims.len() != 4 {
             return Err(Error::Model(format!("{}: expected 4D, got {}D", name, dims.len())));
         }
+        let f32_data: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
         Array4::from_shape_vec(
             (dims[0] as usize, dims[1] as usize, dims[2] as usize, dims[3] as usize),
-            data.to_vec(),
-        ).map_err(|e| Error::Model(format!("{} reshape: {}", name, e)))
+            f32_data,
+        ).map_err(|e| Error::Model(format!("{} reshape f16: {}", name, e)))
     }
 
     /// Extract next token from logits with repetition penalty
@@ -507,15 +558,20 @@ impl VoxtralModel {
         rep_penalty: f32,
         vocab_size: usize,
     ) -> Result<i64> {
-        let (logits_shape, logits_data) = outputs["logits"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| Error::Model(format!("logits extract: {}", e)))?;
-        let dims = logits_shape.as_ref();
+        // Try f32 logits, fall back to f16
+        let (dims, logits_data): (Vec<usize>, Vec<f32>) = if let Ok((shape, data)) = outputs["logits"].try_extract_tensor::<f32>() {
+            (shape.as_ref().iter().map(|&d| d as usize).collect(), data.to_vec())
+        } else {
+            let (shape, data) = outputs["logits"]
+                .try_extract_tensor::<f16>()
+                .map_err(|e| Error::Model(format!("logits extract f16: {}", e)))?;
+            (shape.as_ref().iter().map(|&d| d as usize).collect(), data.iter().map(|v| v.to_f32()).collect())
+        };
 
         let mut last_logits: Vec<f32> = match dims.len() {
             2 => logits_data[..vocab_size].to_vec(),
             3 => {
-                let seq_len = dims[1] as usize;
+                let seq_len = dims[1];
                 let start = (seq_len - 1) * vocab_size;
                 logits_data[start..start + vocab_size].to_vec()
             }
@@ -585,7 +641,7 @@ impl VoxtralModel {
             let attention_mask = ndarray::Array2::<i64>::from_elem((1, total_len), 1);
 
             let mut inputs = ort::inputs!(
-                "inputs_embeds" => ort::value::Value::from_array(combined)?,
+                "inputs_embeds" => self.make_float_value(combined.into_dyn())?,
                 "attention_mask" => ort::value::Value::from_array(attention_mask)?
             );
 
@@ -593,11 +649,11 @@ impl VoxtralModel {
             for layer in 0..self.kv_cache.num_layers {
                 inputs.push((
                     format!("past_key_values.{}.key", layer).into(),
-                    ort::value::Value::from_array(self.kv_cache.past_keys[layer].clone())?.into(),
+                    self.make_kv_value(self.kv_cache.past_keys[layer].clone().into_dyn())?.into(),
                 ));
                 inputs.push((
                     format!("past_key_values.{}.value", layer).into(),
-                    ort::value::Value::from_array(self.kv_cache.past_values[layer].clone())?.into(),
+                    self.make_kv_value(self.kv_cache.past_values[layer].clone().into_dyn())?.into(),
                 ));
             }
 
@@ -628,18 +684,18 @@ impl VoxtralModel {
             let attention_mask = ndarray::Array2::<i64>::from_elem((1, total_seq), 1);
 
             let mut inputs = ort::inputs!(
-                "inputs_embeds" => ort::value::Value::from_array(tok_embed)?,
+                "inputs_embeds" => self.make_float_value(tok_embed.into_dyn())?,
                 "attention_mask" => ort::value::Value::from_array(attention_mask)?
             );
 
             for layer in 0..self.kv_cache.num_layers {
                 inputs.push((
                     format!("past_key_values.{}.key", layer).into(),
-                    ort::value::Value::from_array(self.kv_cache.past_keys[layer].clone())?.into(),
+                    self.make_kv_value(self.kv_cache.past_keys[layer].clone().into_dyn())?.into(),
                 ));
                 inputs.push((
                     format!("past_key_values.{}.value", layer).into(),
-                    ort::value::Value::from_array(self.kv_cache.past_values[layer].clone())?.into(),
+                    self.make_kv_value(self.kv_cache.past_values[layer].clone().into_dyn())?.into(),
                 ));
             }
 
@@ -699,7 +755,7 @@ impl VoxtralModel {
         let pos_len = chunk_frames / 2;  // After initial conv downsample
 
         let mut inputs = ort::inputs!(
-            "input_features" => ort::value::Value::from_array(mel_chunk.clone())?,
+            "input_features" => self.make_float_value(mel_chunk.clone().into_dyn())?,
             "attention_mask" => ort::value::Value::from_array(
                 ndarray::Array2::<i64>::from_elem((1, enc_state.position_offset + pos_len), 1)
             )?,
@@ -709,17 +765,17 @@ impl VoxtralModel {
                     (enc_state.position_offset..enc_state.position_offset + pos_len).map(|x| x as i64).collect(),
                 ).map_err(|e| Error::Model(format!("pos_ids: {}", e)))?
             )?,
-            "past_padding_cache" => ort::value::Value::from_array(enc_state.padding_cache.clone())?
+            "past_padding_cache" => self.make_kv_value(enc_state.padding_cache.clone().into_dyn())?
         );
 
         for i in 0..32 {
             inputs.push((
                 format!("past_key_values.{}.key", i).into(),
-                ort::value::Value::from_array(enc_state.kv_keys[i].clone())?.into(),
+                self.make_kv_value(enc_state.kv_keys[i].clone().into_dyn())?.into(),
             ));
             inputs.push((
                 format!("past_key_values.{}.value", i).into(),
-                ort::value::Value::from_array(enc_state.kv_values[i].clone())?.into(),
+                self.make_kv_value(enc_state.kv_values[i].clone().into_dyn())?.into(),
             ));
         }
 
@@ -764,7 +820,7 @@ impl VoxtralModel {
         let seq_len = embeds.shape()[1];
 
         let mut inputs = ort::inputs!(
-            "inputs_embeds" => ort::value::Value::from_array(embeds.clone())?,
+            "inputs_embeds" => self.make_float_value(embeds.clone().into_dyn())?,
             "attention_mask" => ort::value::Value::from_array(
                 ndarray::Array2::<i64>::from_elem((1, dec_state.total_seq_len + seq_len), 1)
             )?
@@ -773,11 +829,11 @@ impl VoxtralModel {
         for i in 0..self.config.num_decoder_layers {
             inputs.push((
                 format!("past_key_values.{}.key", i).into(),
-                ort::value::Value::from_array(dec_state.kv_keys[i].clone())?.into(),
+                self.make_kv_value(dec_state.kv_keys[i].clone().into_dyn())?.into(),
             ));
             inputs.push((
                 format!("past_key_values.{}.value", i).into(),
-                ort::value::Value::from_array(dec_state.kv_values[i].clone())?.into(),
+                self.make_kv_value(dec_state.kv_values[i].clone().into_dyn())?.into(),
             ));
         }
 
