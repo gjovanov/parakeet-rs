@@ -131,7 +131,7 @@ pub use media_manager::{
 // Session exports
 pub use session::{
     MediaSourceType, SessionInfo, SessionManager, SessionState, SharedSessionManager,
-    TranscriptionSession, VodProgressInfo,
+    TranscriptionSession,
 };
 
 // VAD exports

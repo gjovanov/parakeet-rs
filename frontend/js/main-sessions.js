@@ -17,7 +17,7 @@ const state = {
 };
 
 // Pause-related modes that show pause config
-const PAUSE_MODES = ['speedy', 'pause_segmented'];
+const PAUSE_MODES = ['pause_segmented'];
 
 // Map slider value (1-5) to actual silence_energy_threshold
 function getSilenceEnergyThreshold(sliderValue) {
@@ -749,70 +749,41 @@ function renderSessionsList() {
 
   elements.sessionsList.innerHTML = sessions.map(s => {
     const isLive = s.source_type === 'srt_stream';
-    const isVod = s.mode === 'vod';
     const progress = !isLive && s.duration_secs > 0 ? (s.progress_secs / s.duration_secs) * 100 : 0;
     const isSelected = state.selectedSessionId === s.id;
     const modeLabel = s.mode ? s.mode.replace(/_/g, '-') : 'speedy';
 
-    // Build badges for noise cancellation and diarization
+    // Build badges
     const noiseLabel = s.noise_cancellation && s.noise_cancellation !== 'none'
       ? ` | <span class="noise-badge">${s.noise_cancellation}</span>`
       : '';
     const diarLabel = s.diarization
       ? ` | <span class="diar-badge">${s.diarization_model || 'Diar'}</span>`
       : '';
-    // Sentence completion badge
     const sentenceLabel = s.sentence_completion && s.sentence_completion !== 'off'
       ? ` | <span class="sentence-badge" title="Sentence completion: ${s.sentence_completion}">${s.sentence_completion}</span>`
       : '';
 
-    // VoD badge for VoD mode
-    const vodLabel = isVod
-      ? '<span class="vod-badge">VoD</span> '
-      : '';
-
-    // LIVE badge for SRT streams
     const liveLabel = isLive
       ? '<span class="live-badge">LIVE</span> '
       : '';
 
-    // Duration display - varies by mode
-    let durationDisplay;
-    if (isLive) {
-      durationDisplay = `${formatDuration(s.progress_secs)} elapsed`;
-    } else if (isVod && s.vod_progress) {
-      // VoD progress: show chunk progress
-      durationDisplay = `<span class="vod-progress-text">Chunk ${s.vod_progress.completed_chunks}/${s.vod_progress.total_chunks} (${Math.round(s.vod_progress.percent)}%)</span>`;
-    } else if (isVod && s.state === 'completed') {
-      durationDisplay = `${formatDuration(s.duration_secs)} - Completed`;
-    } else {
-      durationDisplay = `${formatDuration(s.progress_secs)} / ${formatDuration(s.duration_secs)}`;
-    }
+    const durationDisplay = isLive
+      ? `${formatDuration(s.progress_secs)} elapsed`
+      : `${formatDuration(s.progress_secs)} / ${formatDuration(s.duration_secs)}`;
 
-    // Progress bar - varies by mode
-    let progressBar;
-    if (isLive) {
-      progressBar = '<div class="session-progress-bar live-progress" style="width: 100%"></div>';
-    } else if (isVod && s.vod_progress) {
-      progressBar = `<div class="session-progress-bar" style="width: ${s.vod_progress.percent}%"></div>`;
-    } else if (isVod && s.state === 'completed') {
-      progressBar = '<div class="session-progress-bar" style="width: 100%"></div>';
-    } else {
-      progressBar = `<div class="session-progress-bar" style="width: ${progress}%"></div>`;
-    }
+    const progressBar = isLive
+      ? '<div class="session-progress-bar live-progress" style="width: 100%"></div>'
+      : `<div class="session-progress-bar" style="width: ${progress}%"></div>`;
 
-    // Action buttons - include download for completed VoD sessions
-    let actionButtons = '';
-    if (s.state === 'running') {
-      actionButtons = `<button class="btn-small btn-danger" onclick="event.stopPropagation(); window.stopSession('${s.id}')">Stop</button>`;
-    } else if (isVod && s.state === 'completed' && s.transcript_available) {
-      actionButtons = `<button class="btn-small btn-download" onclick="event.stopPropagation(); window.downloadTranscript('${s.id}')">Download</button>`;
-    }
+    const actionButtons = s.state === 'running'
+      ? `<button class="btn-small btn-danger" onclick="event.stopPropagation(); window.stopSession('${s.id}')">Stop</button>`
+      : '';
 
     return `
       <div class="session-card ${isSelected ? 'selected' : ''}" onclick="window.selectSession('${s.id}')">
         <div class="session-info">
-          <div class="session-title">${vodLabel}${liveLabel}${s.media_filename}</div>
+          <div class="session-title">${liveLabel}${s.media_filename}</div>
           <div class="session-meta">${s.model_name} | <span class="mode-badge">${modeLabel}</span>${sentenceLabel}${noiseLabel}${diarLabel} | ${durationDisplay}</div>
           <div class="session-progress">
             ${progressBar}
@@ -844,14 +815,6 @@ window.stopSession = async (sessionId) => {
     if (state.selectedSessionId === sessionId) {
       selectSession(null);
     }
-  }
-};
-
-window.downloadTranscript = async (sessionId) => {
-  try {
-    await sessionManager.downloadTranscript(sessionId);
-  } catch (e) {
-    alert('Failed to download transcript: ' + e.message);
   }
 };
 
@@ -991,21 +954,6 @@ async function connect(sessionId) {
     elements.connectionStatus.textContent = 'Connected';
     elements.connectionStatus.className = 'status connected';
     console.log('SRT stream reconnected');
-  });
-
-  // VoD progress events
-  webrtcClient.on('vodProgress', ({ totalChunks, completedChunks, currentChunk, percent }) => {
-    elements.bufferInfo.textContent = `VoD: Chunk ${completedChunks}/${totalChunks} (${Math.round(percent)}%)`;
-    console.log(`VoD progress: ${completedChunks}/${totalChunks} (${percent}%)`);
-    // Refresh sessions to update progress display
-    sessionManager.fetchSessions();
-  });
-
-  webrtcClient.on('vodComplete', ({ transcriptAvailable, durationSecs, segmentCount }) => {
-    elements.bufferInfo.textContent = `VoD complete: ${segmentCount} segments`;
-    console.log(`VoD complete: ${segmentCount} segments, ${durationSecs}s, transcript: ${transcriptAvailable}`);
-    // Refresh sessions to show download button
-    sessionManager.fetchSessions();
   });
 
   // Reset subtitle counter

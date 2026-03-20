@@ -41,8 +41,6 @@ pub enum SessionState {
     Starting,
     /// Session is actively transcribing
     Running,
-    /// Session is paused
-    Paused,
     /// Session has completed
     Completed,
     /// Session has stopped (manually or due to error)
@@ -54,7 +52,6 @@ impl SessionState {
         match self {
             SessionState::Starting => "starting",
             SessionState::Running => "running",
-            SessionState::Paused => "paused",
             SessionState::Completed => "completed",
             SessionState::Stopped => "stopped",
         }
@@ -107,20 +104,6 @@ pub struct SessionInfo {
     /// Whether this is an audio-only session (no transcription)
     #[serde(default)]
     pub without_transcription: bool,
-    /// Whether transcript is available for download (VoD mode)
-    #[serde(default)]
-    pub transcript_available: bool,
-    /// VoD progress information (only for VoD mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vod_progress: Option<VodProgressInfo>,
-}
-
-/// VoD progress information for API responses
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct VodProgressInfo {
-    pub total_chunks: usize,
-    pub completed_chunks: usize,
-    pub percent: f32,
 }
 
 fn default_sentence_completion() -> String {
@@ -185,10 +168,6 @@ pub struct TranscriptionSession {
     pub sentence_completion: String,
     /// Whether this is an audio-only session (no transcription)
     pub without_transcription: bool,
-    /// Path to transcript.json (VoD mode)
-    transcript_path: RwLock<Option<PathBuf>>,
-    /// VoD progress (VoD mode)
-    vod_progress: RwLock<Option<VodProgressInfo>>,
 }
 
 impl TranscriptionSession {
@@ -241,8 +220,6 @@ impl TranscriptionSession {
             srt_url: None,
             sentence_completion,
             without_transcription,
-            transcript_path: RwLock::new(None),
-            vod_progress: RwLock::new(None),
         }
     }
 
@@ -294,8 +271,6 @@ impl TranscriptionSession {
             srt_url: Some(srt_url),
             sentence_completion,
             without_transcription,
-            transcript_path: RwLock::new(None),
-            vod_progress: RwLock::new(None),
         }
     }
 
@@ -328,8 +303,6 @@ impl TranscriptionSession {
             srt_url: self.srt_url.clone(),
             sentence_completion: self.sentence_completion.clone(),
             without_transcription: self.without_transcription,
-            transcript_available: self.transcript_path.read().await.is_some(),
-            vod_progress: self.vod_progress.read().await.clone(),
         }
     }
 
@@ -406,34 +379,6 @@ impl TranscriptionSession {
         self.running.store(false, Ordering::SeqCst);
     }
 
-    /// Set transcript path (VoD mode)
-    pub async fn set_transcript_path(&self, path: PathBuf) {
-        *self.transcript_path.write().await = Some(path);
-    }
-
-    /// Get transcript path (VoD mode)
-    pub async fn transcript_path(&self) -> Option<PathBuf> {
-        self.transcript_path.read().await.clone()
-    }
-
-    /// Set VoD progress
-    pub async fn set_vod_progress(&self, total: usize, completed: usize) {
-        let percent = if total > 0 {
-            (completed as f32 / total as f32) * 100.0
-        } else {
-            0.0
-        };
-        *self.vod_progress.write().await = Some(VodProgressInfo {
-            total_chunks: total,
-            completed_chunks: completed,
-            percent,
-        });
-    }
-
-    /// Clear VoD progress
-    pub async fn clear_vod_progress(&self) {
-        *self.vod_progress.write().await = None;
-    }
 }
 
 /// Manager for transcription sessions

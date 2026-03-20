@@ -348,46 +348,6 @@ export class SessionManager {
     return `${protocol}//${host}/ws/${sessionId}`;
   }
 
-  /**
-   * Download transcript for a completed VoD session
-   * @param {string} sessionId - Session ID
-   * @returns {Promise<void>}
-   */
-  async downloadTranscript(sessionId) {
-    try {
-      const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/transcript`);
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({ error: 'Download failed' }));
-        throw new Error(json.error || 'Failed to download transcript');
-      }
-
-      // Get filename from Content-Disposition header or use default
-      const disposition = res.headers.get('Content-Disposition');
-      let filename = 'transcript.json';
-      if (disposition) {
-        const match = disposition.match(/filename="?([^"]+)"?/);
-        if (match) {
-          filename = match[1];
-        }
-      }
-
-      // Download the file
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-
-      this.emit('transcriptDownloaded', { sessionId, filename });
-    } catch (e) {
-      console.error('Failed to download transcript:', e);
-      throw e;
-    }
-  }
 }
 
 export function formatDuration(seconds) {
