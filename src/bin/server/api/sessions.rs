@@ -29,11 +29,6 @@ pub struct PauseConfig {
     #[serde(default = "default_max_segment_secs")]
     pub max_segment_secs: f32,
 
-    /// Context buffer in seconds for parallel modes (0.0-3.0, default: 0.0)
-    /// Higher values improve accuracy at segment boundaries but cause text overlap
-    #[serde(default = "default_context_buffer_secs")]
-    pub context_buffer_secs: f32,
-
     /// Number of previous segments to include as audio context (1-5, default: 1 = no context)
     /// For pause_segmented mode: higher values give the model more context but increase latency
     #[serde(default = "default_context_segments")]
@@ -52,10 +47,6 @@ fn default_max_segment_secs() -> f32 {
     5.0
 }
 
-fn default_context_buffer_secs() -> f32 {
-    0.0
-}
-
 fn default_context_segments() -> usize {
     1
 }
@@ -66,7 +57,6 @@ impl Default for PauseConfig {
             pause_threshold_ms: default_pause_threshold_ms(),
             silence_energy_threshold: default_silence_energy(),
             max_segment_secs: default_max_segment_secs(),
-            context_buffer_secs: default_context_buffer_secs(),
             context_segments: default_context_segments(),
         }
     }
@@ -151,12 +141,6 @@ pub struct CreateSessionRequest {
     /// Audio-only mode (no transcription, just stream audio via WebRTC)
     #[serde(default)]
     pub without_transcription: bool,
-    /// Enable text formatting on FINAL segments (filler removal, self-correction, etc.)
-    #[serde(default)]
-    pub enable_formatting: bool,
-    /// Formatting tone hint ("casual", "email", "technical", "formal", "subtitle")
-    #[serde(default)]
-    pub formatting_tone: Option<String>,
 }
 
 fn default_sentence_completion() -> String {
@@ -288,17 +272,6 @@ pub async fn create_session(
                 configs.insert(session.id.clone(), gs_config);
             }
 
-            // Store formatting config if enabled
-            // Formatting config (simplified — full formatter removed)
-            if req.enable_formatting {
-                let fmt_config = crate::state::FormattingConfig {
-                    enabled: true,
-                    tone: req.formatting_tone.clone().unwrap_or_else(|| "casual".to_string()),
-                    vocabulary: vec![],
-                };
-                state.formatting_configs.write().await.insert(session.id.clone(), fmt_config);
-            }
-
             // Store FAB config
             {
                 let fab_config = FabConfig {
@@ -378,12 +351,6 @@ pub async fn stop_session(
     // Clean up FAB config
     {
         let mut configs = state.fab_configs.write().await;
-        configs.remove(&id);
-    }
-
-    // Clean up formatting config
-    {
-        let mut configs = state.formatting_configs.write().await;
         configs.remove(&id);
     }
 

@@ -5,9 +5,8 @@
 //! - List available models for the frontend
 //! - Create transcriber instances on demand
 
-use crate::error::{Error, Result};
 use crate::execution::ModelConfig as ExecutionConfig;
-use crate::streaming_transcriber::{ModelInfo, StreamingTranscriber};
+use crate::streaming_transcriber::ModelInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -179,12 +178,6 @@ impl ModelRegistry {
             .collect()
     }
 
-    pub fn list_available_models(&self) -> Vec<ModelInfo> {
-        self.models
-            .values()
-            .map(|m| m.to_model_info())
-            .collect()
-    }
 
     /// Get model configuration by ID
     pub fn get_model(&self, model_id: &str) -> Option<&RegisteredModel> {
@@ -199,83 +192,6 @@ impl ModelRegistry {
             .unwrap_or(false)
     }
 
-    /// Create a transcriber instance for the given model
-    #[cfg(feature = "sortformer")]
-    pub fn create_transcriber(&self, model_id: &str) -> Result<Box<dyn StreamingTranscriber>> {
-        use crate::realtime_tdt::{RealtimeTDTConfig, RealtimeTDTDiarized};
-
-        let model = self.models.get(model_id).ok_or_else(|| {
-            Error::Model(format!("Unknown model: {}", model_id))
-        })?;
-
-        if !model.is_available {
-            return Err(Error::Model(format!(
-                "Model {} not available (path: {})",
-                model_id,
-                model.model_path.display()
-            )));
-        }
-
-        match model.model_type {
-            ModelType::ParakeetTdt => {
-                let diar_path = model.diarization_path.as_ref().ok_or_else(|| {
-                    Error::Model("Diarization model path not configured".to_string())
-                })?;
-
-                // Use speedy mode by default for good balance of latency and quality
-                let tdt_config = RealtimeTDTConfig {
-                    buffer_size_secs: 8.0,
-                    process_interval_secs: 0.2,
-                    confirm_threshold_secs: 0.4,
-                    pause_based_confirm: true,
-                    pause_threshold_secs: 0.35,
-                    silence_energy_threshold: 0.008,
-                    lookahead_mode: false,
-                    lookahead_segments: 2,
-                };
-
-                let transcriber = RealtimeTDTDiarized::new(
-                    &model.model_path,
-                    diar_path,
-                    Some(model.exec_config.clone()),
-                    Some(tdt_config),
-                )?;
-
-                Ok(Box::new(transcriber))
-            }
-            ModelType::Canary1B => {
-                use crate::realtime_canary::{RealtimeCanary, RealtimeCanaryConfig};
-
-                let canary_config = RealtimeCanaryConfig {
-                    buffer_size_secs: 10.0,
-                    min_audio_secs: 2.0,
-                    process_interval_secs: 2.0,
-                    language: "en".to_string(),
-                    pause_based_confirm: false,
-                    pause_threshold_secs: 0.6,
-                    silence_energy_threshold: 0.008,
-                    emit_full_text: false,
-                    min_stable_count: None,
-                };
-
-                let transcriber = RealtimeCanary::new(
-                    &model.model_path,
-                    Some(model.exec_config.clone()),
-                    Some(canary_config),
-                )?;
-
-                Ok(Box::new(transcriber))
-            }
-        }
-    }
-
-    /// Create a transcriber instance (stub for non-sortformer builds)
-    #[cfg(not(feature = "sortformer"))]
-    pub fn create_transcriber(&self, _model_id: &str) -> Result<Box<dyn StreamingTranscriber>> {
-        Err(Error::Model(
-            "Transcriber creation requires 'sortformer' feature".to_string()
-        ))
-    }
 }
 
 impl Default for ModelRegistry {

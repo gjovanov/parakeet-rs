@@ -148,7 +148,6 @@ mod tests {
             pause_threshold_ms: 800,
             silence_energy_threshold: 0.01,
             max_segment_secs: 10.0,
-            context_buffer_secs: 3.0,
             context_segments: 1,
         };
         let config = create_transcription_config("speedy", Some(&pause));

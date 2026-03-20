@@ -383,13 +383,13 @@ pub async fn handle_socket(socket: WebSocket, session_id: String, state: Arc<App
     cleanup_client(&state, &client_id, &session).await;
 }
 
-/// Handle incoming WebSocket messages (signaling + corrections)
+/// Handle incoming WebSocket messages (signaling)
 async fn handle_client_message(
     text: &str,
     peer_connection: &Arc<RTCPeerConnection>,
     ws_sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    state: &Arc<AppState>,
-    session_id: &str,
+    _state: &Arc<AppState>,
+    _session_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let msg: serde_json::Value = serde_json::from_str(text)?;
 
@@ -425,22 +425,10 @@ async fn handle_client_message(
                 peer_connection.add_ice_candidate(ice_candidate).await?;
             }
         }
-        Some("correction") => {
-            handle_correction_message(&msg, state, session_id).await;
-        }
         _ => {}
     }
 
     Ok(())
-}
-
-/// Handle a correction message from the client (stub — formatting removed)
-async fn handle_correction_message(
-    _msg: &serde_json::Value,
-    _state: &Arc<AppState>,
-    session_id: &str,
-) {
-    eprintln!("[Session {}] Correction received (formatting not available)", session_id);
 }
 
 /// Clean up client connection

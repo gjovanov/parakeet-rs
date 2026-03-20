@@ -52,10 +52,7 @@ pub fn run_audio_only_session(
         if is_srt { "SRT stream" } else { "file" }
     );
 
-    let duration_secs = match &audio_source {
-        AudioSource::File(_path) => 0.0,
-        AudioSource::Srt(_) => 0.0,
-    };
+    let duration_secs = 0.0_f32;
 
     // Create a dummy channel — immediately drop the receiver so audio_pipeline
     // silently discards samples (TrySendError::Disconnected is ignored)
@@ -128,10 +125,7 @@ pub fn run_session_transcription(
     );
 
     // Get duration using ffprobe (only for files)
-    let duration_secs = match &audio_source {
-        AudioSource::File(_path) => 0.0,
-        AudioSource::Srt(_) => 0.0,
-    };
+    let duration_secs = 0.0_f32;
 
     if !is_srt {
         eprintln!("[Session {}] Total duration: {:.2}s", session.id, duration_secs);

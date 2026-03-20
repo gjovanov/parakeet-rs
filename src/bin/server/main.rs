@@ -36,7 +36,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use config::{LatencyMode, RuntimeConfig};
+use config::RuntimeConfig;
 use srt_config::SrtConfig;
 use parakeet_rs::{MediaManager, MediaManagerConfig, ModelRegistry, SessionManager};
 use state::AppState;
@@ -102,12 +102,6 @@ struct Args {
     fab_send_type: String,
 }
 
-impl Args {
-    #[allow(dead_code)]
-    fn latency_mode(&self) -> LatencyMode {
-        LatencyMode::Speedy
-    }
-}
 
 #[cfg(not(feature = "sortformer"))]
 fn main() {
@@ -348,7 +342,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fab_url,
         fab_client,
         fab_configs: RwLock::new(HashMap::new()),
-        formatting_configs: RwLock::new(HashMap::new()),
     });
 
     // Build router

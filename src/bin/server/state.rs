@@ -19,15 +19,6 @@ pub struct FabConfig {
     pub send_type: String,
 }
 
-/// Per-session formatting configuration
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct FormattingConfig {
-    pub enabled: bool,
-    pub tone: String,
-    pub vocabulary: Vec<String>,
-}
-
 /// Client connection with WebRTC peer connection
 #[allow(dead_code)]
 pub struct ClientConnection {
@@ -79,6 +70,4 @@ pub struct AppState {
     pub fab_client: Option<reqwest::Client>,
     /// Per-session FAB configurations
     pub fab_configs: RwLock<HashMap<String, FabConfig>>,
-    /// Per-session formatting configurations
-    pub formatting_configs: RwLock<HashMap<String, FormattingConfig>>,
 }
