@@ -1,6 +1,6 @@
 //! Application state types for the WebRTC transcription server
 
-use crate::api::sessions::{GrowingSegmentsConfig, ParallelConfig, PauseConfig};
+use crate::api::sessions::{GrowingSegmentsConfig, PauseConfig};
 use crate::config::RuntimeConfig;
 use crate::srt_config::SrtConfig;
 use parakeet_rs::{SharedMediaManager, SharedModelRegistry, SharedSessionManager};
@@ -20,12 +20,12 @@ pub struct FabConfig {
 }
 
 /// Per-session formatting configuration
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FormattingConfig {
     pub enabled: bool,
     pub tone: String,
     pub vocabulary: Vec<String>,
-    pub app_hint: Option<String>,
 }
 
 /// Client connection with WebRTC peer connection
@@ -63,8 +63,6 @@ pub struct AppState {
     pub config: RuntimeConfig,
     /// Per-session audio tracks
     pub session_audio: RwLock<HashMap<String, SessionAudioState>>,
-    /// Per-session parallel configs (for parallel mode)
-    pub parallel_configs: RwLock<HashMap<String, ParallelConfig>>,
     /// Per-session pause configs (for pause-related modes)
     pub pause_configs: RwLock<HashMap<String, PauseConfig>>,
     /// Per-session growing segments configs

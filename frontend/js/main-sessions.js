@@ -17,7 +17,7 @@ const state = {
 };
 
 // Pause-related modes that show pause config
-const PAUSE_MODES = ['speedy', 'pause_based', 'lookahead', 'vad_speedy', 'vad_pause_based', 'pause_parallel', 'pause_segmented'];
+const PAUSE_MODES = ['speedy', 'pause_segmented'];
 
 // Map slider value (1-5) to actual silence_energy_threshold
 function getSilenceEnergyThreshold(sliderValue) {
@@ -131,13 +131,6 @@ function cacheElements() {
   elements.fileInput = document.getElementById('file-input');
   elements.mediaList = document.getElementById('media-list');
 
-  // Parallel config elements
-  elements.parallelConfig = document.getElementById('parallel-config');
-  elements.parallelThreads = document.getElementById('parallel-threads');
-  elements.parallelBuffer = document.getElementById('parallel-buffer');
-  elements.threadsValue = document.getElementById('threads-value');
-  elements.bufferValue = document.getElementById('buffer-value');
-
   // Noise cancellation and diarization elements
   elements.noiseSelect = document.getElementById('noise-select');
   elements.diarizationSelect = document.getElementById('diarization-select');
@@ -151,9 +144,6 @@ function cacheElements() {
   elements.pauseThresholdValue = document.getElementById('pause-threshold-value');
   elements.silenceEnergyValue = document.getElementById('silence-energy-value');
   elements.maxSegmentValue = document.getElementById('max-segment-value');
-  elements.contextBufferGroup = document.getElementById('context-buffer-group');
-  elements.contextBuffer = document.getElementById('context-buffer');
-  elements.contextBufferValue = document.getElementById('context-buffer-value');
 
   // Pause-segmented config elements
   elements.pauseSegmentedConfig = document.getElementById('pause-segmented-config');
@@ -188,15 +178,6 @@ function cacheElements() {
   elements.gsPromotionEnabled = document.getElementById('gs-promotion-enabled');
   elements.gsPromotionMinWords = document.getElementById('gs-promotion-min-words');
   elements.gsPromotionMinWordsValue = document.getElementById('gs-promotion-min-words-value');
-  elements.gsUseWordConfirmer = document.getElementById('gs-use-word-confirmer');
-  elements.gsWordConfirmThreshold = document.getElementById('gs-word-confirm-threshold');
-  elements.gsWordConfirmThresholdValue = document.getElementById('gs-word-confirm-threshold-value');
-
-  // Formatting config elements
-  elements.formattingEnabledSelect = document.getElementById('formatting-enabled-select');
-  elements.formattingToneGroup = document.getElementById('formatting-tone-group');
-  elements.formattingToneSelect = document.getElementById('formatting-tone-select');
-
   // FAB config elements
   elements.fabEnabledSelect = document.getElementById('fab-enabled-select');
   elements.fabUrlGroup = document.getElementById('fab-url-group');
@@ -279,7 +260,6 @@ function setupEventListeners() {
         elements.fabEnabledSelect?.closest('.form-group'),
         elements.fabUrlGroup,
         elements.fabSendTypeGroup,
-        elements.parallelConfig,
         elements.pauseConfig,
         elements.pauseSegmentedConfig,
         elements.growingSegmentsConfig,
@@ -291,23 +271,11 @@ function setupEventListeners() {
     });
   }
 
-  // Mode select - show/hide parallel config and pause config
+  // Mode select - show/hide mode-specific config panels
   if (elements.modeSelect) {
     elements.modeSelect.addEventListener('change', () => {
       const mode = elements.modeSelect.value;
-      const isParallelMode = mode === 'parallel' || mode === 'pause_parallel';
       const isPauseMode = PAUSE_MODES.includes(mode);
-      const isPauseParallel = mode === 'pause_parallel';
-
-      // Show/hide parallel config
-      if (elements.parallelConfig) {
-        elements.parallelConfig.style.display = isParallelMode ? 'block' : 'none';
-        // Hide buffer size for pause_parallel (not applicable)
-        const bufferRow = elements.parallelBuffer?.parentElement;
-        if (bufferRow) {
-          bufferRow.style.display = mode === 'parallel' ? 'flex' : 'none';
-        }
-      }
 
       // Show/hide pause config
       if (elements.pauseConfig) {
@@ -323,23 +291,6 @@ function setupEventListeners() {
       if (elements.growingSegmentsConfig) {
         elements.growingSegmentsConfig.style.display = mode === 'growing_segments' ? 'block' : 'none';
       }
-
-      // Show context buffer only for pause_parallel mode
-      if (elements.contextBufferGroup) {
-        elements.contextBufferGroup.style.display = isPauseParallel ? 'flex' : 'none';
-      }
-    });
-  }
-
-  // Parallel sliders - update displayed values
-  if (elements.parallelThreads) {
-    elements.parallelThreads.addEventListener('input', () => {
-      elements.threadsValue.textContent = elements.parallelThreads.value;
-    });
-  }
-  if (elements.parallelBuffer) {
-    elements.parallelBuffer.addEventListener('input', () => {
-      elements.bufferValue.textContent = elements.parallelBuffer.value;
     });
   }
 
@@ -360,12 +311,6 @@ function setupEventListeners() {
       elements.maxSegmentValue.textContent = elements.maxSegment.value;
     });
   }
-  if (elements.contextBuffer) {
-    elements.contextBuffer.addEventListener('input', () => {
-      elements.contextBufferValue.textContent = elements.contextBuffer.value;
-    });
-  }
-
   // Growing segments sliders - update displayed values
   if (elements.gsBufferSize) {
     elements.gsBufferSize.addEventListener('input', () => {
@@ -416,13 +361,6 @@ function setupEventListeners() {
     });
   }
 
-  // Word confirmer threshold slider
-  if (elements.gsWordConfirmThreshold) {
-    elements.gsWordConfirmThreshold.addEventListener('input', () => {
-      elements.gsWordConfirmThresholdValue.textContent = elements.gsWordConfirmThreshold.value;
-    });
-  }
-
   // Pause-segmented sliders
   if (elements.psContextSegments) {
     elements.psContextSegments.addEventListener('input', () => {
@@ -437,16 +375,6 @@ function setupEventListeners() {
   if (elements.psPartialInterval) {
     elements.psPartialInterval.addEventListener('input', () => {
       elements.psPartialIntervalValue.textContent = parseFloat(elements.psPartialInterval.value).toFixed(1);
-    });
-  }
-
-  // Formatting select - show/hide tone dropdown
-  if (elements.formattingEnabledSelect) {
-    elements.formattingEnabledSelect.addEventListener('change', () => {
-      const show = elements.formattingEnabledSelect.value === 'enabled';
-      if (elements.formattingToneGroup) {
-        elements.formattingToneGroup.style.display = show ? 'flex' : 'none';
-      }
     });
   }
 
@@ -500,19 +428,6 @@ function setupEventListeners() {
       return;
     }
 
-    // Get parallel config if in parallel or pause_parallel mode
-    let parallelConfig = null;
-    if ((mode === 'parallel' || mode === 'pause_parallel') && elements.parallelThreads) {
-      parallelConfig = {
-        num_threads: parseInt(elements.parallelThreads.value, 10),
-        buffer_size_secs: mode === 'parallel' ? parseInt(elements.parallelBuffer?.value || 6, 10) : 6
-      };
-    }
-
-    // Get formatting config
-    const enableFormatting = elements.formattingEnabledSelect?.value === 'enabled';
-    const formattingTone = elements.formattingToneSelect?.value || 'subtitle';
-
     // Get FAB config
     const fabEnabled = elements.fabEnabledSelect?.value || 'default';
     const fabUrl = elements.fabUrlInput?.value?.trim() || '';
@@ -525,7 +440,6 @@ function setupEventListeners() {
         pause_threshold_ms: parseInt(elements.pauseThreshold.value, 10),
         silence_energy_threshold: getSilenceEnergyThreshold(parseInt(elements.silenceEnergy?.value || 3, 10)),
         max_segment_secs: parseFloat(elements.maxSegment?.value || 5),
-        context_buffer_secs: parseFloat(elements.contextBuffer?.value || 0),
         context_segments: elements.psContextSegments ? parseInt(elements.psContextSegments.value, 10) : 1,
       };
     }
@@ -545,8 +459,6 @@ function setupEventListeners() {
         min_final_words: elements.gsMinFinalWords ? parseInt(elements.gsMinFinalWords.value, 10) : undefined,
         promotion_enabled: elements.gsPromotionEnabled?.value === 'false' ? false : undefined,
         promotion_min_words: elements.gsPromotionMinWords ? parseInt(elements.gsPromotionMinWords.value, 10) : undefined,
-        use_word_confirmer: elements.gsUseWordConfirmer?.value === 'true' ? true : undefined,
-        word_confirm_threshold: elements.gsWordConfirmThreshold ? parseInt(elements.gsWordConfirmThreshold.value, 10) : undefined,
       };
     }
 
@@ -558,14 +470,11 @@ function setupEventListeners() {
         srtChannelId,
         mode,
         language,
-        parallelConfig,
         noiseCancellation,
         diarization,
         pauseConfig,
         growingSegmentsConfig,
         sentenceCompletion,
-        enableFormatting,
-        formattingTone,
         fabEnabled,
         fabUrl,
         fabSendType,

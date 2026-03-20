@@ -67,7 +67,6 @@ rocm = []
 openvino = []
 webgpu = []
 sortformer = []
-voxtral = []
 rnnoise = []
 server = [
     "dep:clap",

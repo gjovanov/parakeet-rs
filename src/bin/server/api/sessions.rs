@@ -1,6 +1,7 @@
 //! API handlers for session management
 
 use super::models::ApiResponse;
+use axum::response::IntoResponse;
 use crate::config::LatencyMode;
 use crate::state::{AppState, FabConfig, SessionAudioState};
 use crate::transcription::{run_session_transcription, AudioSource};
@@ -12,34 +13,6 @@ use std::sync::Arc;
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
-
-/// Configuration for parallel sliding window mode
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParallelConfig {
-    /// Number of worker threads (default: 8)
-    #[serde(default = "default_num_threads")]
-    pub num_threads: usize,
-    /// Buffer size in seconds (default: 6)
-    #[serde(default = "default_buffer_size")]
-    pub buffer_size_secs: usize,
-}
-
-fn default_num_threads() -> usize {
-    8
-}
-
-fn default_buffer_size() -> usize {
-    6
-}
-
-impl Default for ParallelConfig {
-    fn default() -> Self {
-        Self {
-            num_threads: 8,
-            buffer_size_secs: 6,
-        }
-    }
-}
 
 /// Configuration for pause detection parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,13 +106,6 @@ pub struct GrowingSegmentsConfig {
     /// Minimum words for promoted FINALs (default: 8)
     #[serde(default)]
     pub promotion_min_words: Option<usize>,
-    /// Use word-level confirmation (consensus across passes) instead of sentence-level merger.
-    /// When true, individual words are confirmed after K stable passes before entering transcript.
-    #[serde(default)]
-    pub use_word_confirmer: Option<bool>,
-    /// Word confirmer: passes before confirmation (default: 3)
-    #[serde(default)]
-    pub word_confirm_threshold: Option<u32>,
 }
 
 /// Request to create a new session
@@ -158,9 +124,6 @@ pub struct CreateSessionRequest {
     /// Language code for transcription (default: "de" for German)
     #[serde(default = "default_language")]
     pub language: String,
-    /// Configuration for parallel mode (only used when mode is "parallel")
-    #[serde(default)]
-    pub parallel_config: Option<ParallelConfig>,
     /// Noise cancellation type ("none", "rnnoise", "deepfilternet3")
     #[serde(default = "default_noise_cancellation")]
     pub noise_cancellation: String,
@@ -194,9 +157,6 @@ pub struct CreateSessionRequest {
     /// Formatting tone hint ("casual", "email", "technical", "formal", "subtitle")
     #[serde(default)]
     pub formatting_tone: Option<String>,
-    /// User context for personalized formatting (vocabulary, app_hint)
-    #[serde(default)]
-    pub user_context: Option<parakeet_rs::UserContextRequest>,
 }
 
 fn default_sentence_completion() -> String {
@@ -209,57 +169,6 @@ fn default_language() -> String {
 
 fn default_noise_cancellation() -> String {
     "none".to_string()
-}
-
-/// Get max parallel threads based on available memory or env override
-/// Each parallel thread loads a model instance (~2GB each)
-fn get_max_parallel_threads() -> usize {
-    // Check for env override first
-    if let Some(max) = std::env::var("MAX_PARALLEL_THREADS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-    {
-        return max;
-    }
-
-    // Auto-detect based on available system memory
-    // Reserve ~4GB for system + base process, allocate ~2.5GB per thread
-    let available_gb = get_available_memory_gb();
-    let usable_gb = (available_gb - 4.0).max(0.0);
-    let memory_based_threads = (usable_gb / 2.5).floor() as usize;
-
-    // Also consider CPU cores (no point having more threads than cores)
-    let cpu_cores = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
-
-    // Use the minimum of memory-based and CPU-based limits, with min 1 and max 8
-    let max_threads = memory_based_threads.min(cpu_cores).max(1).min(8);
-
-    eprintln!(
-        "[Config] Auto-detected max parallel threads: {} (available RAM: {:.1}GB, CPUs: {})",
-        max_threads, available_gb, cpu_cores
-    );
-
-    max_threads
-}
-
-/// Get available system memory in GB
-fn get_available_memory_gb() -> f64 {
-    // Try to read from /proc/meminfo
-    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
-        for line in content.lines() {
-            if line.starts_with("MemAvailable:") {
-                if let Some(kb_str) = line.split_whitespace().nth(1) {
-                    if let Ok(kb) = kb_str.parse::<u64>() {
-                        return kb as f64 / 1024.0 / 1024.0;
-                    }
-                }
-            }
-        }
-    }
-    // Fallback: assume 16GB available
-    16.0
 }
 
 /// List all sessions
@@ -367,20 +276,6 @@ pub async fn create_session(
         Ok(session) => {
             let info = session.info().await;
 
-            // Store parallel config if provided, with thread cap to prevent OOM
-            if let Some(mut parallel_config) = req.parallel_config {
-                let max_threads = get_max_parallel_threads();
-                if parallel_config.num_threads > max_threads {
-                    eprintln!(
-                        "[Session {}] Capping parallel threads from {} to {} (OOM protection)",
-                        session.id, parallel_config.num_threads, max_threads
-                    );
-                    parallel_config.num_threads = max_threads;
-                }
-                let mut configs = state.parallel_configs.write().await;
-                configs.insert(session.id.clone(), parallel_config);
-            }
-
             // Store pause config if provided
             if let Some(pause_config) = req.pause_config {
                 let mut configs = state.pause_configs.write().await;
@@ -394,15 +289,12 @@ pub async fn create_session(
             }
 
             // Store formatting config if enabled
+            // Formatting config (simplified — full formatter removed)
             if req.enable_formatting {
                 let fmt_config = crate::state::FormattingConfig {
                     enabled: true,
                     tone: req.formatting_tone.clone().unwrap_or_else(|| "casual".to_string()),
-                    vocabulary: req.user_context.as_ref()
-                        .and_then(|uc| uc.vocabulary.clone())
-                        .unwrap_or_default(),
-                    app_hint: req.user_context.as_ref()
-                        .and_then(|uc| uc.app_hint.clone()),
+                    vocabulary: vec![],
                 };
                 state.formatting_configs.write().await.insert(session.id.clone(), fmt_config);
             }
@@ -415,7 +307,7 @@ pub async fn create_session(
                         Some("disabled") => false,
                         _ => state.fab_enabled,
                     },
-                    url: req.fab_url.filter(|u| !u.is_empty()),
+                    url: req.fab_url.filter(|u: &String| !u.is_empty()),
                     send_type: match req.fab_send_type.as_deref() {
                         Some("growing") => "growing".to_string(),
                         Some("confirmed") => "confirmed".to_string(),
@@ -471,12 +363,6 @@ pub async fn stop_session(
         }
     }
 
-    // Clean up parallel config
-    {
-        let mut configs = state.parallel_configs.write().await;
-        configs.remove(&id);
-    }
-
     // Clean up pause config
     {
         let mut configs = state.pause_configs.write().await;
@@ -508,6 +394,7 @@ pub async fn stop_session(
 }
 
 /// Query parameters for transcript endpoint
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Default)]
 pub struct TranscriptQuery {
     /// Output format: "json" (default) or "srt"
@@ -517,108 +404,12 @@ pub struct TranscriptQuery {
 
 /// Get transcript for a completed VoD session
 pub async fn get_transcript(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(query): Query<TranscriptQuery>,
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+    Query(_query): Query<TranscriptQuery>,
 ) -> axum::response::Response {
-    use axum::http::{header, StatusCode};
-    use axum::response::IntoResponse;
-
-    // Get the session
-    let session = match state.session_manager.get_session(&id).await {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::<()>::error("Session not found")),
-            )
-                .into_response();
-        }
-    };
-
-    // Check if transcript is available
-    let transcript_path = match session.transcript_path().await {
-        Some(path) => path,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::<()>::error("Transcript not available")),
-            )
-                .into_response();
-        }
-    };
-
-    // Read the transcript file
-    let content = match tokio::fs::read_to_string(&transcript_path).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "[Session {}] Failed to read transcript: {}",
-                id, e
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::<()>::error("Failed to read transcript")),
-            )
-                .into_response();
-        }
-    };
-
-    let want_srt = query.format.as_deref() == Some("srt");
-
-    if want_srt {
-        // Parse JSON transcript and convert to SRT
-        match serde_json::from_str::<parakeet_rs::VodTranscript>(&content) {
-            Ok(transcript) => {
-                let srt_content = transcript.to_srt();
-                let filename = format!("transcript_{}.srt", id);
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            &format!("attachment; filename=\"{}\"", filename),
-                        ),
-                    ],
-                    srt_content,
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                eprintln!(
-                    "[Session {}] Failed to parse transcript for SRT conversion: {}",
-                    id, e
-                );
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::<()>::error("Failed to convert transcript to SRT")),
-                )
-                    .into_response()
-            }
-        }
-    } else {
-        // Return JSON as-is
-        let filename = transcript_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("transcript.json");
-
-        (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (
-                    header::CONTENT_DISPOSITION,
-                    &format!("attachment; filename=\"{}\"", filename),
-                ),
-            ],
-            content,
-        )
-            .into_response()
-    }
+    (axum::http::StatusCode::NOT_IMPLEMENTED, "VoD transcript not available").into_response()
 }
-
 /// Start a session
 pub async fn start_session(
     State(state): State<Arc<AppState>>,
@@ -697,12 +488,6 @@ pub async fn start_session(
         None => return Json(ApiResponse::error("Model not found")),
     };
 
-    // Get parallel config if any
-    let parallel_config = {
-        let configs = state.parallel_configs.read().await;
-        configs.get(&id).cloned()
-    };
-
     // Get pause config if any
     let pause_config = {
         let configs = state.pause_configs.read().await;
@@ -719,8 +504,8 @@ pub async fn start_session(
     session.start();
     session.set_state(SessionState::Running).await;
 
-    // Spawn FAB forwarder if enabled (skip VoD batch mode)
-    if session.mode != "vod" {
+    // Spawn FAB forwarder if enabled
+    {
         let fab_config = state.fab_configs.read().await.get(&id).cloned();
         let should_run = fab_config.as_ref().map(|c| c.enabled).unwrap_or(state.fab_enabled);
         if should_run {
@@ -750,15 +535,6 @@ pub async fn start_session(
     let language = session.language.clone();
     let sentence_completion = session.sentence_completion.clone();
 
-    // Get formatting config if any
-    let (enable_formatting, formatting_tone, formatting_vocabulary) = {
-        let configs = state.formatting_configs.read().await;
-        match configs.get(&id) {
-            Some(cfg) if cfg.enabled => (true, cfg.tone.clone(), cfg.vocabulary.clone()),
-            _ => (false, "casual".to_string(), vec![]),
-        }
-    };
-
     // Determine audio source type
     let audio_source = if let Some(srt_url) = &session.srt_url {
         AudioSource::Srt(srt_url.clone())
@@ -778,13 +554,9 @@ pub async fn start_session(
             model_id,
             language,
             ffmpeg_pid,
-            parallel_config,
             pause_config,
             growing_segments_config,
             sentence_completion,
-            enable_formatting,
-            formatting_tone,
-            formatting_vocabulary,
         );
     });
 

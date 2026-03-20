@@ -69,17 +69,9 @@ struct Args {
     #[arg(long, env = "CANARY_MODEL_PATH", default_value = "./canary")]
     canary_model: String,
 
-    /// Path to Canary 180M Flash model directory (faster, smaller variant)
-    #[arg(long, env = "CANARY_FLASH_MODEL_PATH")]
-    canary_flash_model: Option<String>,
-
     /// Path to diarization model (ONNX)
     #[arg(long, env = "DIAR_MODEL_PATH", default_value = "diar_streaming_sortformer_4spk-v2.onnx")]
     diar_model: String,
-
-    /// Path to Silero VAD model (ONNX)
-    #[arg(long, env = "VAD_MODEL_PATH", default_value = "silero_vad.onnx")]
-    vad_model: String,
 
     /// Path to frontend directory
     #[arg(long, env = "FRONTEND_PATH", default_value = "./frontend")]
@@ -97,31 +89,6 @@ struct Args {
     #[arg(long, env = "MAX_CONCURRENT_SESSIONS", default_value = "10")]
     max_sessions: usize,
 
-    // Latency mode flags (mutually exclusive)
-    /// Speedy mode: Best balance of latency and quality (~0.3-1.5s latency)
-    #[arg(long, env = "SPEEDY_MODE")]
-    speedy: bool,
-
-    /// Pause-based mode: Better accuracy, slightly higher latency (~0.5-2.0s)
-    #[arg(long)]
-    pause_based: bool,
-
-    /// Low-latency mode: Fixed latency without pause detection (~3.5s)
-    #[arg(long)]
-    low_latency: bool,
-
-    /// Ultra-low-latency mode: Faster response (~2.5s)
-    #[arg(long)]
-    ultra_low_latency: bool,
-
-    /// Extreme-low-latency mode: Fastest possible (~1.3s)
-    #[arg(long)]
-    extreme_low_latency: bool,
-
-    /// Lookahead mode: Best quality with future context (~1.0-3.0s)
-    #[arg(long)]
-    lookahead: bool,
-
     /// FAB live transcription endpoint URL
     #[arg(long, env = "FAB_URL")]
     fab_url: Option<String>,
@@ -138,20 +105,7 @@ struct Args {
 impl Args {
     #[allow(dead_code)]
     fn latency_mode(&self) -> LatencyMode {
-        if self.lookahead {
-            LatencyMode::Lookahead
-        } else if self.extreme_low_latency {
-            LatencyMode::ExtremeLowLatency
-        } else if self.ultra_low_latency {
-            LatencyMode::UltraLowLatency
-        } else if self.low_latency {
-            LatencyMode::LowLatency
-        } else if self.pause_based {
-            LatencyMode::PauseBased
-        } else {
-            // Default to speedy
-            LatencyMode::Speedy
-        }
+        LatencyMode::Speedy
     }
 }
 
@@ -215,11 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Port: {}", args.port);
     eprintln!("TDT Model: {}", args.tdt_model);
     eprintln!("Canary Model: {}", args.canary_model);
-    if let Some(ref path) = args.canary_flash_model {
-        eprintln!("Canary Flash Model: {}", path);
-    }
     eprintln!("Diarization Model: {}", args.diar_model);
-    eprintln!("VAD Model: {}", args.vad_model);
     eprintln!("Media Directory: {}", args.media_dir.display());
     eprintln!("Max Sessions: {}", args.max_sessions);
     eprintln!("Frontend: {}", args.frontend.display());
@@ -232,11 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set environment variables for model registry
     std::env::set_var("TDT_MODEL_PATH", &args.tdt_model);
     std::env::set_var("CANARY_MODEL_PATH", &args.canary_model);
-    if let Some(ref path) = args.canary_flash_model {
-        std::env::set_var("CANARY_FLASH_MODEL_PATH", path);
-    }
     std::env::set_var("DIAR_MODEL_PATH", &args.diar_model);
-    std::env::set_var("VAD_MODEL_PATH", &args.vad_model);
     std::env::set_var("MEDIA_DIR", &args.media_dir);
     std::env::set_var("MAX_CONCURRENT_SESSIONS", args.max_sessions.to_string());
 
@@ -394,7 +340,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_count: AtomicU64::new(0),
         config: runtime_config,
         session_audio: RwLock::new(HashMap::new()),
-        parallel_configs: RwLock::new(HashMap::new()),
         pause_configs: RwLock::new(HashMap::new()),
         growing_segments_configs: RwLock::new(HashMap::new()),
         srt_config,

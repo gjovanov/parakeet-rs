@@ -53,67 +53,7 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
         ModeInfo {
             id: "speedy",
             name: "Speedy (~0.3-1.5s)",
-            description: "Best balance of latency and quality. Uses pause detection.",
-        },
-        ModeInfo {
-            id: "pause_based",
-            name: "Pause-Based (~0.5-2.0s)",
-            description: "Better accuracy with pause detection, slightly higher latency.",
-        },
-        ModeInfo {
-            id: "low_latency",
-            name: "Low Latency (~3.5s)",
-            description: "Fixed latency without pause detection. Predictable timing.",
-        },
-        ModeInfo {
-            id: "ultra_low_latency",
-            name: "Ultra-Low Latency (~2.5s)",
-            description: "Faster response time for interactive applications.",
-        },
-        ModeInfo {
-            id: "extreme_low_latency",
-            name: "Extreme-Low Latency (~1.3s)",
-            description: "Fastest possible response. May sacrifice accuracy.",
-        },
-        ModeInfo {
-            id: "lookahead",
-            name: "Lookahead (~1.0-3.0s)",
-            description: "Best quality with future context. Ideal for high accuracy.",
-        },
-        ModeInfo {
-            id: "vad_speedy",
-            name: "VAD Speedy (~0.3s pause)",
-            description: "Silero VAD triggered. Transcribes complete utterances after short pauses.",
-        },
-        ModeInfo {
-            id: "vad_pause_based",
-            name: "VAD Pause-Based (~0.7s pause)",
-            description: "Silero VAD triggered. More accurate with longer pause detection.",
-        },
-        ModeInfo {
-            id: "vad_sliding_window",
-            name: "VAD Sliding Window (5 seg / 10s)",
-            description: "Sliding window VAD. Buffers 5 segments or 10s, transcribes with context overlap for better accuracy.",
-        },
-        ModeInfo {
-            id: "asr",
-            name: "ASR (Pure streaming)",
-            description: "Pure streaming ASR without VAD. Processes audio continuously with sliding window.",
-        },
-        ModeInfo {
-            id: "parallel",
-            name: "Parallel Sliding Window",
-            description: "Multi-threaded parallel inference with sliding window. Uses 8 threads for Canary, 4 for TDT. Works with both models.",
-        },
-        ModeInfo {
-            id: "pause_parallel",
-            name: "Pause-Parallel (ordered)",
-            description: "Pause-triggered parallel inference. Dispatches on speech pauses for natural boundaries. Ordered output. Works with both models.",
-        },
-        ModeInfo {
-            id: "vod",
-            name: "VoD Batch (10-min chunks)",
-            description: "Batch transcription for pre-recorded files. Processes in 10-minute chunks with overlap and deduplication. Generates downloadable transcript.json.",
+            description: "Best balance of latency and quality. Uses pause detection for word confirmation.",
         },
         ModeInfo {
             id: "growing_segments",
@@ -126,12 +66,6 @@ pub async fn list_modes() -> Json<ApiResponse<Vec<ModeInfo>>> {
             name: "Pause-Segmented (1 chunk per pause)",
             description: "Segments audio by acoustic pauses, transcribes each speech chunk exactly once. \
                           Precise timestamps, no echo dedup. Each FINAL = one speech segment.",
-        },
-        ModeInfo {
-            id: "voxtral_streaming",
-            name: "Voxtral Streaming (~480ms latency)",
-            description: "True real-time streaming with Voxtral 4B. Audio processed incrementally via \
-                          encoder KV cache. Text appears ~480ms after speech. Requires Voxtral model.",
         },
     ];
     Json(ApiResponse::success(modes))

@@ -62,7 +62,6 @@ ARGS=(
     --tdt-model "${TDT_MODEL_PATH:-./tdt}"
     --canary-model "${CANARY_MODEL_PATH:-./canary}"
     --diar-model "${DIAR_MODEL_PATH:-./diar_streaming_sortformer_4spk-v2.onnx}"
-    --vad-model "${VAD_MODEL_PATH:-./silero_vad.onnx}"
     --frontend "${FRONTEND_PATH:-./frontend}"
     --media-dir "${MEDIA_DIR:-./media}"
     --max-sessions "$MAX_CONCURRENT_SESSIONS"
@@ -74,10 +73,6 @@ fi
 
 if [ -n "$FAB_URL" ]; then
     ARGS+=(--fab-url "$FAB_URL")
-fi
-
-if [ "${SPEEDY_MODE:-true}" = "true" ]; then
-    ARGS+=(--speedy)
 fi
 
 echo "Starting parakeet-rs ($MODE_LABEL) on port $PORT..."

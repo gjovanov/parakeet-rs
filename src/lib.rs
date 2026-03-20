@@ -1,52 +1,19 @@
 //! # parakeet-rs
 //!
-//! Rust bindings for NVIDIA's Parakeet speech recognition model using ONNX Runtime.
+//! Rust ASR server supporting Parakeet TDT and Canary 1B models via ONNX Runtime.
 //!
-//! Parakeet is a state-of-the-art automatic speech recognition (ASR) model developed by NVIDIA,
-//! based on the FastConformer-TDT architecture with 600 million parameters.
+//! ## Supported Models
+//! - **Parakeet TDT** (0.6B) — English, CTC/TDT architecture
+//! - **Canary 1B** — Multilingual (en, de, fr, es), encoder-decoder
 //!
-//! ## Features
-//!
-//! - Easy-to-use API for speech-to-text transcription
-//! - Support for ONNX format models
-//! - 16kHz mono audio input
-//! - Punctuation and capitalization included in output
-//! - Fast inference using ONNX Runtime
-//!
-//! ## Quick Start
-//!
-//! ```ignore
-//! use parakeet_rs::Parakeet;
-//!
-//! // Load the model
-//! let parakeet = Parakeet::from_pretrained(".")?;
-//!
-//! // Transcribe audio file
-//! let text = parakeet.transcribe_file("audio.wav")?;
-//! println!("Transcription: {}", text);
-//! ```
-//!
-//! ## Model Requirements
-//!
-//! Your model directory should contain:
-//! - `model.onnx` - The ONNX model file
-//! - `model.onnx_data` - External model weights
-//! - `config.json` - Model configuration
-//! - `preprocessor_config.json` - Audio preprocessing configuration
-//! - `tokenizer.json` - Tokenizer vocabulary
-//! - `tokenizer_config.json` - Tokenizer configuration
-//!
-//! ## Audio Requirements
-//!
-//! - Format: WAV
-//! - Sample Rate: 16kHz
-//! - Channels: Mono (stereo will be converted automatically)
-//! - Bit Depth: 16-bit PCM or 32-bit float
+//! ## Supported Modes
+//! - **speedy** — Low-latency sliding buffer, real-time feedback
+//! - **growing_segments** — Live subtitles, word-by-word PARTIAL → FINAL
+//! - **pause_segmented** — Acoustic pause detection, one transcription per pause, precise timestamps
 
+// Core modules
 mod audio;
 pub mod canary;
-pub mod canary_flash;
-pub mod canary_qwen;
 mod config;
 mod decoder;
 mod decoder_tdt;
@@ -59,6 +26,11 @@ mod parakeet;
 mod parakeet_eou;
 pub mod parakeet_eou_fast;
 mod parakeet_tdt;
+mod timestamps;
+mod transcriber;
+mod vocab;
+
+// Streaming/realtime modules
 #[cfg(feature = "sortformer")]
 pub mod sortformer;
 #[cfg(feature = "sortformer")]
@@ -66,55 +38,30 @@ pub mod sortformer_stream;
 #[cfg(feature = "sortformer")]
 pub mod realtime;
 pub mod realtime_canary;
-pub mod realtime_canary_flash;
-pub mod realtime_canary_qwen;
-pub mod realtime_canary_qwen_vad;
 pub mod realtime_tdt;
-pub mod parallel_canary;
-pub mod parallel_canary_qwen;
-pub mod pause_parallel_canary;
-pub mod pause_parallel_canary_qwen;
-pub mod parallel_tdt;
-pub mod pause_parallel_tdt;
+
+// Transcription modes
 pub mod streaming_transcriber;
+pub mod pause_segmented;
+pub mod pause_segmented_tdt;
+pub mod growing_text;
+pub mod sentence_buffer;
+
+// Infrastructure
 pub mod model_registry;
 pub mod media_manager;
 pub mod session;
 pub mod vad;
-pub mod realtime_canary_vad;
-#[cfg(feature = "sortformer")]
-pub mod realtime_tdt_vad;
 pub mod noise_cancellation;
-pub mod sentence_buffer;
-pub mod growing_text;
-pub mod word_confirmer;
-pub mod pause_segmented;
-pub mod pause_segmented_tdt;
-pub mod pause_segmented_canary_qwen;
-#[cfg(feature = "voxtral")]
-pub mod pause_segmented_voxtral;
-#[cfg(feature = "voxtral")]
-pub mod voxtral;
-#[cfg(feature = "voxtral")]
-pub mod voxtral_streaming;
 pub mod german_normalizer;
-pub mod vod_transcriber;
-pub mod text_formatter;
-pub mod formatting_transcriber;
-pub mod user_context;
-pub mod language_detector;
-mod timestamps;
-mod transcriber;
-mod vocab;
 
+// Core exports
 pub use error::{Error, Result};
 pub use execution::{
     ExecutionProvider, GpuOptimizationLevel, ModelConfig as ExecutionConfig, ModelRole,
 };
 
 /// Initialize ONNX Runtime. Required when using the `load-dynamic` feature.
-/// This must be called before any model loading operations.
-/// Safe to call multiple times - subsequent calls are no-ops.
 pub fn init_ort() -> Result<()> {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -136,13 +83,13 @@ pub fn init_ort() -> Result<()> {
     }
     Ok(())
 }
+
+// Parakeet TDT exports
 pub use parakeet::Parakeet;
 pub use parakeet_tdt::ParakeetTDT;
 pub use timestamps::TimestampMode;
 pub use transcriber::*;
-
 pub use config::{ModelConfig as ModelConfigJson, PreprocessorConfig};
-
 pub use decoder::{ParakeetDecoder, TimedToken, TranscriptionResult};
 pub use model::ParakeetModel;
 pub use model_eou::ParakeetEOUModel;
@@ -151,56 +98,44 @@ pub use parakeet_eou_fast::{
     ParakeetEOUFast, StreamingConfig, StreamingResult, RECOMMENDED_CHUNK_MS,
     RECOMMENDED_CHUNK_SAMPLES,
 };
+pub use realtime_tdt::{ChunkResult, RealtimeTDT, RealtimeTDTConfig, Segment};
+#[cfg(feature = "sortformer")]
+pub use realtime_tdt::{DiarizedChunkResult, DiarizedSegment, RealtimeTDTDiarized};
 
+// Canary 1B exports
+pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};
+pub use realtime_canary::{CanaryChunkResult, RealtimeCanary, RealtimeCanaryConfig};
+
+// Sortformer/diarization exports
 #[cfg(feature = "sortformer")]
 pub use sortformer_stream::{SortformerStream, SortformerStreamBuilder, SpeakerPrediction, SpeakerState};
-
 #[cfg(feature = "sortformer")]
 pub use realtime::{
     RealtimeCallback, RealtimeConfig, RealtimeResult, RealtimeTranscriber,
     SimplifiedRealtimeTranscriber, Speaker, SpeakerUpdate,
 };
 
-pub use realtime_tdt::{ChunkResult, RealtimeTDT, RealtimeTDTConfig, Segment};
-
-#[cfg(feature = "sortformer")]
-pub use realtime_tdt::{DiarizedChunkResult, DiarizedSegment, RealtimeTDTDiarized};
-
+// Streaming transcriber exports
 pub use streaming_transcriber::{
     ModelInfo, StreamingChunkResult, StreamingTranscriber, TranscriptionSegment, TranscriberFactory,
 };
 
+// Model registry exports
 pub use model_registry::{ModelRegistry, ModelType, RegisteredModel, SharedModelRegistry};
 
+// Media manager exports
 pub use media_manager::{
     MediaFile, MediaFormat, MediaManager, MediaManagerConfig, SharedMediaManager,
 };
 
+// Session exports
 pub use session::{
     MediaSourceType, SessionInfo, SessionManager, SessionState, SharedSessionManager,
     TranscriptionSession, VodProgressInfo,
 };
 
-pub use canary::{CanaryConfig, CanaryModel, CanaryTokenizer};
-pub use canary_flash::{CanaryFlashConfig, CanaryFlashModel, DecoderKVCache};
-pub use canary_qwen::{CanaryQwenConfig, CanaryQwenModel, QwenTokenizer, QwenKVCache};
-pub use realtime_canary::{CanaryChunkResult, RealtimeCanary, RealtimeCanaryConfig};
-pub use realtime_canary_flash::{CanaryFlashChunkResult, RealtimeCanaryFlash, RealtimeCanaryFlashConfig};
-pub use realtime_canary_qwen::{CanaryQwenChunkResult, RealtimeCanaryQwen, RealtimeCanaryQwenConfig};
-pub use realtime_canary_qwen_vad::{CanaryQwenVadResult, RealtimeCanaryQwenVad, RealtimeCanaryQwenVadConfig};
-pub use parallel_canary::{ParallelCanary, ParallelCanaryConfig};
-pub use parallel_canary_qwen::{ParallelCanaryQwen, ParallelCanaryQwenConfig};
-pub use pause_parallel_canary::{PauseParallelCanary, PauseParallelConfig};
-pub use pause_parallel_canary_qwen::{PauseParallelCanaryQwen, PauseParallelCanaryQwenConfig};
-pub use parallel_tdt::{ParallelTDT, ParallelTDTConfig};
-pub use pause_parallel_tdt::{PauseParallelTDT, PauseParallelTDTConfig};
-
 // VAD exports
 pub use vad::{SileroVad, VadConfig, VadSegment, VadSegmenter, VadState, VAD_CHUNK_SIZE, VAD_SAMPLE_RATE};
-pub use realtime_canary_vad::{CanaryVadResult, RealtimeCanaryVad, RealtimeCanaryVadConfig};
-
-#[cfg(feature = "sortformer")]
-pub use realtime_tdt_vad::{RealtimeTdtVad, RealtimeTdtVadConfig, TdtVadResult};
 
 // Sentence buffer exports
 pub use sentence_buffer::{SentenceBuffer, SentenceBufferConfig, SentenceBufferMode};
@@ -213,25 +148,11 @@ pub use growing_text::{
 // German normalizer exports
 pub use german_normalizer::{GermanTextNormalizer, normalize_german};
 
-// VoD transcriber exports
-pub use vod_transcriber::{
-    format_srt_time, SegmentCallback, VodConfig, VodProgress, VodSegment, VodTranscript,
-    VodTranscriberCanary, VodTranscriberCanaryQwen, VodTranscriberTDT, VodWord,
-};
-
 // Noise cancellation exports
 pub use noise_cancellation::{
     create_noise_canceller, NoiseCancellationType, NoiseCanceller, RNNoiseProcessor,
 };
 
-// Text formatting exports
-pub use text_formatter::{FormattingContext, FormattingTone, LlmFormatter, RuleBasedFormatter, TextFormatter};
-pub use formatting_transcriber::FormattingTranscriber;
-pub use user_context::{UserContext, UserContextRequest, CorrectionMessage};
-
-// Language detection exports
-pub use language_detector::{
-    LanguageDetection, LanguageDetector, LanguageRouter,
-    SimpleLanguageDetector, SileroLangDetector,
-};
-
+// Pause segmented exports
+pub use pause_segmented::{PauseSegmentedCanary, PauseSegmentedConfig};
+pub use pause_segmented_tdt::PauseSegmentedTDT;

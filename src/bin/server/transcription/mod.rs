@@ -4,9 +4,8 @@ mod audio_pipeline;
 mod configs;
 mod emitters;
 mod factory;
-mod vod;
 
-use crate::api::sessions::{GrowingSegmentsConfig, ParallelConfig, PauseConfig};
+use crate::api::sessions::{GrowingSegmentsConfig, PauseConfig};
 use parakeet_rs::growing_text::GrowingTextMerger;
 use parakeet_rs::{SessionState, TranscriptionSession};
 use std::path::PathBuf;
@@ -54,7 +53,7 @@ pub fn run_audio_only_session(
     );
 
     let duration_secs = match &audio_source {
-        AudioSource::File(path) => vod::get_audio_duration(path).unwrap_or(0.0),
+        AudioSource::File(_path) => 0.0,
         AudioSource::Srt(_) => 0.0,
     };
 
@@ -113,28 +112,11 @@ pub fn run_session_transcription(
     model_id: String,
     language: String,
     ffmpeg_pid: Arc<AtomicU32>,
-    parallel_config: Option<ParallelConfig>,
     pause_config: Option<PauseConfig>,
     growing_segments_config: Option<GrowingSegmentsConfig>,
     sentence_completion: String,
-    enable_formatting: bool,
-    formatting_tone: String,
-    formatting_vocabulary: Vec<String>,
 ) {
     use std::sync::mpsc as std_mpsc;
-
-    // Check if this is VoD mode - handle separately
-    if session.mode == "vod" {
-        vod::run_vod_transcription(
-            session,
-            audio_source,
-            model_path,
-            exec_config,
-            model_id,
-            language,
-        );
-        return;
-    }
 
     let is_srt = audio_source.is_srt();
 
@@ -147,7 +129,7 @@ pub fn run_session_transcription(
 
     // Get duration using ffprobe (only for files)
     let duration_secs = match &audio_source {
-        AudioSource::File(path) => vod::get_audio_duration(path).unwrap_or(0.0),
+        AudioSource::File(_path) => 0.0,
         AudioSource::Srt(_) => 0.0,
     };
 
@@ -157,10 +139,7 @@ pub fn run_session_transcription(
         eprintln!("[Session {}] Live stream (duration unknown)", session.id);
     }
 
-    let is_canary_qwen = model_id == "canary-qwen-2b";
-    let is_voxtral = model_id == "voxtral-4b";
-    let is_canary = model_id == "canary-1b" || model_id == "canary-180m-flash" || is_canary_qwen;
-    let is_canary_flash = model_id == "canary-180m-flash";
+    let is_canary = model_id == "canary-1b";
 
     // Channel to send audio samples to transcription thread
     let (audio_tx, audio_rx) = std_mpsc::sync_channel::<Vec<f32>>(50000);
@@ -168,23 +147,10 @@ pub fn run_session_transcription(
     let mode = session.mode.clone();
     eprintln!("[Session {}] Using transcription mode: {}", session.id, mode);
 
-    let is_vad_mode = mode.starts_with("vad_");
-    let vad_base_mode = if is_vad_mode {
-        mode.strip_prefix("vad_").unwrap_or("speedy").to_string()
-    } else {
-        mode.clone()
-    };
-
-    let vad_model_path =
-        std::env::var("VAD_MODEL_PATH").unwrap_or_else(|_| "silero_vad.onnx".to_string());
-
     // Spawn transcription thread with panic catching
     let transcription_session = session.clone();
     let transcription_running = running.clone();
     let sentence_completion_clone = sentence_completion.clone();
-    let enable_formatting_clone = enable_formatting;
-    let formatting_tone_clone = formatting_tone.clone();
-    let formatting_vocabulary_clone = formatting_vocabulary.clone();
     let transcription_thread = std::thread::spawn(move || {
         let session_id = transcription_session.id.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -195,22 +161,12 @@ pub fn run_session_transcription(
                 diar_path,
                 exec_config,
                 is_canary,
-                is_canary_flash,
-                is_canary_qwen,
-                is_voxtral,
-                is_vad_mode,
                 mode,
-                vad_base_mode,
-                vad_model_path,
                 language,
                 transcription_running,
-                parallel_config,
                 pause_config,
                 growing_segments_config,
                 sentence_completion_clone,
-                enable_formatting_clone,
-                formatting_tone_clone,
-                formatting_vocabulary_clone,
             );
         }));
 
@@ -297,36 +253,16 @@ fn run_transcription_inner(
     diar_path: Option<PathBuf>,
     exec_config: parakeet_rs::ExecutionConfig,
     is_canary: bool,
-    is_canary_flash: bool,
-    is_canary_qwen: bool,
-    is_voxtral: bool,
-    is_vad_mode: bool,
     mode: String,
-    vad_base_mode: String,
-    vad_model_path: String,
     language: String,
     transcription_running: Arc<AtomicBool>,
-    parallel_config: Option<ParallelConfig>,
     pause_config: Option<PauseConfig>,
     growing_segments_config: Option<GrowingSegmentsConfig>,
     sentence_completion: String,
-    enable_formatting: bool,
-    formatting_tone: String,
-    formatting_vocabulary: Vec<String>,
 ) {
     use parakeet_rs::sentence_buffer::{SentenceBuffer, SentenceBufferMode};
     use parakeet_rs::streaming_transcriber::StreamingTranscriber;
     use std::sync::mpsc as std_mpsc;
-
-    let is_parallel_mode = mode == "parallel";
-    let is_pause_parallel_mode = mode == "pause_parallel";
-
-    // In growing_segments mode, formatting is applied at the emitter layer (Phase 4/4b)
-    // rather than through the FormattingTranscriber wrapper, because the wrapper only
-    // sees raw push_audio results (mostly PARTIALs), while real FINALs are constructed
-    // by the GrowingTextMerger at the emitter layer.
-    let is_growing_segments = mode == "growing_segments";
-    let emitter_formatting = enable_formatting && is_growing_segments;
 
     // Extract growing segments tuning parameters before config is moved to factory
     let gs_echo_dedup_threshold = growing_segments_config.as_ref()
@@ -339,10 +275,6 @@ fn run_transcription_inner(
         .and_then(|gs| gs.promotion_enabled).unwrap_or(true);
     let gs_promotion_min_words = growing_segments_config.as_ref()
         .and_then(|gs| gs.promotion_min_words).unwrap_or(8);
-    let gs_use_word_confirmer = growing_segments_config.as_ref()
-        .and_then(|gs| gs.use_word_confirmer).unwrap_or(false);
-    let gs_word_confirm_threshold = growing_segments_config.as_ref()
-        .and_then(|gs| gs.word_confirm_threshold).unwrap_or(3);
 
     // Create the appropriate transcriber
     let mut transcriber: Box<dyn StreamingTranscriber> = match factory::create_transcriber(
@@ -352,35 +284,17 @@ fn run_transcription_inner(
             diar_path,
             exec_config,
             is_canary,
-            is_canary_flash,
-            is_canary_qwen,
-            is_voxtral,
-            is_vad_mode,
             mode: mode.clone(),
-            vad_base_mode,
-            vad_model_path,
             language: language.clone(),
-            parallel_config,
             pause_config,
             growing_segments_config,
-            // Skip FormattingTranscriber wrapper for growing_segments — we format at emitter layer
-            enable_formatting: enable_formatting && !is_growing_segments,
-            formatting_tone: formatting_tone.clone(),
-            formatting_vocabulary: formatting_vocabulary.clone(),
         },
     ) {
         Some(t) => t,
         None => return,
     };
 
-    let model_type = factory::model_type_name(
-        is_pause_parallel_mode,
-        is_parallel_mode,
-        is_vad_mode,
-        is_canary_qwen,
-        is_canary_flash,
-        is_canary,
-    );
+    let model_type = factory::model_type_name(is_canary);
     eprintln!(
         "[Session {}] Transcription thread started ({})",
         transcription_session.id, model_type
@@ -401,45 +315,8 @@ fn run_transcription_inner(
         transcription_session.id
     );
 
-    // Create emitter-layer formatter for growing_segments mode
-    let mut emitter_formatter: Option<(Box<dyn parakeet_rs::text_formatter::TextFormatter>, parakeet_rs::text_formatter::FormattingContext)> =
-        if emitter_formatting {
-            use parakeet_rs::text_formatter::{FormattingContext, FormattingTone, LlmFormatter, RuleBasedFormatter, TextFormatter};
-            let context = FormattingContext {
-                tone: FormattingTone::from_str(&formatting_tone),
-                language: language.clone(),
-                vocabulary: formatting_vocabulary,
-                recent_text: vec![],
-            };
-            let formatter: Box<dyn TextFormatter> = match std::env::var("FORMATTER_MODEL_PATH") {
-                Ok(path) if std::path::Path::new(&path).exists() => {
-                    eprintln!(
-                        "[Session {}] Emitter-layer formatter: LLM ({})",
-                        transcription_session.id, path
-                    );
-                    Box::new(LlmFormatter::new(path))
-                }
-                _ => {
-                    eprintln!(
-                        "[Session {}] Emitter-layer formatter: RuleBased",
-                        transcription_session.id
-                    );
-                    Box::new(RuleBasedFormatter::new())
-                }
-            };
-            Some((formatter, context))
-        } else {
-            None
-        };
-    let formatter_timeout = std::time::Duration::from_millis(
-        std::env::var("FORMATTER_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(5000u64),
-    );
-
     // For canary growing_segments: accumulate confirmed words instead of pushing raw full-buffer text
-    let is_growing_canary = mode == "growing_segments" && is_canary && !is_canary_flash;
+    let is_growing_canary = mode == "growing_segments" && is_canary;
     if is_growing_canary {
         eprintln!(
             "[Session {}] Growing canary pipeline: echo_dedup={:.2}/{}, min_final_words={}, promotion={}/{}words",
@@ -447,24 +324,7 @@ fn run_transcription_inner(
             gs_echo_dedup_threshold, gs_echo_dedup_window, gs_min_final_words,
             if gs_promotion_enabled { "on" } else { "off" }, gs_promotion_min_words,
         );
-        if gs_use_word_confirmer {
-            eprintln!(
-                "[Session {}] Word confirmer ENABLED (threshold={})",
-                transcription_session.id, gs_word_confirm_threshold,
-            );
-        }
     }
-
-    // Create word confirmer if enabled
-    let mut word_confirmer: Option<parakeet_rs::word_confirmer::WordConfirmer> = if is_growing_canary && gs_use_word_confirmer {
-        let wc_config = parakeet_rs::word_confirmer::WordConfirmerConfig {
-            confirmation_threshold: gs_word_confirm_threshold,
-            ..Default::default()
-        };
-        Some(parakeet_rs::word_confirmer::WordConfirmer::with_config(wc_config))
-    } else {
-        None
-    };
 
     let mut confirmed_accumulator = String::new();
     let mut finalized_word_count: usize = 0;
@@ -520,13 +380,9 @@ fn run_transcription_inner(
                 }
 
                 // Hallucination rejection: skip results from extremely slow inference
-                // Large models (canary-qwen 2.5B) legitimately need 30-60s on CPU,
-                // so use a higher threshold for them.
-                let hallucination_threshold_secs = if is_canary_qwen { 120 } else { 10 };
-                let slow_threshold_secs = if is_canary_qwen { 60 } else { 5 };
+                let hallucination_threshold_secs: u64 = 10;
+                let slow_threshold_secs: u64 = 5;
                 if inference_time.as_secs() > hallucination_threshold_secs
-                    && !is_parallel_mode
-                    && !is_pause_parallel_mode
                 {
                     eprintln!(
                         "[Session {}] HALLUCINATION GUARD: inference took {:.1}s, skipping result",
@@ -537,8 +393,6 @@ fn run_transcription_inner(
                 }
 
                 if inference_time.as_secs() > slow_threshold_secs
-                    && !is_parallel_mode
-                    && !is_pause_parallel_mode
                 {
                     eprintln!(
                         "[Session {}] SLOW inference: {:.1}s for {} samples",
@@ -579,7 +433,6 @@ fn run_transcription_inner(
                         } else {
                             unstable_text = text.to_string();
                         }
-                        // Collect all text for word confirmer path
                         if !all_text.is_empty() { all_text.push(' '); }
                         all_text.push_str(text);
                     }
@@ -592,32 +445,19 @@ fn run_transcription_inner(
                     let phase1_ms = phase1_start.elapsed().as_millis();
 
                     // Phase 2: Build full_text for the merger
-                    // WordConfirmer path: confirmed words go to merger, tail is for PARTIAL display
-                    // Standard path: remaining confirmed + unstable tail
+                    // remaining confirmed + unstable tail
                     let phase2_start = std::time::Instant::now();
-                    let (full_text, wc_tail) = if let Some(ref mut wc) = word_confirmer {
-                        // WordConfirmer path: push raw text, get confirmed + tail
-                        let wc_result = wc.push(&all_text);
-                        let confirmed = wc_result.confirmed_text.clone();
-                        let tail = wc_result.unconfirmed_tail.clone();
-                        // full_text for merger = confirmed text (clean, deduplicated)
-                        // wc_tail for PARTIAL display = confirmed + unconfirmed
-                        (confirmed, Some(format!("{} {}", wc_result.confirmed_text, tail).trim().to_string()))
+                    let acc_words: Vec<&str> = confirmed_accumulator.split_whitespace().collect();
+                    let remaining: String = if finalized_word_count < acc_words.len() {
+                        acc_words[finalized_word_count..].join(" ")
                     } else {
-                        // Standard path: remaining confirmed + unstable tail
-                        let acc_words: Vec<&str> = confirmed_accumulator.split_whitespace().collect();
-                        let remaining: String = if finalized_word_count < acc_words.len() {
-                            acc_words[finalized_word_count..].join(" ")
-                        } else {
-                            String::new()
-                        };
-                        let ft = match (remaining.is_empty(), unstable_text.is_empty()) {
-                            (true, true) => String::new(),
-                            (true, false) => unstable_text,
-                            (false, true) => remaining,
-                            (false, false) => format!("{} {}", remaining, unstable_text),
-                        };
-                        (ft, None)
+                        String::new()
+                    };
+                    let full_text = match (remaining.is_empty(), unstable_text.is_empty()) {
+                        (true, true) => String::new(),
+                        (true, false) => unstable_text,
+                        (false, true) => remaining,
+                        (false, false) => format!("{} {}", remaining, unstable_text),
                     };
 
                     let phase2_ms = phase2_start.elapsed().as_millis();
@@ -867,7 +707,6 @@ fn run_transcription_inner(
                         }
 
                         // Emit any pending FINALs that are older than 2 seconds
-                        let mut total_format_ms: u128 = 0;
                         let emit_start = std::time::Instant::now();
                         let emission_delay = std::time::Duration::from_secs(2);
                         while let Some((_text, time, _start_t, _end_t, _speaker, _inf_ms)) = pending_emissions.front() {
@@ -893,58 +732,9 @@ fn run_transcription_inner(
                             };
                             emitters::emit_final_subtitle(&transcription_session, &final_segment, &growing_result);
 
-                            // Try formatting
-                            if let Some((ref formatter, ref mut ctx)) = emitter_formatter {
-                                let fmt_start = std::time::Instant::now();
-                                let formatted = formatter.format(&text, ctx);
-                                let fmt_elapsed = fmt_start.elapsed();
-                                total_format_ms += fmt_elapsed.as_millis();
-
-                                let valid = fmt_elapsed <= formatter_timeout
-                                    && !formatted.is_empty()
-                                    && formatted.len() <= text.len() * 3;
-
-                                if valid && formatted != text {
-                                    ctx.recent_text.push(formatted.clone());
-                                    if ctx.recent_text.len() > 5 { ctx.recent_text.remove(0); }
-                                    if let Some(last) = recent_finals.back_mut() {
-                                        *last = formatted.clone();
-                                    }
-                                    let formatted_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
-                                        text: formatted,
-                                        raw_text: Some(text),
-                                        start_time: start_t,
-                                        end_time: end_t,
-                                        speaker,
-                                        confidence: None,
-                                        is_final: true,
-                                        inference_time_ms: inf_ms,
-                                    };
-                                    emitters::emit_final_subtitle(&transcription_session, &formatted_segment, &growing_result);
-                                } else if !valid && fmt_elapsed > formatter_timeout {
-                                    eprintln!(
-                                        "[Session {}] [Timing] Format REJECTED ({}ms)",
-                                        transcription_session.id, fmt_elapsed.as_millis()
-                                    );
-                                }
-                            }
-
                             last_growing_sentence.clear();
                         }
                         let emit_ms = emit_start.elapsed().as_millis();
-
-                        // Advance word confirmer cursor after emitting FINALs
-                        // so confirmed text moves forward and doesn't re-emit.
-                        // We advance by the confirmed_text length that was consumed
-                        // (not the merger output, which may differ due to unconfirmed gaps).
-                        if let Some(ref mut wc) = word_confirmer {
-                            if new_finalized > prev_finalized {
-                                // The confirmed_text we pushed was consumed by the merger.
-                                // Advance cursor past all confirmed words that were in the push.
-                                let consumed = full_text.split_whitespace().count();
-                                wc.advance_cursor(consumed);
-                            }
-                        }
 
                         // Phase 4b: Promote unconfirmed sentences
                         // If the growing sentence transitioned (previous ended with .!? and
@@ -991,23 +781,7 @@ fn run_transcription_inner(
                                     });
 
                                     if !already_emitted {
-                                        let promoted_normalized = emitters::normalize_text(prev_trimmed);
-
-                                        // Apply emitter-layer formatting if enabled
-                                        let (display_text, raw_text) = if let Some((ref formatter, ref mut ctx)) = emitter_formatter {
-                                            let start = std::time::Instant::now();
-                                            let formatted = formatter.format(&promoted_normalized, ctx);
-                                            let elapsed = start.elapsed();
-                                            if elapsed > formatter_timeout || formatted.is_empty() || formatted.len() > promoted_normalized.len() * 3 {
-                                                (promoted_normalized.clone(), None)
-                                            } else {
-                                                ctx.recent_text.push(formatted.clone());
-                                                if ctx.recent_text.len() > 5 { ctx.recent_text.remove(0); }
-                                                (formatted, Some(promoted_normalized.clone()))
-                                            }
-                                        } else {
-                                            (promoted_normalized.clone(), None)
-                                        };
+                                        let display_text = emitters::normalize_text(prev_trimmed);
 
                                         eprintln!(
                                             "[Session {} | PROMOTED | Speaker {}] \"{}\"",
@@ -1023,7 +797,7 @@ fn run_transcription_inner(
 
                                         let final_segment = parakeet_rs::streaming_transcriber::TranscriptionSegment {
                                             text: display_text,
-                                            raw_text,
+                                            raw_text: None,
                                             start_time: ref_segment.start_time,
                                             end_time: ref_segment.end_time,
                                             speaker: ref_segment.speaker,
@@ -1045,7 +819,7 @@ fn run_transcription_inner(
                         // Log step-by-step timing
                         let total_pipeline_ms = inference_start.elapsed().as_millis();
                         eprintln!(
-                            "[Session {}] [Timing] inference={}ms normalize={}ms P1={}ms P2={}ms P3_merger={}ms P4_dedup={}ms emit={}ms (format={}ms) total={}ms",
+                            "[Session {}] [Timing] inference={}ms normalize={}ms P1={}ms P2={}ms P3_merger={}ms P4_dedup={}ms emit={}ms total={}ms",
                             transcription_session.id,
                             inference_time_ms,
                             normalize_ms,
@@ -1054,13 +828,11 @@ fn run_transcription_inner(
                             phase3_ms,
                             phase4_dedup_ms,
                             emit_ms,
-                            total_format_ms,
                             total_pipeline_ms,
                         );
 
                         // Phase 5: Emit PARTIAL with full growing text (suppress if stale)
-                        // Word confirmer path: use confirmed+tail for display
-                        let partial_text = wc_tail.unwrap_or(full_text);
+                        let partial_text = full_text;
                         let recent_finals_vec: Vec<String> = recent_finals.iter().cloned().collect();
                         let is_stale = emitters::is_stale_partial(&partial_text, &recent_finals_vec);
 

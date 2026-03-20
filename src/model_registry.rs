@@ -21,15 +21,6 @@ pub enum ModelType {
     ParakeetTdt,
     /// Canary 1B model
     Canary1B,
-    /// Canary 180M Flash model (faster, smaller variant with KV cache)
-    Canary180MFlash,
-    /// Canary-Qwen 2.5B SALM model (FastConformer + Qwen3 LLM decoder)
-    CanaryQwen2B,
-    /// Voxtral Mini 4B Realtime (Mistral encoder-decoder ASR)
-    #[cfg(feature = "voxtral")]
-    Voxtral4B,
-    /// Small LLM for text formatting (e.g. Qwen2.5-0.5B-Instruct ONNX INT4)
-    FormatterLlm,
 }
 
 impl ModelType {
@@ -38,11 +29,6 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "parakeet-tdt",
             ModelType::Canary1B => "canary-1b",
-            ModelType::Canary180MFlash => "canary-180m-flash",
-            ModelType::CanaryQwen2B => "canary-qwen-2b",
-            #[cfg(feature = "voxtral")]
-            ModelType::Voxtral4B => "voxtral-4b",
-            ModelType::FormatterLlm => "formatter-llm",
         }
     }
 
@@ -51,11 +37,6 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "Parakeet TDT 0.6B",
             ModelType::Canary1B => "Canary 1B",
-            ModelType::Canary180MFlash => "Canary 180M Flash",
-            ModelType::CanaryQwen2B => "Canary-Qwen 2.5B",
-            #[cfg(feature = "voxtral")]
-            ModelType::Voxtral4B => "Voxtral Mini 4B",
-            ModelType::FormatterLlm => "Formatter LLM",
         }
     }
 
@@ -64,11 +45,6 @@ impl ModelType {
         match s {
             "parakeet-tdt" => Some(ModelType::ParakeetTdt),
             "canary-1b" => Some(ModelType::Canary1B),
-            "canary-180m-flash" => Some(ModelType::Canary180MFlash),
-            "canary-qwen-2b" => Some(ModelType::CanaryQwen2B),
-            #[cfg(feature = "voxtral")]
-            "voxtral-4b" => Some(ModelType::Voxtral4B),
-            "formatter-llm" => Some(ModelType::FormatterLlm),
             _ => None,
         }
     }
@@ -77,13 +53,7 @@ impl ModelType {
     pub fn languages(&self) -> Vec<&'static str> {
         match self {
             ModelType::ParakeetTdt => vec!["en"],
-            #[cfg(feature = "voxtral")]
-            ModelType::Voxtral4B => vec!["en", "de", "fr", "es", "it", "pt", "nl", "pl", "ru", "zh", "ja", "ko"],
             ModelType::Canary1B => vec!["en", "de", "fr", "es"],
-            ModelType::Canary180MFlash => vec!["en", "de", "fr", "es"],
-            ModelType::CanaryQwen2B => vec!["en"],
-            // Formatter LLM is language-agnostic — it processes whatever the ASR outputs
-            ModelType::FormatterLlm => vec!["en", "de", "fr", "es"],
         }
     }
 }
@@ -183,73 +153,6 @@ impl ModelRegistry {
             });
         }
 
-        // Register Canary 180M Flash if path is configured
-        let canary_flash_path = std::env::var("CANARY_FLASH_MODEL_PATH")
-            .ok()
-            .map(PathBuf::from);
-
-        if let Some(path) = canary_flash_path {
-            let canary_flash_available = path.exists();
-            registry.register(RegisteredModel {
-                model_type: ModelType::Canary180MFlash,
-                model_path: path,
-                diarization_path: diar_path.clone(),
-                exec_config: registry.default_exec_config.clone(),
-                is_available: canary_flash_available,
-                description: "NVIDIA's Canary 180M Flash - fast multilingual ASR with KV cache".to_string(),
-                languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
-            });
-        }
-
-        // Register Canary-Qwen 2.5B (always register, like TDT)
-        let canary_qwen_path = std::env::var("CANARY_QWEN_MODEL_PATH")
-            .unwrap_or_else(|_| "./canary-qwen".to_string());
-        let canary_qwen_available = std::path::Path::new(&canary_qwen_path).exists();
-        registry.register(RegisteredModel {
-            model_type: ModelType::CanaryQwen2B,
-            model_path: PathBuf::from(&canary_qwen_path),
-            diarization_path: diar_path.clone(),
-            exec_config: registry.default_exec_config.clone(),
-            is_available: canary_qwen_available,
-            description: "NVIDIA's Canary-Qwen 2.5B SALM - state-of-the-art English ASR with LLM decoder".to_string(),
-            languages: vec!["en".to_string()],
-        });
-
-        // Register Voxtral 4B if available
-        #[cfg(feature = "voxtral")]
-        {
-            let voxtral_path = std::env::var("VOXTRAL_MODEL_PATH")
-                .unwrap_or_else(|_| "./voxtral-q4".to_string());
-            let voxtral_available = std::path::Path::new(&voxtral_path).join("onnx").exists()
-                || std::path::Path::new(&voxtral_path).join("audio_encoder_q4.onnx").exists();
-            registry.register(RegisteredModel {
-                model_type: ModelType::Voxtral4B,
-                model_path: PathBuf::from(&voxtral_path),
-                diarization_path: diar_path.clone(),
-                exec_config: registry.default_exec_config.clone(),
-                is_available: voxtral_available,
-                description: "Mistral's Voxtral Mini 4B Realtime - multilingual encoder-decoder ASR".to_string(),
-                languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
-            });
-        }
-
-        // Register Formatter LLM if FORMATTER_MODEL_PATH is set
-        if let Ok(formatter_path) = std::env::var("FORMATTER_MODEL_PATH") {
-            let path = PathBuf::from(&formatter_path);
-            let formatter_available = path.exists();
-            let mut exec = registry.default_exec_config.clone();
-            exec.model_role = Some(crate::execution::ModelRole::Formatter);
-            registry.register(RegisteredModel {
-                model_type: ModelType::FormatterLlm,
-                model_path: path,
-                diarization_path: None,
-                exec_config: exec,
-                is_available: formatter_available,
-                description: "Small LLM for text formatting (e.g. Qwen2.5-0.5B-Instruct ONNX INT4)".to_string(),
-                languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
-            });
-        }
-
         eprintln!("[ModelRegistry] Registered {} models", registry.models.len());
         for (id, model) in &registry.models {
             eprintln!(
@@ -269,20 +172,16 @@ impl ModelRegistry {
         self.models.insert(id, model);
     }
 
-    /// List all registered transcription models (excludes utility models like FormatterLlm)
     pub fn list_models(&self) -> Vec<ModelInfo> {
         self.models
             .values()
-            .filter(|m| !matches!(m.model_type, ModelType::FormatterLlm))
             .map(|m| m.to_model_info())
             .collect()
     }
 
-    /// List only available transcription models (excludes utility models like FormatterLlm)
     pub fn list_available_models(&self) -> Vec<ModelInfo> {
         self.models
             .values()
-            .filter(|m| m.is_available && !matches!(m.model_type, ModelType::FormatterLlm))
             .map(|m| m.to_model_info())
             .collect()
     }
@@ -367,57 +266,6 @@ impl ModelRegistry {
 
                 Ok(Box::new(transcriber))
             }
-            ModelType::Canary180MFlash => {
-                use crate::realtime_canary_flash::{RealtimeCanaryFlash, RealtimeCanaryFlashConfig};
-
-                let flash_config = RealtimeCanaryFlashConfig {
-                    buffer_size_secs: 8.0,
-                    min_audio_secs: 1.0,
-                    process_interval_secs: 0.5,
-                    language: "en".to_string(),
-                };
-
-                let transcriber = RealtimeCanaryFlash::new(
-                    &model.model_path,
-                    Some(model.exec_config.clone()),
-                    Some(flash_config),
-                )?;
-
-                Ok(Box::new(transcriber))
-            }
-            ModelType::CanaryQwen2B => {
-                use crate::realtime_canary_qwen::{RealtimeCanaryQwen, RealtimeCanaryQwenConfig};
-
-                let qwen_config = RealtimeCanaryQwenConfig {
-                    buffer_size_secs: 10.0,
-                    min_audio_secs: 2.0,
-                    process_interval_secs: 2.0,
-                    language: "en".to_string(),
-                    pause_based_confirm: true,
-                    pause_threshold_secs: 0.6,
-                    silence_energy_threshold: 0.008,
-                    emit_full_text: false,
-                };
-
-                let transcriber = RealtimeCanaryQwen::new(
-                    &model.model_path,
-                    Some(model.exec_config.clone()),
-                    Some(qwen_config),
-                )?;
-
-                Ok(Box::new(transcriber))
-            }
-            #[cfg(feature = "voxtral")]
-            ModelType::Voxtral4B => {
-                Err(Error::Model(
-                    "Voxtral4B uses pause_segmented mode — create via session API with mode=pause_segmented".to_string()
-                ))
-            }
-            ModelType::FormatterLlm => {
-                Err(Error::Model(
-                    "FormatterLlm is not a transcription model — use it via LlmFormatter instead".to_string()
-                ))
-            }
         }
     }
 
@@ -447,16 +295,10 @@ mod tests {
     fn test_model_type_roundtrip() {
         assert_eq!(ModelType::from_str("parakeet-tdt"), Some(ModelType::ParakeetTdt));
         assert_eq!(ModelType::from_str("canary-1b"), Some(ModelType::Canary1B));
-        assert_eq!(ModelType::from_str("canary-180m-flash"), Some(ModelType::Canary180MFlash));
-        assert_eq!(ModelType::from_str("canary-qwen-2b"), Some(ModelType::CanaryQwen2B));
-        assert_eq!(ModelType::from_str("formatter-llm"), Some(ModelType::FormatterLlm));
         assert_eq!(ModelType::from_str("unknown"), None);
 
         assert_eq!(ModelType::ParakeetTdt.as_str(), "parakeet-tdt");
         assert_eq!(ModelType::Canary1B.as_str(), "canary-1b");
-        assert_eq!(ModelType::Canary180MFlash.as_str(), "canary-180m-flash");
-        assert_eq!(ModelType::CanaryQwen2B.as_str(), "canary-qwen-2b");
-        assert_eq!(ModelType::FormatterLlm.as_str(), "formatter-llm");
     }
 
     #[test]

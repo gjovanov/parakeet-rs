@@ -212,32 +212,6 @@ download_models() {
     download_file "$canary_url/vocab.txt" "canary/vocab.txt"
     download_file "$canary_url/config.json" "canary/config.json"
 
-    # Silero VAD
-    echo "  --- Silero VAD (Voice Activity Detection) ---"
-    download_file \
-        "https://huggingface.co/snakers4/silero-vad/resolve/master/files/silero_vad.onnx" \
-        "silero_vad.onnx"
-
-    # Formatter LLM (Qwen2.5-0.5B-Instruct ONNX INT4)
-    echo "  --- Formatter LLM (Qwen2.5-0.5B-Instruct ONNX INT4) ---"
-    mkdir -p formatter-llm/onnx
-    local fmt_url="https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct-ONNX-INT4/resolve/main"
-    download_file "$fmt_url/tokenizer.json" "formatter-llm/tokenizer.json"
-    download_file "$fmt_url/tokenizer_config.json" "formatter-llm/tokenizer_config.json"
-    download_file "$fmt_url/special_tokens_map.json" "formatter-llm/special_tokens_map.json"
-    download_file "$fmt_url/config.json" "formatter-llm/config.json"
-    download_file "$fmt_url/generation_config.json" "formatter-llm/generation_config.json"
-    download_file "$fmt_url/onnx/model_q4f16.onnx" "formatter-llm/onnx/model_q4f16.onnx"
-    download_file "$fmt_url/onnx/model_q4f16.onnx_data" "formatter-llm/onnx/model_q4f16.onnx_data"
-
-    # Canary-Qwen 2.5B (requires separate ONNX export — see scripts/export_canary_qwen.py)
-    if [ -d "canary-qwen" ] && [ -f "canary-qwen/encoder.onnx" ]; then
-        echo "  --- Canary-Qwen 2.5B (already exported) ---"
-        echo "  [SKIP] canary-qwen/ already exists"
-    else
-        echo "  --- Canary-Qwen 2.5B (English SALM ASR) ---"
-        echo "  [INFO] Requires manual ONNX export. Run: python3 scripts/export_canary_qwen.py"
-    fi
 }
 
 # ─── 4. Build binary ─────────────────────────────────────────────────
@@ -283,14 +257,10 @@ INTRA_THREADS=2
 INTER_THREADS=1
 TDT_MODEL_PATH=./tdt
 CANARY_MODEL_PATH=./canary
-FORMATTER_MODEL_PATH=./formatter-llm
-FORMATTER_TIMEOUT_MS=5000
 DIAR_MODEL_PATH=./diar_streaming_sortformer_4spk-v2.onnx
-VAD_MODEL_PATH=./silero_vad.onnx
 PORT=8080
 PUBLIC_IP=
 MAX_CONCURRENT_SESSIONS=10
-SPEEDY_MODE=true
 HF_TOKEN=
 EOF
     else
@@ -302,14 +272,10 @@ INTRA_THREADS=4
 INTER_THREADS=1
 TDT_MODEL_PATH=./tdt
 CANARY_MODEL_PATH=./canary
-FORMATTER_MODEL_PATH=./formatter-llm
-FORMATTER_TIMEOUT_MS=5000
 DIAR_MODEL_PATH=./diar_streaming_sortformer_4spk-v2.onnx
-VAD_MODEL_PATH=./silero_vad.onnx
 PORT=8080
 PUBLIC_IP=
 MAX_CONCURRENT_SESSIONS=10
-SPEEDY_MODE=true
 HF_TOKEN=
 EOF
     fi
@@ -355,7 +321,7 @@ verify_setup() {
     fi
 
     # Check models
-    for model_dir in tdt canary formatter-llm; do
+    for model_dir in tdt canary; do
         if [ -d "$model_dir" ] && [ "$(ls -A "$model_dir")" ]; then
             echo "  [OK] $model_dir model"
         else
@@ -364,14 +330,12 @@ verify_setup() {
         fi
     done
 
-    for model_file in diar_streaming_sortformer_4spk-v2.onnx silero_vad.onnx; do
-        if [ -f "$model_file" ]; then
-            echo "  [OK] $model_file"
-        else
-            echo "  [FAIL] $model_file missing"
-            ok=false
-        fi
-    done
+    if [ -f "diar_streaming_sortformer_4spk-v2.onnx" ]; then
+        echo "  [OK] diar_streaming_sortformer_4spk-v2.onnx"
+    else
+        echo "  [FAIL] diar_streaming_sortformer_4spk-v2.onnx missing"
+        ok=false
+    fi
 
     if [ "$GPU_MODE" = true ] && command -v nvidia-smi &>/dev/null; then
         echo "  [INFO] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'unknown')"

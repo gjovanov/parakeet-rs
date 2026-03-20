@@ -146,7 +146,6 @@ export class SessionManager {
    * @param {number} [options.srtChannelId] - SRT channel ID (for SRT stream sessions)
    * @param {string} [options.mode='speedy'] - Latency mode
    * @param {string} [options.language='de'] - Language code
-   * @param {Object} [options.parallelConfig] - Parallel mode config
    * @param {string} [options.noiseCancellation='none'] - Noise cancellation type
    * @param {boolean} [options.diarization=false] - Enable diarization
    * @param {Object} [options.pauseConfig] - Pause detection config
@@ -155,8 +154,6 @@ export class SessionManager {
    * @param {string} [options.fabEnabled='default'] - FAB forwarding ("default", "enabled", "disabled")
    * @param {string} [options.fabUrl=''] - FAB endpoint URL override
    * @param {string} [options.fabSendType='default'] - FAB send type ("default", "growing", "confirmed")
-   * @param {boolean} [options.enableFormatting=false] - Enable LLM text formatting on FINAL segments
-   * @param {string} [options.formattingTone='subtitle'] - Formatting tone hint
    */
   async createSession(modelId, options = {}) {
     const {
@@ -164,14 +161,11 @@ export class SessionManager {
       srtChannelId = null,
       mode = 'speedy',
       language = 'de',
-      parallelConfig = null,
       noiseCancellation = 'none',
       diarization = false,
       pauseConfig = null,
       growingSegmentsConfig = null,
       sentenceCompletion = 'minimal',
-      enableFormatting = false,
-      formattingTone = 'subtitle',
       fabEnabled = 'default',
       fabUrl = '',
       fabSendType = 'default',
@@ -202,11 +196,6 @@ export class SessionManager {
         throw new Error('Must specify either mediaId or srtChannelId');
       }
 
-      // Add parallel config if provided and mode is parallel or pause_parallel
-      if ((mode === 'parallel' || mode === 'pause_parallel') && parallelConfig) {
-        body.parallel_config = parallelConfig;
-      }
-
       // Add pause config if provided
       if (pauseConfig) {
         body.pause_config = pauseConfig;
@@ -217,11 +206,6 @@ export class SessionManager {
         body.growing_segments_config = growingSegmentsConfig;
       }
 
-      // Add formatting config
-      if (enableFormatting) {
-        body.enable_formatting = true;
-        body.formatting_tone = formattingTone;
-      }
 
       // Add FAB config if not default
       if (fabEnabled && fabEnabled !== 'default') {

@@ -474,32 +474,12 @@
           <div class="form-group">
             <label for="language-select">Language</label>
             <select id="language-select">
-              <option value="de" selected>German (Deutsch)</option>
-              <option value="en">English</option>
+              <option value="en" selected>English</option>
+              <option value="de">German (Deutsch)</option>
               <option value="fr">French (Français)</option>
               <option value="es">Spanish (Español)</option>
-              <option value="it">Italian (Italiano)</option>
-              <option value="pt">Portuguese (Português)</option>
-              <option value="nl">Dutch (Nederlands)</option>
-              <option value="pl">Polish (Polski)</option>
-              <option value="ru">Russian (Русский)</option>
-              <option value="uk">Ukrainian (Українська)</option>
-              <option value="cs">Czech (Čeština)</option>
-              <option value="sk">Slovak (Slovenčina)</option>
-              <option value="hu">Hungarian (Magyar)</option>
-              <option value="ro">Romanian (Română)</option>
-              <option value="bg">Bulgarian (Български)</option>
-              <option value="hr">Croatian (Hrvatski)</option>
-              <option value="sl">Slovenian (Slovenščina)</option>
-              <option value="et">Estonian (Eesti)</option>
-              <option value="lv">Latvian (Latviešu)</option>
-              <option value="lt">Lithuanian (Lietuvių)</option>
-              <option value="fi">Finnish (Suomi)</option>
-              <option value="sv">Swedish (Svenska)</option>
-              <option value="da">Danish (Dansk)</option>
-              <option value="el">Greek (Ελληνικά)</option>
-              <option value="mt">Maltese (Malti)</option>
             </select>
+            <small style="color: #666;">Canary-1B: en/de/fr/es. Parakeet TDT: en only.</small>
           </div>
           <div class="form-group">
             <label for="noise-select">Noise Cancellation</label>
@@ -522,26 +502,6 @@
               <option value="complete">Complete - Best quality, 3-5s delay</option>
             </select>
             <small style="color: #666;">Buffer segments for complete sentences before display</small>
-          </div>
-
-          <div class="form-group">
-            <label for="formatting-enabled-select">Text Formatting</label>
-            <select id="formatting-enabled-select">
-              <option value="disabled" selected>Disabled</option>
-              <option value="enabled">Enabled</option>
-            </select>
-            <small style="color: #666;">Format FINAL segments using LLM (filler removal, punctuation, casing)</small>
-          </div>
-          <div class="form-group" id="formatting-tone-group" style="display: none;">
-            <label for="formatting-tone-select">Formatting Tone</label>
-            <select id="formatting-tone-select">
-              <option value="subtitle" selected>Subtitle</option>
-              <option value="casual">Casual</option>
-              <option value="formal">Formal</option>
-              <option value="email">Email</option>
-              <option value="technical">Technical</option>
-            </select>
-            <small style="color: #666;">Tone hint for the formatting LLM</small>
           </div>
 
           <div class="form-group">
@@ -568,20 +528,6 @@
             <small style="color: #666;">What text to send: cumulative growing sentence or discrete finalized segments</small>
           </div>
 
-          <!-- Parallel Mode Config (hidden by default) -->
-          <div id="parallel-config" style="display: none;">
-            <div class="form-group">
-              <label for="parallel-threads">Worker Threads: <span id="threads-value">8</span></label>
-              <input type="range" id="parallel-threads" min="1" max="8" value="8" step="1">
-              <small style="color: #666;">More threads = lower latency but higher CPU/memory usage</small>
-            </div>
-            <div class="form-group">
-              <label for="parallel-buffer">Buffer Size: <span id="buffer-value">6</span>s</label>
-              <input type="range" id="parallel-buffer" min="1" max="10" value="6" step="1">
-              <small style="color: #666;">Larger buffer = better accuracy but higher latency</small>
-            </div>
-          </div>
-
           <!-- Pause Configuration (hidden by default, shown for pause-related modes) -->
           <div id="pause-config" style="display: none;">
             <div class="form-group">
@@ -598,11 +544,6 @@
               <label for="max-segment">Max Segment: <span id="max-segment-value">5</span>s</label>
               <input type="range" id="max-segment" min="3" max="15" value="5" step="1">
               <small style="color: #666;">Maximum duration before forced transcription</small>
-            </div>
-            <div class="form-group" id="context-buffer-group" style="display: none;">
-              <label for="context-buffer">Context Buffer: <span id="context-buffer-value">0</span>s</label>
-              <input type="range" id="context-buffer" min="0" max="12" value="0" step="0.5">
-              <small style="color: #666;">Audio overlap for accuracy (0=no overlap, higher=more accurate but may repeat text)</small>
             </div>
           </div>
 
@@ -693,22 +634,6 @@
               <small style="color: #666;">Minimum words for sentence promotion</small>
             </div>
 
-            <hr style="border-color: #333; margin: 12px 0;">
-            <small style="color: #888; display: block; margin-bottom: 8px;">Experimental: Word-Level Confirmation</small>
-
-            <div class="form-group">
-              <label for="gs-use-word-confirmer">Word Confirmer</label>
-              <select id="gs-use-word-confirmer">
-                <option value="false" selected>Disabled (sentence-level merger)</option>
-                <option value="true">Enabled (per-word consensus across passes)</option>
-              </select>
-              <small style="color: #666;">Track individual words across passes; confirm after K stable appearances</small>
-            </div>
-            <div class="form-group">
-              <label for="gs-word-confirm-threshold">Confirm Threshold (K): <span id="gs-word-confirm-threshold-value">3</span></label>
-              <input type="range" id="gs-word-confirm-threshold" min="2" max="5" value="3" step="1">
-              <small style="color: #666;">Passes before a word is confirmed (higher = more accurate, slower)</small>
-            </div>
           </div>
 
           <div class="form-actions">

@@ -434,65 +434,13 @@ async fn handle_client_message(
     Ok(())
 }
 
-/// Handle a correction message from the client.
-///
-/// Parses the correction, learns new vocabulary words from it, and updates the
-/// session's formatting config so subsequent transcriptions benefit.
+/// Handle a correction message from the client (stub — formatting removed)
 async fn handle_correction_message(
-    msg: &serde_json::Value,
-    state: &Arc<AppState>,
+    _msg: &serde_json::Value,
+    _state: &Arc<AppState>,
     session_id: &str,
 ) {
-    // Parse the correction fields
-    let correction: parakeet_rs::CorrectionMessage = match serde_json::from_value(
-        serde_json::json!({
-            "original": msg["original"],
-            "corrected": msg["corrected"],
-        }),
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "[Session {}] Failed to parse correction message: {}",
-                session_id, e
-            );
-            return;
-        }
-    };
-
-    eprintln!(
-        "[Session {}] Correction received: {:?} -> {:?}",
-        session_id, correction.original, correction.corrected
-    );
-
-    // Learn vocabulary from the correction and update the formatting config
-    let mut configs = state.formatting_configs.write().await;
-    if let Some(fmt_config) = configs.get_mut(session_id) {
-        // Use UserContext to extract vocabulary-worthy words from the correction
-        let mut ctx = parakeet_rs::UserContext::new();
-        ctx.vocabulary = fmt_config.vocabulary.clone();
-        ctx.learn_correction(&correction.original, &correction.corrected);
-
-        // Add any newly learned words back to the formatting config
-        let new_words: Vec<String> = ctx
-            .vocabulary
-            .into_iter()
-            .filter(|w| !fmt_config.vocabulary.contains(w))
-            .collect();
-
-        if !new_words.is_empty() {
-            eprintln!(
-                "[Session {}] Learned new vocabulary: {:?}",
-                session_id, new_words
-            );
-            fmt_config.vocabulary.extend(new_words);
-        }
-    } else {
-        eprintln!(
-            "[Session {}] Correction ignored: formatting not enabled for this session",
-            session_id
-        );
-    }
+    eprintln!("[Session {}] Correction received (formatting not available)", session_id);
 }
 
 /// Clean up client connection
