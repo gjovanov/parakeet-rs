@@ -16,8 +16,6 @@ const state = {
   sourceType: 'media', // 'media' or 'srt'
 };
 
-// Pause-related modes that show pause config
-const PAUSE_MODES = ['pause_segmented'];
 
 // Map slider value (1-5) to actual silence_energy_threshold
 function getSilenceEnergyThreshold(sliderValue) {
@@ -136,17 +134,14 @@ function cacheElements() {
   elements.diarizationSelect = document.getElementById('diarization-select');
   elements.sentenceCompletionSelect = document.getElementById('sentence-completion-select');
 
-  // Pause config elements
-  elements.pauseConfig = document.getElementById('pause-config');
+  // Pause-segmented config elements (all pause params consolidated here)
+  elements.pauseSegmentedConfig = document.getElementById('pause-segmented-config');
   elements.pauseThreshold = document.getElementById('pause-threshold');
   elements.silenceEnergy = document.getElementById('silence-energy');
   elements.maxSegment = document.getElementById('max-segment');
   elements.pauseThresholdValue = document.getElementById('pause-threshold-value');
   elements.silenceEnergyValue = document.getElementById('silence-energy-value');
   elements.maxSegmentValue = document.getElementById('max-segment-value');
-
-  // Pause-segmented config elements
-  elements.pauseSegmentedConfig = document.getElementById('pause-segmented-config');
   elements.psContextSegments = document.getElementById('ps-context-segments');
   elements.psContextSegmentsValue = document.getElementById('ps-context-segments-value');
   elements.psMinSegment = document.getElementById('ps-min-segment');
@@ -260,7 +255,6 @@ function setupEventListeners() {
         elements.fabEnabledSelect?.closest('.form-group'),
         elements.fabUrlGroup,
         elements.fabSendTypeGroup,
-        elements.pauseConfig,
         elements.pauseSegmentedConfig,
         elements.growingSegmentsConfig,
       ];
@@ -271,18 +265,19 @@ function setupEventListeners() {
     });
   }
 
+  // Model select - update language dropdown when model changes
+  if (elements.modelSelect) {
+    elements.modelSelect.addEventListener('change', () => {
+      renderLanguageSelect();
+    });
+  }
+
   // Mode select - show/hide mode-specific config panels
   if (elements.modeSelect) {
     elements.modeSelect.addEventListener('change', () => {
       const mode = elements.modeSelect.value;
-      const isPauseMode = PAUSE_MODES.includes(mode);
 
-      // Show/hide pause config
-      if (elements.pauseConfig) {
-        elements.pauseConfig.style.display = isPauseMode ? 'block' : 'none';
-      }
-
-      // Show/hide pause-segmented config
+      // Show/hide pause-segmented config (all pause params in one panel)
       if (elements.pauseSegmentedConfig) {
         elements.pauseSegmentedConfig.style.display = mode === 'pause_segmented' ? 'block' : 'none';
       }
@@ -433,14 +428,16 @@ function setupEventListeners() {
     const fabUrl = elements.fabUrlInput?.value?.trim() || '';
     const fabSendType = elements.fabSendTypeSelect?.value || 'default';
 
-    // Get pause config for pause-related modes
+    // Get pause config for pause_segmented mode
     let pauseConfig = null;
-    if (PAUSE_MODES.includes(mode) && elements.pauseThreshold) {
+    if (mode === 'pause_segmented' && elements.pauseThreshold) {
       pauseConfig = {
         pause_threshold_ms: parseInt(elements.pauseThreshold.value, 10),
         silence_energy_threshold: getSilenceEnergyThreshold(parseInt(elements.silenceEnergy?.value || 3, 10)),
-        max_segment_secs: parseFloat(elements.maxSegment?.value || 5),
+        max_segment_secs: parseFloat(elements.maxSegment?.value || 15),
         context_segments: elements.psContextSegments ? parseInt(elements.psContextSegments.value, 10) : 1,
+        min_segment_secs: elements.psMinSegment ? parseFloat(elements.psMinSegment.value) : undefined,
+        partial_interval_secs: elements.psPartialInterval ? parseFloat(elements.psPartialInterval.value) : undefined,
       };
     }
 
@@ -630,6 +627,22 @@ function showTab(tabName) {
   });
 }
 
+// Language display names for the dropdown
+const LANGUAGE_NAMES = {
+  en: 'English',
+  de: 'German (Deutsch)',
+  fr: 'French (Fran\u00e7ais)',
+  es: 'Spanish (Espa\u00f1ol)',
+  it: 'Italian (Italiano)',
+  pt: 'Portuguese (Portugu\u00eas)',
+  nl: 'Dutch (Nederlands)',
+  pl: 'Polish (Polski)',
+  ja: 'Japanese (\u65e5\u672c\u8a9e)',
+  zh: 'Chinese (\u4e2d\u6587)',
+  ko: 'Korean (\ud55c\uad6d\uc5b4)',
+  ru: 'Russian (\u0420\u0443\u0441\u0441\u043a\u0438\u0439)',
+};
+
 function renderModelSelect() {
   const models = sessionManager.models;
   const available = models.filter(m => m.is_loaded);
@@ -640,6 +653,29 @@ function renderModelSelect() {
     elements.modelSelect.innerHTML =
       available.map(m => `<option value="${m.id}">${m.display_name}</option>`).join('') +
       unavailable.map(m => `<option value="${m.id}" disabled>${m.display_name} (not installed)</option>`).join('');
+  }
+  // Update language dropdown for the initially selected model
+  renderLanguageSelect();
+}
+
+function renderLanguageSelect() {
+  const modelId = elements.modelSelect?.value;
+  const model = sessionManager.models?.find(m => m.id === modelId);
+  const languages = model?.languages || ['en', 'de', 'fr', 'es'];
+  const currentLang = elements.languageSelect?.value;
+
+  elements.languageSelect.innerHTML = languages
+    .map(code => {
+      const name = LANGUAGE_NAMES[code] || code;
+      const selected = code === currentLang ? ' selected' : (code === 'de' && !languages.includes(currentLang) ? ' selected' : '');
+      return `<option value="${code}"${selected}>${name}</option>`;
+    })
+    .join('');
+
+  // Update hint text
+  const hint = document.getElementById('language-hint');
+  if (hint && model) {
+    hint.textContent = `${model.display_name}: ${languages.join('/')}`;
   }
 }
 

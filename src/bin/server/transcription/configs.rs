@@ -98,6 +98,60 @@ pub fn create_transcription_config(
     }
 }
 
+/// Create RealtimeWhisperConfig based on latency mode
+#[cfg(feature = "whisper")]
+pub fn create_whisper_config(
+    mode: &str,
+    language: String,
+) -> parakeet_rs::RealtimeWhisperConfig {
+    use parakeet_rs::RealtimeWhisperConfig;
+
+    match mode {
+        "speedy" => RealtimeWhisperConfig {
+            buffer_size_secs: 8.0,
+            min_audio_secs: 1.0,
+            process_interval_secs: 0.5,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+            min_stable_count: None,
+            beam_size: 5,
+            n_threads: 4,
+            use_gpu: false,
+        },
+        "growing_segments" => RealtimeWhisperConfig {
+            buffer_size_secs: 10.0,
+            min_audio_secs: 1.0,
+            process_interval_secs: 1.0,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.5,
+            silence_energy_threshold: 0.008,
+            emit_full_text: true,
+            min_stable_count: None,
+            beam_size: 5,
+            n_threads: 4,
+            use_gpu: false,
+        },
+        _ => RealtimeWhisperConfig {
+            buffer_size_secs: 8.0,
+            min_audio_secs: 1.0,
+            process_interval_secs: 1.0,
+            language,
+            pause_based_confirm: true,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+            min_stable_count: None,
+            beam_size: 5,
+            n_threads: 4,
+            use_gpu: false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +203,8 @@ mod tests {
             silence_energy_threshold: 0.01,
             max_segment_secs: 10.0,
             context_segments: 1,
+            min_segment_secs: None,
+            partial_interval_secs: None,
         };
         let config = create_transcription_config("speedy", Some(&pause));
         assert_eq!(config.pause_threshold_secs, 0.8);

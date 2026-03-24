@@ -456,12 +456,10 @@
           <div class="form-group">
             <label for="language-select">Language</label>
             <select id="language-select">
-              <option value="en" selected>English</option>
-              <option value="de">German (Deutsch)</option>
-              <option value="fr">French (Français)</option>
-              <option value="es">Spanish (Español)</option>
+              <option value="de" selected>German (Deutsch)</option>
+              <option value="en">English</option>
             </select>
-            <small style="color: #666;">Canary-1B: en/de/fr/es. Parakeet TDT: en only.</small>
+            <small id="language-hint" style="color: #666;">Languages update based on selected model.</small>
           </div>
           <div class="form-group">
             <label for="noise-select">Noise Cancellation</label>
@@ -510,41 +508,37 @@
             <small style="color: #666;">What text to send: cumulative growing sentence or discrete finalized segments</small>
           </div>
 
-          <!-- Pause Configuration (hidden by default, shown for pause-related modes) -->
-          <div id="pause-config" style="display: none;">
+          <!-- Pause-Segmented Config (hidden by default, shown for pause_segmented mode) -->
+          <div id="pause-segmented-config" style="display: none;">
             <div class="form-group">
               <label for="pause-threshold">Pause Threshold: <span id="pause-threshold-value">300</span>ms</label>
-              <input type="range" id="pause-threshold" min="150" max="600" value="300" step="25">
-              <small style="color: #666;">Silence duration to trigger segment boundary</small>
+              <input type="range" id="pause-threshold" min="100" max="800" value="300" step="25">
+              <small style="color: #666;">Silence duration to trigger segment boundary (20ms frame-level detection)</small>
             </div>
             <div class="form-group">
               <label for="silence-energy">Silence Sensitivity: <span id="silence-energy-value">Medium</span></label>
               <input type="range" id="silence-energy" min="1" max="5" value="3" step="1">
-              <small style="color: #666;">1=Very sensitive, 5=Less sensitive</small>
+              <small style="color: #666;">1=Very sensitive (0.003), 3=Medium (0.008), 5=Less sensitive (0.02)</small>
             </div>
             <div class="form-group">
-              <label for="max-segment">Max Segment: <span id="max-segment-value">5</span>s</label>
-              <input type="range" id="max-segment" min="3" max="15" value="5" step="1">
-              <small style="color: #666;">Maximum duration before forced transcription</small>
-            </div>
-          </div>
-
-          <!-- Pause-Segmented Config (hidden by default, shown for pause_segmented mode) -->
-          <div id="pause-segmented-config" style="display: none;">
-            <div class="form-group">
-              <label for="ps-context-segments">Context Segments: <span id="ps-context-segments-value">1</span></label>
-              <input type="range" id="ps-context-segments" min="1" max="5" value="1" step="1">
-              <small style="color: #666;">Previous segments sent as audio context (1=none, 2-3=better accuracy)</small>
+              <label for="max-segment">Max Segment: <span id="max-segment-value">15</span>s</label>
+              <input type="range" id="max-segment" min="3" max="30" value="15" step="1">
+              <small style="color: #666;">Force-transcribe after this duration even without pause</small>
             </div>
             <div class="form-group">
               <label for="ps-min-segment">Min Segment: <span id="ps-min-segment-value">0.5</span>s</label>
               <input type="range" id="ps-min-segment" min="0.2" max="2.0" value="0.5" step="0.1">
-              <small style="color: #666;">Skip segments shorter than this (noise filter)</small>
+              <small style="color: #666;">Discard segments shorter than this (noise filter)</small>
             </div>
             <div class="form-group">
-              <label for="ps-partial-interval">Partial Update: <span id="ps-partial-interval-value">1.5</span>s</label>
+              <label for="ps-partial-interval">Partial Interval: <span id="ps-partial-interval-value">1.5</span>s</label>
               <input type="range" id="ps-partial-interval" min="0.5" max="5.0" value="1.5" step="0.5">
-              <small style="color: #666;">How often to show live text during speech</small>
+              <small style="color: #666;">How often to show live text during ongoing speech</small>
+            </div>
+            <div class="form-group">
+              <label for="ps-context-segments">Context Segments: <span id="ps-context-segments-value">1</span></label>
+              <input type="range" id="ps-context-segments" min="1" max="5" value="1" step="1">
+              <small style="color: #666;">Previous segments as audio context (1=none, 2-3=better accuracy, higher latency)</small>
             </div>
           </div>
 

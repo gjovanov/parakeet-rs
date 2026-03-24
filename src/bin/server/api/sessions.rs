@@ -33,6 +33,16 @@ pub struct PauseConfig {
     /// For pause_segmented mode: higher values give the model more context but increase latency
     #[serde(default = "default_context_segments")]
     pub context_segments: usize,
+
+    /// Minimum segment duration in seconds (0.2-2.0, default: 0.5)
+    /// Segments shorter than this are discarded (noise filter)
+    #[serde(default = "default_min_segment_secs")]
+    pub min_segment_secs: Option<f32>,
+
+    /// PARTIAL emission interval in seconds (0.5-5.0, default: 1.5)
+    /// How often to show live text during ongoing speech
+    #[serde(default)]
+    pub partial_interval_secs: Option<f32>,
 }
 
 fn default_pause_threshold_ms() -> u32 {
@@ -47,6 +57,10 @@ fn default_max_segment_secs() -> f32 {
     5.0
 }
 
+fn default_min_segment_secs() -> Option<f32> {
+    None
+}
+
 fn default_context_segments() -> usize {
     1
 }
@@ -58,6 +72,8 @@ impl Default for PauseConfig {
             silence_energy_threshold: default_silence_energy(),
             max_segment_secs: default_max_segment_secs(),
             context_segments: default_context_segments(),
+            min_segment_secs: None,
+            partial_interval_secs: None,
         }
     }
 }
