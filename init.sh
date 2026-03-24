@@ -403,7 +403,9 @@ verify_setup() {
     fi
 
     if [ "$GPU_MODE" = true ] && command -v nvidia-smi &>/dev/null; then
-        echo "  [INFO] GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'unknown')"
+        local gpu_name
+        gpu_name=$(timeout 5 nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'unknown')
+        echo "  [INFO] GPU: $gpu_name"
     fi
 
     if [ "$ok" = false ]; then
