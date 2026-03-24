@@ -391,9 +391,11 @@ verify_setup() {
     fi
 
     if [ "$WHISPER_MODE" = true ]; then
-        if [ -d "whisper" ] && [ "$(ls -A whisper/*.bin 2>/dev/null)" ]; then
+        if [ -d "whisper" ] && ls whisper/*.bin &>/dev/null; then
             echo "  [OK] whisper models"
-            ls -lh whisper/*.bin 2>/dev/null | while read -r line; do echo "       $line"; done
+            for f in whisper/*.bin; do
+                echo "       $(ls -lh "$f")"
+            done
         else
             echo "  [FAIL] whisper models missing"
             ok=false
