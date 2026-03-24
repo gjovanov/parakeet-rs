@@ -5,8 +5,10 @@
 # Idempotent — safe to re-run; skips steps that are already done.
 #
 # Usage:
-#   ./init.sh          # CPU mode (default)
-#   ./init.sh --gpu    # GPU mode (CUDA, downloads ORT GPU + CUDA 13 build)
+#   ./init.sh                  # CPU mode (default)
+#   ./init.sh --gpu            # GPU mode (CUDA, downloads ORT GPU + CUDA 13 build)
+#   ./init.sh --whisper        # CPU + Whisper GGML models
+#   ./init.sh --gpu --whisper  # GPU + Whisper GGML models
 #
 
 set -e
@@ -19,10 +21,12 @@ ORT_CPU_DIR="./ort-cpu"
 ORT_GPU_DIR="./ort-gpu"
 
 # Parse args
-GPU_MODE=false
+GPU_MODE=true
+WHISPER_MODE=true
 for arg in "$@"; do
     case "$arg" in
         --gpu) GPU_MODE=true ;;
+        --whisper) WHISPER_MODE=true ;;
     esac
 done
 
@@ -212,6 +216,24 @@ download_models() {
     download_file "$canary_url/vocab.txt" "canary/vocab.txt"
     download_file "$canary_url/config.json" "canary/config.json"
 
+    # Whisper models (optional, only if --whisper flag)
+    if [ "$WHISPER_MODE" = true ]; then
+        echo "  --- Whisper GGML Models ---"
+        mkdir -p whisper
+        local whisper_url="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+
+        # large-v3-turbo (809M params, best speed/quality for German)
+        download_file "$whisper_url/ggml-large-v3-turbo.bin" "whisper/ggml-large-v3-turbo.bin"
+
+        # large-v3-turbo Q5_0 quantized (smaller, slightly lower quality)
+        download_file "$whisper_url/ggml-large-v3-turbo-q5_0.bin" "whisper/ggml-large-v3-turbo-q5_0.bin"
+
+        # large-v3 (1.55B params, reference accuracy)
+        download_file "$whisper_url/ggml-large-v3.bin" "whisper/ggml-large-v3.bin"
+
+        # medium (769M params, lower-bound reference)
+        download_file "$whisper_url/ggml-medium.bin" "whisper/ggml-medium.bin"
+    fi
 }
 
 # ─── 4. Build binary ─────────────────────────────────────────────────
@@ -224,10 +246,36 @@ build_binary() {
         features="server,sortformer,cuda"
     fi
 
+    if [ "$WHISPER_MODE" = true ]; then
+        if [ "$GPU_MODE" = true ]; then
+            features="${features},whisper-cuda"
+        else
+            features="${features},whisper"
+        fi
+    fi
+
     # Always rebuild if source changed (let cargo decide)
     echo "[4/6] Building parakeet-server (features: $features)..."
     if [ "$GPU_MODE" = true ]; then
         export ORT_DYLIB_PATH="$ORT_GPU_DIR/libonnxruntime.so"
+
+        # Auto-detect CUDA toolkit for whisper-cuda (needs nvcc matching GPU arch)
+        # Prefer highest version available (e.g. CUDA 13 for Blackwell/sm_120)
+        if [[ "$features" == *"whisper-cuda"* ]]; then
+            local cuda_dir=""
+            for d in /usr/local/cuda-13.* /usr/local/cuda-13 /usr/local/cuda-12.* /usr/local/cuda-12 /usr/local/cuda; do
+                if [ -f "$d/bin/nvcc" ]; then
+                    cuda_dir="$d"
+                    break
+                fi
+            done
+            if [ -n "$cuda_dir" ]; then
+                echo "  [INFO] Using CUDA toolkit: $cuda_dir (for whisper-cuda)"
+                export CUDACXX="$cuda_dir/bin/nvcc"
+                export CUDA_PATH="$cuda_dir"
+                export CMAKE_CUDA_COMPILER="$cuda_dir/bin/nvcc"
+            fi
+        fi
     else
         export ORT_DYLIB_PATH="$ORT_CPU_DIR/libonnxruntime.so"
     fi
@@ -278,6 +326,11 @@ PUBLIC_IP=
 MAX_CONCURRENT_SESSIONS=10
 HF_TOKEN=
 EOF
+    fi
+
+    # Append Whisper model path if whisper mode enabled
+    if [ "$WHISPER_MODE" = true ]; then
+        echo "WHISPER_MODEL_PATH=./whisper/ggml-large-v3-turbo.bin" >> .env
     fi
 
     if [ -n "$public_ip" ]; then
@@ -335,6 +388,16 @@ verify_setup() {
     else
         echo "  [FAIL] diar_streaming_sortformer_4spk-v2.onnx missing"
         ok=false
+    fi
+
+    if [ "$WHISPER_MODE" = true ]; then
+        if [ -d "whisper" ] && [ "$(ls -A whisper/*.bin 2>/dev/null)" ]; then
+            echo "  [OK] whisper models"
+            ls -lh whisper/*.bin 2>/dev/null | while read -r line; do echo "       $line"; done
+        else
+            echo "  [FAIL] whisper models missing"
+            ok=false
+        fi
     fi
 
     if [ "$GPU_MODE" = true ] && command -v nvidia-smi &>/dev/null; then
