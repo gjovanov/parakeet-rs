@@ -436,6 +436,20 @@ async def run_benchmark(args):
         "enable_formatting": args.enable_formatting,
         "formatting_tone": args.tone,
     }
+
+    # Add pause config for pause_segmented mode
+    pause_config = {}
+    if args.pause_threshold_ms is not None:
+        pause_config["pause_threshold_ms"] = args.pause_threshold_ms
+    if args.silence_energy is not None:
+        pause_config["silence_energy_threshold"] = args.silence_energy
+    if args.max_segment_secs is not None:
+        pause_config["max_segment_secs"] = args.max_segment_secs
+    if args.context_segments is not None:
+        pause_config["context_segments"] = args.context_segments
+    if pause_config:
+        session_body["pause_config"] = pause_config
+        print(f"  Pause config: {pause_config}")
     session_resp = api_post(args.server, "/api/sessions", session_body)
     if not session_resp.get("success"):
         print(f"{RED}Error creating session: {session_resp.get('error')}{NC}")
@@ -661,6 +675,22 @@ def main():
     parser.add_argument(
         "--compare-baseline", action="store_true", default=False,
         help="Compare against most recent baseline result (enable_formatting=false)",
+    )
+    parser.add_argument(
+        "--pause-threshold-ms", type=int, default=None,
+        help="Pause threshold in ms for pause_segmented mode (default: server default)",
+    )
+    parser.add_argument(
+        "--silence-energy", type=float, default=None,
+        help="Silence energy threshold for pause_segmented mode (default: server default)",
+    )
+    parser.add_argument(
+        "--max-segment-secs", type=float, default=None,
+        help="Max segment duration in seconds for pause_segmented mode (default: server default)",
+    )
+    parser.add_argument(
+        "--context-segments", type=int, default=None,
+        help="Context segments for pause_segmented mode (default: 1)",
     )
     args = parser.parse_args()
 

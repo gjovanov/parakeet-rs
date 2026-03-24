@@ -21,6 +21,7 @@ pub struct PauseSegmentedTDT {
     silence_start_time: Option<f32>,
     is_speaking: bool,
     samples_since_partial: usize,
+    consecutive_silence_frames: usize,
     pending_segments: Vec<TranscriptionSegment>,
     last_final_end_time: f32,
     context_ring: std::collections::VecDeque<(Vec<f32>, String)>,
@@ -46,6 +47,7 @@ impl PauseSegmentedTDT {
             silence_start_time: None,
             is_speaking: false,
             samples_since_partial: 0,
+            consecutive_silence_frames: 0,
             pending_segments: Vec::new(),
             last_final_end_time: 0.0,
             context_ring: std::collections::VecDeque::new(),
@@ -192,34 +194,49 @@ impl StreamingTranscriber for PauseSegmentedTDT {
         #[cfg(feature = "sortformer")]
         if let Some(ref mut d) = self.diarizer { let _ = d.push_audio(samples); }
 
-        let rms = calculate_rms(samples);
-        let is_speech = rms >= self.config.silence_energy_threshold;
-        let current_time = self.current_time();
-        self.total_samples += samples.len();
+        use crate::pause_segmented::FRAME_SAMPLES;
 
-        if is_speech {
-            self.silence_start_time = None;
-            if !self.is_speaking {
-                self.is_speaking = true;
-                if self.speech_start_sample.is_none() {
-                    self.speech_start_sample = Some(self.total_samples - samples.len());
+        let threshold = self.config.silence_energy_threshold;
+        let pause_frames_needed = (self.config.pause_threshold_secs * SAMPLE_RATE as f32 / FRAME_SAMPLES as f32).ceil() as usize;
+
+        let mut offset = 0;
+        while offset < samples.len() {
+            let end = (offset + FRAME_SAMPLES).min(samples.len());
+            let frame = &samples[offset..end];
+            offset = end;
+
+            if frame.len() < FRAME_SAMPLES / 2 {
+                self.total_samples += frame.len();
+                break;
+            }
+
+            let rms = calculate_rms(frame);
+            let is_speech = rms >= threshold;
+            self.total_samples += frame.len();
+
+            if is_speech {
+                self.consecutive_silence_frames = 0;
+                if !self.is_speaking {
+                    self.is_speaking = true;
+                    if self.speech_start_sample.is_none() {
+                        self.speech_start_sample = Some(self.total_samples - frame.len());
+                    }
                 }
-            }
-            self.speech_buffer.extend_from_slice(samples);
-            self.samples_since_partial += samples.len();
+                self.speech_buffer.extend_from_slice(frame);
+                self.samples_since_partial += frame.len();
 
-            if self.speech_duration() >= self.config.max_segment_secs {
-                self.transcribe_and_emit_final()?;
-            } else if self.samples_since_partial as f32 / SAMPLE_RATE as f32 >= self.config.partial_interval_secs {
-                self.emit_partial()?;
-            }
-        } else {
-            if self.is_speaking { self.speech_buffer.extend_from_slice(samples); }
-            if self.silence_start_time.is_none() { self.silence_start_time = Some(current_time); }
-            let silence_dur = self.current_time() - self.silence_start_time.unwrap_or(current_time);
-            if silence_dur >= self.config.pause_threshold_secs && self.is_speaking {
-                self.is_speaking = false;
-                self.transcribe_and_emit_final()?;
+                if self.speech_duration() >= self.config.max_segment_secs {
+                    self.transcribe_and_emit_final()?;
+                } else if self.samples_since_partial as f32 / SAMPLE_RATE as f32 >= self.config.partial_interval_secs {
+                    self.emit_partial()?;
+                }
+            } else {
+                self.consecutive_silence_frames += 1;
+                if self.is_speaking { self.speech_buffer.extend_from_slice(frame); }
+                if self.consecutive_silence_frames >= pause_frames_needed && self.is_speaking {
+                    self.is_speaking = false;
+                    self.transcribe_and_emit_final()?;
+                }
             }
         }
 

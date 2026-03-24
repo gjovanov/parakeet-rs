@@ -11,12 +11,73 @@ use crate::streaming_transcriber::{ModelInfo, StreamingChunkResult, StreamingTra
 use std::path::Path;
 
 const SAMPLE_RATE: usize = 16000;
+/// Frame size for RMS analysis (20ms = 320 samples at 16kHz)
+pub(crate) const FRAME_SAMPLES: usize = 320;
 
 /// Calculate RMS energy of audio samples
 pub(crate) fn calculate_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() { return 0.0; }
     let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
     (sum_sq / samples.len() as f32).sqrt()
+}
+
+/// Frame-level speech/silence classification result for a batch of audio.
+/// Instead of computing one RMS for the entire batch, splits into 20ms frames
+/// and returns frame-by-frame classification.
+pub(crate) struct FrameAnalysis {
+    /// Consecutive silent frames at the END of the batch
+    pub trailing_silence_frames: usize,
+    /// Whether any frame in the batch is speech
+    pub has_speech: bool,
+    /// Index of the last speech frame's end sample (relative to batch start)
+    /// Used to split the batch into speech + trailing silence
+    pub last_speech_end: usize,
+    /// Total frames analyzed
+    pub total_frames: usize,
+}
+
+/// Analyze audio batch at frame level (20ms frames).
+pub(crate) fn analyze_frames(samples: &[f32], threshold: f32) -> FrameAnalysis {
+    let mut trailing_silence = 0usize;
+    let mut has_speech = false;
+    let mut last_speech_end = 0usize;
+    let mut total_frames = 0usize;
+
+    let mut offset = 0;
+    while offset < samples.len() {
+        let end = (offset + FRAME_SAMPLES).min(samples.len());
+        let frame = &samples[offset..end];
+
+        // Skip very short trailing frames (< 10ms)
+        if frame.len() < FRAME_SAMPLES / 2 {
+            break;
+        }
+
+        let rms = calculate_rms(frame);
+        total_frames += 1;
+
+        if rms >= threshold {
+            has_speech = true;
+            trailing_silence = 0;
+            last_speech_end = end;
+        } else {
+            trailing_silence += 1;
+        }
+
+        offset = end;
+    }
+
+    FrameAnalysis {
+        trailing_silence_frames: trailing_silence,
+        has_speech,
+        last_speech_end,
+        total_frames,
+    }
+}
+
+/// Convert frame count to seconds
+pub(crate) fn frames_to_secs(frames: usize) -> f32 {
+    (frames * FRAME_SAMPLES) as f32 / SAMPLE_RATE as f32
 }
 
 /// Truncate text at first detected hallucination (repeated words/phrases)
@@ -158,6 +219,8 @@ pub struct PauseSegmentedCanary {
     is_speaking: bool,
     /// Samples accumulated since last PARTIAL emission
     samples_since_partial: usize,
+    /// Consecutive silent frames (20ms each) for frame-level pause detection
+    consecutive_silence_frames: usize,
     /// Pending segments to emit
     pending_segments: Vec<TranscriptionSegment>,
     /// Last emitted FINAL end time (for monotonic timestamps)
@@ -194,6 +257,7 @@ impl PauseSegmentedCanary {
             silence_start_time: None,
             is_speaking: false,
             samples_since_partial: 0,
+            consecutive_silence_frames: 0,
             pending_segments: Vec::new(),
             last_final_end_time: 0.0,
             context_ring: std::collections::VecDeque::new(),
@@ -387,7 +451,11 @@ impl PauseSegmentedCanary {
         Ok(())
     }
 
-    /// Process incoming audio samples
+    /// Process incoming audio samples using frame-level (20ms) pause detection.
+    ///
+    /// Instead of computing a single RMS for the entire batch (which averages
+    /// away short pauses), we split into 20ms frames and track consecutive
+    /// silent frames. A pause is detected when silence_frames * 20ms >= pause_threshold.
     pub fn push_audio_samples(&mut self, samples: &[f32]) -> Result<()> {
         // Feed diarizer
         #[cfg(feature = "sortformer")]
@@ -395,57 +463,65 @@ impl PauseSegmentedCanary {
             let _ = diarizer.push_audio(samples);
         }
 
-        let rms = calculate_rms(samples);
-        let is_speech = rms >= self.config.silence_energy_threshold;
-        let current_time = self.current_time();
+        let threshold = self.config.silence_energy_threshold;
+        let pause_frames_needed = (self.config.pause_threshold_secs * SAMPLE_RATE as f32 / FRAME_SAMPLES as f32).ceil() as usize;
 
-        self.total_samples += samples.len();
+        // Process in 20ms frames
+        let mut offset = 0;
+        while offset < samples.len() {
+            let end = (offset + FRAME_SAMPLES).min(samples.len());
+            let frame = &samples[offset..end];
+            offset = end;
 
-        if is_speech {
-            // Speech detected
-            self.silence_start_time = None;
+            // Skip very short trailing frames (< 10ms)
+            if frame.len() < FRAME_SAMPLES / 2 {
+                self.total_samples += frame.len();
+                break;
+            }
 
-            if !self.is_speaking {
-                // Transition: silence → speech
-                self.is_speaking = true;
-                if self.speech_start_sample.is_none() {
-                    self.speech_start_sample = Some(self.total_samples - samples.len());
+            let rms = calculate_rms(frame);
+            let is_speech = rms >= threshold;
+
+            self.total_samples += frame.len();
+
+            if is_speech {
+                self.consecutive_silence_frames = 0;
+
+                if !self.is_speaking {
+                    self.is_speaking = true;
+                    if self.speech_start_sample.is_none() {
+                        self.speech_start_sample = Some(self.total_samples - frame.len());
+                    }
                 }
-            }
 
-            // Accumulate samples
-            self.speech_buffer.extend_from_slice(samples);
-            self.samples_since_partial += samples.len();
+                self.speech_buffer.extend_from_slice(frame);
+                self.samples_since_partial += frame.len();
 
-            // Check max segment duration — force transcribe
-            if self.speech_duration() >= self.config.max_segment_secs {
-                eprintln!(
-                    "[PauseSegmented] Max segment ({:.1}s) reached, force-transcribing",
-                    self.config.max_segment_secs
-                );
-                self.transcribe_and_emit_final()?;
-            }
-            // Check PARTIAL emission interval
-            else if self.samples_since_partial as f32 / SAMPLE_RATE as f32 >= self.config.partial_interval_secs {
-                self.emit_partial()?;
-            }
-        } else {
-            // Silence detected
-            if self.is_speaking {
-                // Still accumulate the silence samples (they're part of the transition)
-                self.speech_buffer.extend_from_slice(samples);
-            }
+                // Max segment duration — force transcribe
+                if self.speech_duration() >= self.config.max_segment_secs {
+                    eprintln!(
+                        "[PauseSegmented] Max segment ({:.1}s) reached, force-transcribing",
+                        self.config.max_segment_secs
+                    );
+                    self.transcribe_and_emit_final()?;
+                }
+                // PARTIAL emission interval
+                else if self.samples_since_partial as f32 / SAMPLE_RATE as f32 >= self.config.partial_interval_secs {
+                    self.emit_partial()?;
+                }
+            } else {
+                self.consecutive_silence_frames += 1;
 
-            if self.silence_start_time.is_none() {
-                self.silence_start_time = Some(current_time);
-            }
+                if self.is_speaking {
+                    // Accumulate silence samples during transition
+                    self.speech_buffer.extend_from_slice(frame);
+                }
 
-            let silence_duration = self.current_time() - self.silence_start_time.unwrap_or(current_time);
-
-            if silence_duration >= self.config.pause_threshold_secs && self.is_speaking {
-                // Pause detected — transcribe accumulated speech
-                self.is_speaking = false;
-                self.transcribe_and_emit_final()?;
+                if self.consecutive_silence_frames >= pause_frames_needed && self.is_speaking {
+                    // Pause detected — transcribe accumulated speech
+                    self.is_speaking = false;
+                    self.transcribe_and_emit_final()?;
+                }
             }
         }
 
