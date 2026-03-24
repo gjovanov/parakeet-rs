@@ -20,6 +20,9 @@ pub enum ModelType {
     ParakeetTdt,
     /// Canary 1B model
     Canary1B,
+    /// Whisper model (generic, size determined by GGML file)
+    #[cfg(feature = "whisper")]
+    Whisper,
 }
 
 impl ModelType {
@@ -28,6 +31,8 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "parakeet-tdt",
             ModelType::Canary1B => "canary-1b",
+            #[cfg(feature = "whisper")]
+            ModelType::Whisper => "whisper",
         }
     }
 
@@ -36,6 +41,8 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => "Parakeet TDT 0.6B",
             ModelType::Canary1B => "Canary 1B",
+            #[cfg(feature = "whisper")]
+            ModelType::Whisper => "Whisper",
         }
     }
 
@@ -44,6 +51,8 @@ impl ModelType {
         match s {
             "parakeet-tdt" => Some(ModelType::ParakeetTdt),
             "canary-1b" => Some(ModelType::Canary1B),
+            #[cfg(feature = "whisper")]
+            _ if s.starts_with("whisper") => Some(ModelType::Whisper),
             _ => None,
         }
     }
@@ -53,6 +62,8 @@ impl ModelType {
         match self {
             ModelType::ParakeetTdt => vec!["en"],
             ModelType::Canary1B => vec!["en", "de", "fr", "es"],
+            #[cfg(feature = "whisper")]
+            ModelType::Whisper => vec!["en", "de", "fr", "es", "it", "pt", "nl", "pl", "ja", "zh", "ko", "ru"],
         }
     }
 }
@@ -62,6 +73,10 @@ impl ModelType {
 pub struct RegisteredModel {
     /// Model type
     pub model_type: ModelType,
+    /// Unique model ID (e.g. "parakeet-tdt", "canary-1b", "whisper-large-v3-turbo")
+    pub model_id: String,
+    /// Display name for the UI
+    pub display_name: String,
     /// Path to the model directory or file
     pub model_path: PathBuf,
     /// Path to diarization model (optional, for models that support it)
@@ -80,8 +95,8 @@ impl RegisteredModel {
     /// Convert to ModelInfo for API responses
     pub fn to_model_info(&self) -> ModelInfo {
         ModelInfo {
-            id: self.model_type.as_str().to_string(),
-            display_name: self.model_type.display_name().to_string(),
+            id: self.model_id.clone(),
+            display_name: self.display_name.clone(),
             description: self.description.clone(),
             supports_diarization: self.diarization_path.is_some(),
             languages: self.languages.clone(),
@@ -130,6 +145,8 @@ impl ModelRegistry {
         let tdt_available = std::path::Path::new(&tdt_path).exists();
         registry.register(RegisteredModel {
             model_type: ModelType::ParakeetTdt,
+            model_id: "parakeet-tdt".to_string(),
+            display_name: "Parakeet TDT 0.6B".to_string(),
             model_path: PathBuf::from(&tdt_path),
             diarization_path: diar_path.clone(),
             exec_config: registry.default_exec_config.clone(),
@@ -143,13 +160,48 @@ impl ModelRegistry {
             let canary_available = path.exists();
             registry.register(RegisteredModel {
                 model_type: ModelType::Canary1B,
+                model_id: "canary-1b".to_string(),
+                display_name: "Canary 1B".to_string(),
                 model_path: path,
-                diarization_path: diar_path.clone(), // Use same diarization model as TDT
+                diarization_path: diar_path.clone(),
                 exec_config: registry.default_exec_config.clone(),
                 is_available: canary_available,
                 description: "NVIDIA's Canary 1B encoder-decoder model for multilingual ASR and translation".to_string(),
                 languages: vec!["en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string()],
             });
+        }
+
+        // Register Whisper model if path is configured
+        #[cfg(feature = "whisper")]
+        {
+            if let Ok(whisper_path) = std::env::var("WHISPER_MODEL_PATH") {
+                let path = PathBuf::from(&whisper_path);
+                let whisper_available = path.exists();
+
+                // Derive a model_id from the filename (e.g., "ggml-large-v3-turbo.bin" -> "whisper-large-v3-turbo")
+                let model_id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|name| {
+                        let name = name.strip_prefix("ggml-").unwrap_or(name);
+                        format!("whisper-{}", name)
+                    })
+                    .unwrap_or_else(|| "whisper".to_string());
+
+                let display_name = format!("Whisper ({})", model_id.strip_prefix("whisper-").unwrap_or(&model_id));
+
+                registry.models.insert(model_id.clone(), RegisteredModel {
+                    model_type: ModelType::Whisper,
+                    model_id: model_id.clone(),
+                    display_name: display_name.clone(),
+                    model_path: path,
+                    diarization_path: diar_path.clone(),
+                    exec_config: registry.default_exec_config.clone(),
+                    is_available: whisper_available,
+                    description: format!("{} — OpenAI Whisper via whisper.cpp (GGML)", display_name),
+                    languages: ModelType::Whisper.languages().iter().map(|s| s.to_string()).collect(),
+                });
+            }
         }
 
         eprintln!("[ModelRegistry] Registered {} models", registry.models.len());
@@ -167,14 +219,37 @@ impl ModelRegistry {
 
     /// Register a model
     pub fn register(&mut self, model: RegisteredModel) {
-        let id = model.model_type.as_str().to_string();
+        let id = model.model_id.clone();
         self.models.insert(id, model);
     }
 
     pub fn list_models(&self) -> Vec<ModelInfo> {
         self.models
-            .values()
-            .map(|m| m.to_model_info())
+            .iter()
+            .map(|(id, m)| {
+                let mut info = m.to_model_info();
+                // Use the HashMap key as ID (important for Whisper where key includes model size)
+                info.id = id.clone();
+                // For Whisper models, derive a better display name from the ID
+                // e.g., "whisper-large-v3-turbo" -> "Whisper Large V3 Turbo"
+                #[cfg(feature = "whisper")]
+                if m.model_type == ModelType::Whisper {
+                    let name_part = id.strip_prefix("whisper-").unwrap_or(id);
+                    let display: String = name_part
+                        .split('-')
+                        .map(|w| {
+                            let mut c = w.chars();
+                            match c.next() {
+                                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                                None => String::new(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    info.display_name = format!("Whisper {}", display);
+                }
+                info
+            })
             .collect()
     }
 
