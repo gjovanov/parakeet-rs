@@ -10,6 +10,8 @@ pub enum Error {
     Model(String),
     Tokenizer(String),
     Config(String),
+    #[cfg(feature = "whisper")]
+    Whisper(String),
 }
 
 impl fmt::Display for Error {
@@ -21,6 +23,8 @@ impl fmt::Display for Error {
             Error::Model(msg) => write!(f, "Model error: {msg}"),
             Error::Tokenizer(msg) => write!(f, "Tokenizer error: {msg}"),
             Error::Config(msg) => write!(f, "Config error: {msg}"),
+            #[cfg(feature = "whisper")]
+            Error::Whisper(msg) => write!(f, "Whisper error: {msg}"),
         }
     }
 }

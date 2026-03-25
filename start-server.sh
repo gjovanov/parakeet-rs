@@ -67,6 +67,10 @@ ARGS=(
     --max-sessions "$MAX_CONCURRENT_SESSIONS"
 )
 
+if [ -n "$WHISPER_MODEL_PATH" ]; then
+    ARGS+=(--whisper-model "$WHISPER_MODEL_PATH")
+fi
+
 if [ -n "$PUBLIC_IP" ]; then
     ARGS+=(--public-ip "$PUBLIC_IP")
 fi

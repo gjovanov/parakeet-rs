@@ -1,0 +1,720 @@
+//! Streaming wrapper for Whisper models (speedy + growing_segments modes)
+//!
+//! Provides a streaming interface identical to RealtimeCanary:
+//! - Sliding audio buffer with periodic inference
+//! - Pause detection via RMS energy
+//! - Hallucination truncation
+//! - `emit_full_text` mode for growing_segments (GrowingTextMerger handles finalization)
+//! - Word-level confirmation for speedy mode
+
+use crate::error::Result;
+use crate::streaming_transcriber::{ModelInfo, StreamingChunkResult, StreamingTranscriber, TranscriptionSegment};
+use crate::whisper::{WhisperModel, WhisperModelConfig};
+use std::collections::VecDeque;
+use std::path::Path;
+
+const SAMPLE_RATE: usize = 16000;
+
+/// Minimum number of consecutive matches before confirming text as final
+const MIN_STABLE_COUNT: u32 = 2;
+
+/// Maximum expected words per second (hallucination length guard)
+const MAX_WORDS_PER_SEC: f32 = 5.0;
+
+/// Multiplier for inference time anomaly detection
+const INFERENCE_TIME_ANOMALY_MULTIPLIER: f32 = 5.0;
+
+/// Calculate RMS energy of audio samples
+fn calculate_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
+/// Truncate text at first detected hallucination (repeated words/phrases)
+fn truncate_hallucination(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 4 {
+        return text.to_string();
+    }
+
+    // Check for 3+ consecutive identical words
+    let mut consecutive_count: usize = 0;
+    for i in 1..words.len() {
+        if words[i].to_lowercase() == words[i - 1].to_lowercase() && words[i].len() > 1 {
+            consecutive_count += 1;
+            if consecutive_count >= 3 {
+                let truncate_at = i - consecutive_count + 1;
+                if truncate_at > 0 {
+                    return words[..truncate_at].join(" ");
+                }
+                return String::new();
+            }
+        } else {
+            consecutive_count = 0;
+        }
+    }
+
+    // Check for repeated phrases (2-3 word patterns)
+    for pattern_len in 2..=3 {
+        if words.len() < pattern_len * 3 {
+            continue;
+        }
+        for i in 0..=(words.len() - pattern_len * 3) {
+            let pattern: Vec<&str> = words[i..i + pattern_len].to_vec();
+            let mut pattern_count = 1;
+
+            let mut j = i + pattern_len;
+            while j + pattern_len <= words.len() {
+                let candidate: Vec<&str> = words[j..j + pattern_len].to_vec();
+                if candidate
+                    .iter()
+                    .zip(pattern.iter())
+                    .all(|(a, b)| a.to_lowercase() == b.to_lowercase())
+                {
+                    pattern_count += 1;
+                    if pattern_count >= 3 {
+                        if i > 0 {
+                            return words[..i].join(" ");
+                        }
+                        return String::new();
+                    }
+                    j += pattern_len;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    text.to_string()
+}
+
+/// Configuration for streaming Whisper processing
+#[derive(Debug, Clone)]
+pub struct RealtimeWhisperConfig {
+    /// Buffer size in seconds before oldest audio is discarded
+    pub buffer_size_secs: f32,
+    /// Minimum audio to accumulate before first transcription
+    pub min_audio_secs: f32,
+    /// How often to process (in seconds of new audio)
+    pub process_interval_secs: f32,
+    /// Target language code
+    pub language: String,
+    /// Enable pause-based confirmation
+    pub pause_based_confirm: bool,
+    /// Minimum pause duration in seconds to trigger confirmation
+    pub pause_threshold_secs: f32,
+    /// Audio RMS below this is considered silence
+    pub silence_energy_threshold: f32,
+    /// When true, return full buffer transcription as partial.
+    /// Used for growing_segments mode where GrowingTextMerger handles finalization.
+    pub emit_full_text: bool,
+    /// Override MIN_STABLE_COUNT for word confirmation
+    pub min_stable_count: Option<u32>,
+    /// Beam search size (0 or 1 = greedy)
+    pub beam_size: i32,
+    /// Number of threads for inference
+    pub n_threads: i32,
+    /// Use GPU for inference
+    pub use_gpu: bool,
+}
+
+impl Default for RealtimeWhisperConfig {
+    fn default() -> Self {
+        Self {
+            buffer_size_secs: 10.0,
+            min_audio_secs: 2.0,
+            process_interval_secs: 2.0,
+            language: "de".to_string(),
+            pause_based_confirm: false,
+            pause_threshold_secs: 0.6,
+            silence_energy_threshold: 0.008,
+            emit_full_text: false,
+            min_stable_count: None,
+            beam_size: 5,
+            n_threads: 4,
+            use_gpu: false,
+        }
+    }
+}
+
+/// Streaming Whisper transcriber
+///
+/// Accumulates audio in a sliding buffer and processes periodically,
+/// using a Whisper GGML model for transcription.
+pub struct RealtimeWhisper {
+    model: WhisperModel,
+    config: RealtimeWhisperConfig,
+    /// Model identifier for API responses
+    model_id: String,
+
+    // Audio buffer
+    audio_buffer: VecDeque<f32>,
+    buffer_size_samples: usize,
+
+    // Processing state
+    total_samples_received: usize,
+    samples_since_last_process: usize,
+    process_interval_samples: usize,
+    min_audio_samples: usize,
+
+    // Last transcription result
+    last_transcription: String,
+
+    // Confirmed (final) text
+    confirmed_text: String,
+    confirmed_word_count: usize,
+    confirmed_end_time: f32,
+
+    // Pending text being evaluated for confirmation
+    pending_text: String,
+    pending_stable_count: u32,
+
+    // Segments pending emission as final
+    pending_final_segments: Vec<(String, f32, f32)>,
+
+    // Rolling inference time tracker
+    inference_times_ms: Vec<u32>,
+    median_inference_time_ms: u32,
+
+    // Pause detection state
+    silence_start_time: Option<f32>,
+    pause_boundary_time: Option<f32>,
+    last_pause_end_time: f32,
+    last_pause_detected: bool,
+}
+
+impl RealtimeWhisper {
+    /// Create a new streaming Whisper transcriber
+    pub fn new<P: AsRef<Path>>(
+        model_path: P,
+        config: Option<RealtimeWhisperConfig>,
+        model_id: Option<String>,
+    ) -> Result<Self> {
+        let config = config.unwrap_or_default();
+
+        let whisper_config = WhisperModelConfig {
+            language: config.language.clone(),
+            beam_size: config.beam_size,
+            n_threads: config.n_threads,
+            use_gpu: config.use_gpu,
+            ..Default::default()
+        };
+
+        let model = WhisperModel::from_file(model_path, Some(whisper_config))?;
+
+        let model_id = model_id.unwrap_or_else(|| "whisper".to_string());
+
+        let buffer_size_samples = (config.buffer_size_secs * SAMPLE_RATE as f32) as usize;
+        let process_interval_samples = (config.process_interval_secs * SAMPLE_RATE as f32) as usize;
+        let min_audio_samples = (config.min_audio_secs * SAMPLE_RATE as f32) as usize;
+
+        Ok(Self {
+            model,
+            config,
+            model_id,
+            audio_buffer: VecDeque::with_capacity(buffer_size_samples),
+            buffer_size_samples,
+            total_samples_received: 0,
+            samples_since_last_process: 0,
+            process_interval_samples,
+            min_audio_samples,
+            last_transcription: String::new(),
+            confirmed_text: String::new(),
+            confirmed_word_count: 0,
+            confirmed_end_time: 0.0,
+            pending_text: String::new(),
+            pending_stable_count: 0,
+            pending_final_segments: Vec::new(),
+            inference_times_ms: Vec::new(),
+            median_inference_time_ms: 0,
+            silence_start_time: None,
+            pause_boundary_time: None,
+            last_pause_end_time: 0.0,
+            last_pause_detected: false,
+        })
+    }
+
+    /// Detect pause/silence in audio
+    fn detect_pause(&mut self, samples: &[f32], current_time: f32) {
+        let rms = calculate_rms(samples);
+        let is_silence = rms < self.config.silence_energy_threshold;
+
+        let chunk_duration = samples.len() as f32 / SAMPLE_RATE as f32;
+        let chunk_end_time = current_time + chunk_duration;
+
+        if is_silence {
+            if self.silence_start_time.is_none() {
+                self.silence_start_time = Some(current_time);
+            } else {
+                let silence_start = self.silence_start_time.unwrap();
+                let silence_duration = chunk_end_time - silence_start;
+
+                if silence_duration >= self.config.pause_threshold_secs {
+                    let pause_buffer = 0.1;
+                    let boundary = (silence_start - pause_buffer).max(self.last_pause_end_time);
+
+                    if self.pause_boundary_time.is_none()
+                        || boundary > self.pause_boundary_time.unwrap()
+                    {
+                        self.pause_boundary_time = Some(boundary);
+                        self.last_pause_end_time = chunk_end_time;
+                    }
+                }
+            }
+        } else if self.silence_start_time.is_some() {
+            self.silence_start_time = None;
+        }
+    }
+
+    /// Push audio samples and get transcription results
+    pub fn push_audio(&mut self, samples: &[f32]) -> Result<WhisperChunkResult> {
+        // Pause detection
+        let current_time = self.total_samples_received as f32 / SAMPLE_RATE as f32;
+        if self.config.pause_based_confirm {
+            self.detect_pause(samples, current_time);
+        }
+
+        // Add to buffer
+        self.audio_buffer.extend(samples.iter().copied());
+        self.total_samples_received += samples.len();
+        self.samples_since_last_process += samples.len();
+
+        // Trim buffer to max size
+        while self.audio_buffer.len() > self.buffer_size_samples {
+            self.audio_buffer.pop_front();
+        }
+
+        let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
+
+        // Check if we should process
+        if self.audio_buffer.len() < self.min_audio_samples {
+            return Ok(WhisperChunkResult {
+                text: String::new(),
+                is_partial: true,
+                buffer_time: buffer_secs,
+                pause_detected: false,
+                inference_time_ms: None,
+            });
+        }
+
+        if self.samples_since_last_process < self.process_interval_samples {
+            return Ok(WhisperChunkResult {
+                text: String::new(),
+                is_partial: true,
+                buffer_time: buffer_secs,
+                pause_detected: false,
+                inference_time_ms: None,
+            });
+        }
+
+        // Process the buffer
+        self.samples_since_last_process = 0;
+        self.process_buffer()
+    }
+
+    /// Update rolling inference time tracker
+    fn update_inference_stats(&mut self, time_ms: u32) -> u32 {
+        self.inference_times_ms.push(time_ms);
+        if self.inference_times_ms.len() > 20 {
+            self.inference_times_ms.remove(0);
+        }
+        let mut sorted = self.inference_times_ms.clone();
+        sorted.sort();
+        let median = sorted[sorted.len() / 2];
+        self.median_inference_time_ms = median;
+        median
+    }
+
+    fn process_buffer(&mut self) -> Result<WhisperChunkResult> {
+        let buffer_secs = self.audio_buffer.len() as f32 / SAMPLE_RATE as f32;
+
+        // Get contiguous audio
+        let audio = self.audio_buffer.make_contiguous();
+
+        // Transcribe with timing
+        let inference_start = std::time::Instant::now();
+        let text = self.model.transcribe_text(audio)?;
+        let inference_ms = inference_start.elapsed().as_millis() as u32;
+        let text = text.trim().to_string();
+
+        // Update inference stats
+        let median = self.update_inference_stats(inference_ms);
+
+        // Anomaly detection
+        if median > 0 && inference_ms > (median as f32 * INFERENCE_TIME_ANOMALY_MULTIPLIER) as u32 {
+            eprintln!(
+                "[RealtimeWhisper] WARNING: Inference anomaly ({}ms vs {}ms median), skipping",
+                inference_ms, median
+            );
+            return Ok(WhisperChunkResult {
+                text: String::new(),
+                is_partial: true,
+                buffer_time: buffer_secs,
+                pause_detected: false,
+                inference_time_ms: Some(inference_ms),
+            });
+        }
+
+        // Hallucination truncation
+        let text = truncate_hallucination(&text);
+
+        // Length guard
+        let max_expected_words = (buffer_secs * MAX_WORDS_PER_SEC * 3.0) as usize;
+        let word_count = text.split_whitespace().count();
+        let text = if word_count > max_expected_words && max_expected_words > 0 {
+            text.split_whitespace()
+                .take(max_expected_words)
+                .collect::<Vec<&str>>()
+                .join(" ")
+        } else {
+            text
+        };
+
+        // In emit_full_text mode, return full buffer transcription as partial
+        if self.config.emit_full_text {
+            self.last_pause_detected = self.pause_boundary_time.take().is_some();
+            self.last_transcription = text.clone();
+            return Ok(WhisperChunkResult {
+                text,
+                is_partial: true,
+                buffer_time: buffer_secs,
+                pause_detected: self.last_pause_detected,
+                inference_time_ms: Some(inference_ms),
+            });
+        }
+
+        // Word-level confirmation (speedy mode)
+        let current_words: Vec<&str> = text.split_whitespace().collect();
+        let last_words: Vec<&str> = self.last_transcription.split_whitespace().collect();
+
+        let common_prefix_len = current_words
+            .iter()
+            .zip(last_words.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        let stable_words: Vec<&str> = current_words[..common_prefix_len].to_vec();
+        let unstable_words: Vec<&str> = current_words[common_prefix_len..].to_vec();
+
+        let buffer_start_time =
+            (self.total_samples_received - self.audio_buffer.len()) as f32 / SAMPLE_RATE as f32;
+
+        // Advance confirmed_end_time
+        if common_prefix_len > self.confirmed_word_count {
+            let total_words = current_words.len().max(1) as f32;
+            let stable_fraction = common_prefix_len as f32 / total_words;
+            let estimated_end = buffer_start_time + (buffer_secs * stable_fraction);
+            if estimated_end > self.confirmed_end_time {
+                self.confirmed_end_time = estimated_end;
+            }
+        }
+
+        // Pause-based force confirmation
+        let pause_force_confirm = if self.config.pause_based_confirm {
+            if let Some(_pause_time) = self.pause_boundary_time {
+                if common_prefix_len > self.confirmed_word_count {
+                    let new_confirmed: Vec<&str> =
+                        stable_words[self.confirmed_word_count..].to_vec();
+                    if !new_confirmed.is_empty() {
+                        self.pause_boundary_time = None;
+                        Some(new_confirmed.join(" "))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Stability-based confirmation
+        let words_to_confirm = if pause_force_confirm.is_some() {
+            pause_force_confirm
+        } else if common_prefix_len > self.confirmed_word_count {
+            let new_confirmed: Vec<&str> = stable_words[self.confirmed_word_count..].to_vec();
+            if !new_confirmed.is_empty() {
+                let new_text = new_confirmed.join(" ");
+                if self.pending_text == new_text {
+                    self.pending_stable_count += 1;
+                    let stable_threshold = self.config.min_stable_count.unwrap_or(MIN_STABLE_COUNT);
+                    if self.pending_stable_count >= stable_threshold {
+                        Some(new_text)
+                    } else {
+                        None
+                    }
+                } else {
+                    self.pending_text = new_text;
+                    self.pending_stable_count = 1;
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Process confirmed words
+        if let Some(new_confirmed_text) = words_to_confirm {
+            let start_time = self.confirmed_end_time
+                - (new_confirmed_text.split_whitespace().count() as f32 * 0.15);
+            let start_time = start_time.max(
+                self.pending_final_segments
+                    .last()
+                    .map(|(_, _, end)| *end)
+                    .unwrap_or(0.0),
+            );
+
+            if !self.confirmed_text.is_empty() {
+                self.confirmed_text.push(' ');
+            }
+            self.confirmed_text.push_str(&new_confirmed_text);
+            self.confirmed_word_count = self.confirmed_text.split_whitespace().count();
+
+            self.pending_final_segments.push((
+                new_confirmed_text,
+                start_time,
+                self.confirmed_end_time,
+            ));
+
+            self.pending_text.clear();
+            self.pending_stable_count = 0;
+        }
+
+        self.last_transcription = text.clone();
+
+        let partial_text = unstable_words.join(" ");
+        Ok(WhisperChunkResult {
+            text: partial_text,
+            is_partial: true,
+            buffer_time: buffer_secs,
+            pause_detected: false,
+            inference_time_ms: Some(inference_ms),
+        })
+    }
+
+    /// Finalize transcription
+    pub fn finalize_transcription(&mut self) -> Result<WhisperChunkResult> {
+        if self.audio_buffer.is_empty() {
+            return Ok(WhisperChunkResult {
+                text: self.last_transcription.clone(),
+                is_partial: false,
+                buffer_time: 0.0,
+                pause_detected: false,
+                inference_time_ms: None,
+            });
+        }
+
+        let audio: Vec<f32> = self.audio_buffer.iter().copied().collect();
+        let text = self.model.transcribe_text(&audio)?;
+        self.audio_buffer.clear();
+
+        Ok(WhisperChunkResult {
+            text,
+            is_partial: false,
+            buffer_time: 0.0,
+            pause_detected: false,
+            inference_time_ms: None,
+        })
+    }
+
+    /// Reset the transcriber state
+    pub fn reset_state(&mut self) {
+        self.audio_buffer.clear();
+        self.total_samples_received = 0;
+        self.samples_since_last_process = 0;
+        self.last_transcription.clear();
+        self.confirmed_text.clear();
+        self.confirmed_word_count = 0;
+        self.confirmed_end_time = 0.0;
+        self.pending_text.clear();
+        self.pending_stable_count = 0;
+        self.pending_final_segments.clear();
+        self.inference_times_ms.clear();
+        self.median_inference_time_ms = 0;
+        self.silence_start_time = None;
+        self.pause_boundary_time = None;
+        self.last_pause_end_time = 0.0;
+        self.last_pause_detected = false;
+    }
+
+    /// Take pending final segments (drains them)
+    pub fn take_final_segments(&mut self) -> Vec<(String, f32, f32)> {
+        std::mem::take(&mut self.pending_final_segments)
+    }
+
+    /// Get buffer duration in seconds
+    pub fn buffer_dur(&self) -> f32 {
+        self.audio_buffer.len() as f32 / SAMPLE_RATE as f32
+    }
+
+    /// Get total audio duration processed
+    pub fn total_dur(&self) -> f32 {
+        self.total_samples_received as f32 / SAMPLE_RATE as f32
+    }
+
+    /// Take pause detected flag
+    pub fn take_pause(&mut self) -> bool {
+        std::mem::replace(&mut self.last_pause_detected, false)
+    }
+}
+
+/// Result from Whisper chunk processing
+#[derive(Debug, Clone)]
+pub struct WhisperChunkResult {
+    pub text: String,
+    pub is_partial: bool,
+    pub buffer_time: f32,
+    pub pause_detected: bool,
+    pub inference_time_ms: Option<u32>,
+}
+
+// ============================================================================
+// StreamingTranscriber implementation
+// ============================================================================
+
+impl StreamingTranscriber for RealtimeWhisper {
+    fn model_info(&self) -> ModelInfo {
+        ModelInfo {
+            id: self.model_id.clone(),
+            display_name: format!("Whisper ({})", self.model_id),
+            description: "OpenAI Whisper model via whisper.cpp".to_string(),
+            supports_diarization: false,
+            languages: vec![
+                "en".to_string(), "de".to_string(), "fr".to_string(), "es".to_string(),
+                "it".to_string(), "pt".to_string(), "nl".to_string(), "pl".to_string(),
+                "ja".to_string(), "zh".to_string(), "ko".to_string(), "ru".to_string(),
+            ],
+            is_loaded: true,
+        }
+    }
+
+    fn push_audio(&mut self, samples: &[f32]) -> Result<StreamingChunkResult> {
+        let result = RealtimeWhisper::push_audio(self, samples)?;
+
+        let mut segments = Vec::new();
+
+        // Emit confirmed (final) segments
+        let final_segs = self.take_final_segments();
+        for (text, start, end) in final_segs {
+            segments.push(TranscriptionSegment {
+                text,
+                raw_text: None,
+                start_time: start,
+                end_time: end,
+                speaker: None,
+                confidence: None,
+                is_final: true,
+                inference_time_ms: result.inference_time_ms,
+            });
+        }
+
+        // Emit partial segment if there's new text
+        if !result.text.is_empty() {
+            let start_time = self.confirmed_end_time;
+            let end_time = self.total_dur();
+
+            segments.push(TranscriptionSegment {
+                text: result.text,
+                raw_text: None,
+                start_time,
+                end_time,
+                speaker: None,
+                confidence: None,
+                is_final: false,
+                inference_time_ms: result.inference_time_ms,
+            });
+        }
+
+        Ok(StreamingChunkResult {
+            segments,
+            buffer_duration: result.buffer_time,
+            total_duration: self.total_dur(),
+        })
+    }
+
+    fn finalize(&mut self) -> Result<StreamingChunkResult> {
+        let result = self.finalize_transcription()?;
+
+        let segments = if !result.text.is_empty() {
+            let end_time = self.total_dur();
+            vec![TranscriptionSegment {
+                text: result.text,
+                raw_text: None,
+                start_time: 0.0,
+                end_time,
+                speaker: None,
+                confidence: None,
+                is_final: true,
+                inference_time_ms: None,
+            }]
+        } else {
+            vec![]
+        };
+
+        Ok(StreamingChunkResult {
+            segments,
+            buffer_duration: 0.0,
+            total_duration: self.total_dur(),
+        })
+    }
+
+    fn reset(&mut self) {
+        self.reset_state();
+    }
+
+    fn buffer_duration(&self) -> f32 {
+        self.buffer_dur()
+    }
+
+    fn total_duration(&self) -> f32 {
+        self.total_dur()
+    }
+
+    fn take_pause_detected(&mut self) -> bool {
+        self.take_pause()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_default() {
+        let config = RealtimeWhisperConfig::default();
+        assert_eq!(config.buffer_size_secs, 10.0);
+        assert_eq!(config.language, "de");
+        assert!(!config.emit_full_text);
+    }
+
+    #[test]
+    fn test_truncate_hallucination_clean() {
+        assert_eq!(truncate_hallucination("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_truncate_hallucination_repeated() {
+        assert_eq!(truncate_hallucination("ok ok ok ok ok"), "ok");
+    }
+
+    #[test]
+    fn test_calculate_rms_silence() {
+        let silence = vec![0.0f32; 1600];
+        assert_eq!(calculate_rms(&silence), 0.0);
+    }
+
+    #[test]
+    fn test_calculate_rms_signal() {
+        let signal = vec![0.1f32; 1600];
+        assert!((calculate_rms(&signal) - 0.1).abs() < 0.001);
+    }
+}

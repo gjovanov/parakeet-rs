@@ -69,6 +69,10 @@ struct Args {
     #[arg(long, env = "CANARY_MODEL_PATH", default_value = "./canary")]
     canary_model: String,
 
+    /// Path to Whisper GGML model file (optional, requires whisper feature)
+    #[arg(long, env = "WHISPER_MODEL_PATH")]
+    whisper_model: Option<String>,
+
     /// Path to diarization model (ONNX)
     #[arg(long, env = "DIAR_MODEL_PATH", default_value = "diar_streaming_sortformer_4spk-v2.onnx")]
     diar_model: String,
@@ -163,6 +167,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Port: {}", args.port);
     eprintln!("TDT Model: {}", args.tdt_model);
     eprintln!("Canary Model: {}", args.canary_model);
+    if let Some(ref whisper) = args.whisper_model {
+        eprintln!("Whisper Model: {}", whisper);
+    }
     eprintln!("Diarization Model: {}", args.diar_model);
     eprintln!("Media Directory: {}", args.media_dir.display());
     eprintln!("Max Sessions: {}", args.max_sessions);
@@ -177,6 +184,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("TDT_MODEL_PATH", &args.tdt_model);
     std::env::set_var("CANARY_MODEL_PATH", &args.canary_model);
     std::env::set_var("DIAR_MODEL_PATH", &args.diar_model);
+    if let Some(ref whisper) = args.whisper_model {
+        std::env::set_var("WHISPER_MODEL_PATH", whisper);
+    }
     std::env::set_var("MEDIA_DIR", &args.media_dir);
     std::env::set_var("MAX_CONCURRENT_SESSIONS", args.max_sessions.to_string());
 

@@ -37,6 +37,9 @@ rubato = "0.15"
 regex = "1"
 once_cell = "1"
 
+# Whisper (optional, gated behind "whisper" feature)
+whisper-rs = { version = "0.16", optional = true }
+
 # Server-only dependencies (optional, gated behind "server" feature)
 clap = { version = "4.5", features = ["derive", "env"], optional = true }
 axum = { version = "0.7", features = ["ws", "multipart"], optional = true }
@@ -68,6 +71,8 @@ openvino = []
 webgpu = []
 sortformer = []
 rnnoise = []
+whisper = ["dep:whisper-rs"]
+whisper-cuda = ["whisper", "whisper-rs/cuda"]
 server = [
     "dep:clap",
     "dep:axum",

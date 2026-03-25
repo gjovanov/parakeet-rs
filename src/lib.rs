@@ -39,6 +39,12 @@ pub mod sortformer_stream;
 pub mod realtime;
 pub mod realtime_canary;
 pub mod realtime_tdt;
+#[cfg(feature = "whisper")]
+pub mod whisper;
+#[cfg(feature = "whisper")]
+pub mod realtime_whisper;
+#[cfg(feature = "whisper")]
+pub mod pause_segmented_whisper;
 
 // Transcription modes
 pub mod streaming_transcriber;
@@ -156,3 +162,11 @@ pub use noise_cancellation::{
 // Pause segmented exports
 pub use pause_segmented::{PauseSegmentedCanary, PauseSegmentedConfig};
 pub use pause_segmented_tdt::PauseSegmentedTDT;
+
+// Whisper exports
+#[cfg(feature = "whisper")]
+pub use whisper::{WhisperModel, WhisperModelConfig, WhisperSegment};
+#[cfg(feature = "whisper")]
+pub use realtime_whisper::{RealtimeWhisper, RealtimeWhisperConfig, WhisperChunkResult};
+#[cfg(feature = "whisper")]
+pub use pause_segmented_whisper::PauseSegmentedWhisper;

@@ -134,6 +134,10 @@ pub fn run_session_transcription(
     }
 
     let is_canary = model_id == "canary-1b";
+    #[cfg(feature = "whisper")]
+    let is_whisper = model_id.starts_with("whisper");
+    #[cfg(feature = "whisper")]
+    let whisper_model_id = if model_id.starts_with("whisper") { Some(model_id.to_string()) } else { None };
 
     // Channel to send audio samples to transcription thread
     let (audio_tx, audio_rx) = std_mpsc::sync_channel::<Vec<f32>>(50000);
@@ -145,6 +149,10 @@ pub fn run_session_transcription(
     let transcription_session = session.clone();
     let transcription_running = running.clone();
     let sentence_completion_clone = sentence_completion.clone();
+    #[cfg(feature = "whisper")]
+    let is_whisper_clone = is_whisper;
+    #[cfg(feature = "whisper")]
+    let whisper_model_id_clone = whisper_model_id.clone();
     let transcription_thread = std::thread::spawn(move || {
         let session_id = transcription_session.id.clone();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -155,6 +163,10 @@ pub fn run_session_transcription(
                 diar_path,
                 exec_config,
                 is_canary,
+                #[cfg(feature = "whisper")]
+                is_whisper_clone,
+                #[cfg(feature = "whisper")]
+                whisper_model_id_clone,
                 mode,
                 language,
                 transcription_running,
@@ -247,6 +259,8 @@ fn run_transcription_inner(
     diar_path: Option<PathBuf>,
     exec_config: parakeet_rs::ExecutionConfig,
     is_canary: bool,
+    #[cfg(feature = "whisper")] is_whisper: bool,
+    #[cfg(feature = "whisper")] whisper_model_id: Option<String>,
     mode: String,
     language: String,
     transcription_running: Arc<AtomicBool>,
@@ -278,6 +292,10 @@ fn run_transcription_inner(
             diar_path,
             exec_config,
             is_canary,
+            #[cfg(feature = "whisper")]
+            is_whisper,
+            #[cfg(feature = "whisper")]
+            whisper_model_id,
             mode: mode.clone(),
             language: language.clone(),
             pause_config,
@@ -288,6 +306,9 @@ fn run_transcription_inner(
         None => return,
     };
 
+    #[cfg(feature = "whisper")]
+    let model_type = if is_whisper { "Whisper" } else { factory::model_type_name(is_canary) };
+    #[cfg(not(feature = "whisper"))]
     let model_type = factory::model_type_name(is_canary);
     eprintln!(
         "[Session {}] Transcription thread started ({})",
@@ -310,6 +331,9 @@ fn run_transcription_inner(
     );
 
     // For canary growing_segments: accumulate confirmed words instead of pushing raw full-buffer text
+    #[cfg(feature = "whisper")]
+    let is_growing_canary = mode == "growing_segments" && (is_canary || is_whisper);
+    #[cfg(not(feature = "whisper"))]
     let is_growing_canary = mode == "growing_segments" && is_canary;
     if is_growing_canary {
         eprintln!(
