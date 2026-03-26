@@ -17,19 +17,24 @@ CHUNK_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
 
 
 async def stream_pcm(
-    filepath: Path,
+    source: Path | str,
     cancel_event: asyncio.Event,
 ) -> AsyncIterator[list[float]]:
     """
-    Spawn FFmpeg to decode audio file to PCM and yield f32 sample chunks.
+    Spawn FFmpeg to decode audio source to PCM and yield f32 sample chunks.
 
-    Uses -re for realtime pacing (critical for playback sync).
+    source can be a file Path or a URL string (e.g. srt://host:port).
+    Uses -re for realtime pacing on files; SRT streams are inherently realtime.
     Yields lists of float samples in [-1.0, 1.0] range.
     """
-    cmd = [
-        "ffmpeg",
-        "-re",  # realtime pacing
-        "-i", str(filepath),
+    source_str = str(source)
+    is_srt = source_str.startswith("srt://")
+
+    cmd = ["ffmpeg"]
+    if not is_srt:
+        cmd += ["-re"]  # realtime pacing (not needed for live SRT)
+    cmd += [
+        "-i", source_str,
         "-f", "s16le",
         "-ar", str(SAMPLE_RATE),
         "-ac", str(CHANNELS),
@@ -43,7 +48,8 @@ async def stream_pcm(
         stderr=asyncio.subprocess.PIPE,
     )
 
-    print(f"[FFmpeg] Started PID={proc.pid} for {filepath.name}", file=sys.stderr)
+    label = Path(source_str).name if not is_srt else source_str
+    print(f"[FFmpeg] Started PID={proc.pid} for {label}", file=sys.stderr)
 
     try:
         assert proc.stdout is not None

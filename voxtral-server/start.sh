@@ -21,7 +21,7 @@ fi
 
 export VOXTRAL_FRONTEND_PATH="${VOXTRAL_FRONTEND_PATH:-$PROJECT_DIR/frontend}"
 export VOXTRAL_MEDIA_DIR="${VOXTRAL_MEDIA_DIR:-$PROJECT_DIR/media}"
-export VOXTRAL_PORT="${VOXTRAL_PORT:-8090}"
+export VOXTRAL_PORT="${VOXTRAL_PORT:-80}"
 export VOXTRAL_VLLM_URL="${VOXTRAL_VLLM_URL:-ws://localhost:8001/v1/realtime}"
 
 echo "=== Voxtral Server ==="

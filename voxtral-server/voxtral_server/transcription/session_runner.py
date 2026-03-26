@@ -54,7 +54,7 @@ def _extract_complete_sentences(text: str) -> tuple[list[str], str]:
         return sentences, last
 
 
-async def run_session(ctx: SessionContext, media_path: Path | None) -> None:
+async def run_session(ctx: SessionContext, media_path: Path | str | None) -> None:
     """
     Main session loop:
     1. Start FFmpeg to decode audio

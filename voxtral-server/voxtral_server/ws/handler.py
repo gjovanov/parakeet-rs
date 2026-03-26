@@ -7,28 +7,59 @@ import json
 import sys
 import uuid
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..config import settings
+from ..config import settings, generate_turn_credentials
 from ..state import app_state
 
 router = APIRouter()
 
 
 def _parse_ice_candidate(data: dict) -> RTCIceCandidate | None:
-    """Parse ICE candidate from frontend JSON."""
+    """Parse ICE candidate from frontend JSON into aiortc RTCIceCandidate.
+
+    The browser sends a raw candidate string like:
+      candidate:188735573 1 udp 50340095 94.130.141.98 11576 typ relay ...
+    aiortc requires parsed fields (component, foundation, ip, port, etc.).
+    """
     candidate_str = data.get("candidate", "")
     if not candidate_str:
         return None
 
-    sdp_mid = data.get("sdpMid", "0")
-    sdp_mline_index = data.get("sdpMLineIndex", 0)
+    # Strip "candidate:" prefix if present
+    if candidate_str.startswith("candidate:"):
+        candidate_str = candidate_str[len("candidate:"):]
+
+    bits = candidate_str.split()
+    if len(bits) < 8:
+        return None
+
+    # Parse optional attributes
+    related_address = None
+    related_port = None
+    tcp_type = None
+    for i in range(8, len(bits) - 1, 2):
+        if bits[i] == "raddr":
+            related_address = bits[i + 1]
+        elif bits[i] == "rport":
+            related_port = int(bits[i + 1])
+        elif bits[i] == "tcptype":
+            tcp_type = bits[i + 1]
 
     return RTCIceCandidate(
-        sdpMid=sdp_mid,
-        sdpMLineIndex=sdp_mline_index,
-        candidate=candidate_str,
+        foundation=bits[0],
+        component=int(bits[1]),
+        protocol=bits[2],
+        priority=int(bits[3]),
+        ip=bits[4],
+        port=int(bits[5]),
+        type=bits[7],
+        relatedAddress=related_address,
+        relatedPort=related_port,
+        tcpType=tcp_type,
+        sdpMid=data.get("sdpMid", "0"),
+        sdpMLineIndex=data.get("sdpMLineIndex", 0),
     )
 
 
@@ -106,16 +137,27 @@ async def websocket_handler(ws: WebSocket, session_id: str):
 
         async def setup_webrtc():
             nonlocal pc
-            pc = RTCPeerConnection()
 
-            # Build ICE servers config
-            ice_servers = [{"urls": "stun:stun.l.google.com:19302"}]
+            # Build ICE servers config and pass to RTCPeerConnection
+            ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302")]
             if settings.turn_server:
-                ice_servers.append({
-                    "urls": settings.turn_server,
-                    "username": settings.turn_username,
-                    "credential": settings.turn_password,
-                })
+                if settings.turn_shared_secret:
+                    username, credential = generate_turn_credentials(
+                        settings.turn_shared_secret, settings.turn_credential_ttl
+                    )
+                else:
+                    username = settings.turn_username
+                    credential = settings.turn_password
+                turn_urls = [settings.turn_server]
+                if "?transport=" not in settings.turn_server:
+                    turn_urls.append(f"{settings.turn_server}?transport=tcp")
+                ice_servers.append(RTCIceServer(
+                    urls=turn_urls,
+                    username=username,
+                    credential=credential,
+                ))
+            config = RTCConfiguration(iceServers=ice_servers)
+            pc = RTCPeerConnection(configuration=config)
 
             # Wait for audio track to be created by session runner
             for _ in range(50):  # up to 5 seconds
