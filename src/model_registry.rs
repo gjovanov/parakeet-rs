@@ -171,36 +171,56 @@ impl ModelRegistry {
             });
         }
 
-        // Register Whisper model if path is configured
+        // Register Whisper model(s) if path is configured.
+        // WHISPER_MODEL_PATH can point to a directory (registers all *.bin files)
+        // or a single .bin file (registers just that one).
         #[cfg(feature = "whisper")]
         {
             if let Ok(whisper_path) = std::env::var("WHISPER_MODEL_PATH") {
                 let path = PathBuf::from(&whisper_path);
-                let whisper_available = path.exists();
 
-                // Derive a model_id from the filename (e.g., "ggml-large-v3-turbo.bin" -> "whisper-large-v3-turbo")
-                let model_id = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|name| {
-                        let name = name.strip_prefix("ggml-").unwrap_or(name);
-                        format!("whisper-{}", name)
-                    })
-                    .unwrap_or_else(|| "whisper".to_string());
+                let model_files: Vec<PathBuf> = if path.is_dir() {
+                    // Scan directory for all .bin files
+                    std::fs::read_dir(&path)
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("bin"))
+                        .collect()
+                } else if path.exists() {
+                    // Single file
+                    vec![path]
+                } else {
+                    vec![]
+                };
 
-                let display_name = format!("Whisper ({})", model_id.strip_prefix("whisper-").unwrap_or(&model_id));
+                for model_file in model_files {
+                    let model_id = model_file
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|name| {
+                            let name = name.strip_prefix("ggml-").unwrap_or(name);
+                            format!("whisper-{}", name)
+                        })
+                        .unwrap_or_else(|| "whisper".to_string());
 
-                registry.models.insert(model_id.clone(), RegisteredModel {
-                    model_type: ModelType::Whisper,
-                    model_id: model_id.clone(),
-                    display_name: display_name.clone(),
-                    model_path: path,
-                    diarization_path: diar_path.clone(),
-                    exec_config: registry.default_exec_config.clone(),
-                    is_available: whisper_available,
-                    description: format!("{} — OpenAI Whisper via whisper.cpp (GGML)", display_name),
-                    languages: ModelType::Whisper.languages().iter().map(|s| s.to_string()).collect(),
-                });
+                    let display_name = format!("Whisper ({})", model_id.strip_prefix("whisper-").unwrap_or(&model_id));
+                    let available = model_file.exists();
+
+                    registry.models.insert(model_id.clone(), RegisteredModel {
+                        model_type: ModelType::Whisper,
+                        model_id: model_id.clone(),
+                        display_name: display_name.clone(),
+                        model_path: model_file,
+                        diarization_path: diar_path.clone(),
+                        exec_config: registry.default_exec_config.clone(),
+                        is_available: available,
+                        description: format!("{} — OpenAI Whisper via whisper.cpp (GGML)", display_name),
+                        languages: ModelType::Whisper.languages().iter().map(|s| s.to_string()).collect(),
+                    });
+                }
             }
         }
 

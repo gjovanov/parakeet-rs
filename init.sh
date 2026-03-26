@@ -228,6 +228,9 @@ download_models() {
         # large-v3-turbo Q5_0 quantized (smaller, slightly lower quality)
         download_file "$whisper_url/ggml-large-v3-turbo-q5_0.bin" "whisper/ggml-large-v3-turbo-q5_0.bin"
 
+        # large-v2 (1.55B params, widely used baseline)
+        download_file "$whisper_url/ggml-large-v2.bin" "whisper/ggml-large-v2.bin"
+
         # large-v3 (1.55B params, reference accuracy)
         download_file "$whisper_url/ggml-large-v3.bin" "whisper/ggml-large-v3.bin"
 
@@ -330,7 +333,7 @@ EOF
 
     # Append Whisper model path if whisper mode enabled
     if [ "$WHISPER_MODE" = true ]; then
-        echo "WHISPER_MODEL_PATH=./whisper/ggml-large-v3-turbo.bin" >> .env
+        echo "WHISPER_MODEL_PATH=./whisper" >> .env
     fi
 
     if [ -n "$public_ip" ]; then

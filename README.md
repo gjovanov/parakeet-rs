@@ -4,14 +4,14 @@
 [![crates.io](https://img.shields.io/crates/v/parakeet-rs.svg)](https://crates.io/crates/parakeet-rs)
 [![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-Real-time speech recognition server and Rust library built on NVIDIA's Parakeet ASR models via ONNX Runtime. Provides a multi-session WebRTC transcription server with live subtitles, speaker diarization, FAB teletext forwarding, and 14 transcription modes optimized for different latency/accuracy trade-offs.
+Real-time speech recognition with two server backends sharing one frontend. The Rust server handles ONNX/whisper.cpp models (CPU/GPU), while a standalone Python server serves Voxtral-Mini-4B via vLLM (GPU). Both provide multi-session WebRTC transcription with live subtitles and speaker diarization.
 
 ## Features
 
 | Category | Features |
 |----------|----------|
-| **ASR Models** | Parakeet TDT 0.6B (English), Canary 1B with KV cache (multilingual: en/de/fr/es), Canary 180M Flash |
-| **Streaming** | 14 transcription modes from extreme-low-latency (~1.3s) to batch VoD processing |
+| **ASR Models** | Parakeet TDT 0.6B (English), Canary 1B (en/de/fr/es), Whisper (99+ langs), Voxtral Mini 4B (13 langs, GPU) |
+| **Streaming** | 3 transcription modes: speedy, growing_segments, pause_segmented |
 | **Diarization** | Sortformer v2 streaming speaker diarization (up to 4 speakers) |
 | **Server** | Axum HTTP/WS server, multi-session, REST API, WebSocket subtitles |
 | **Audio Input** | Media file playback, SRT live streams (14 channels), file upload (up to 2GB) |
@@ -20,7 +20,7 @@ Real-time speech recognition server and Rust library built on NVIDIA's Parakeet 
 | **Text Processing** | GrowingTextMerger (anchor-based tail-overwrite), sentence boundary detection, deduplication, German text normalization (WER evaluation) |
 | **Noise Cancellation** | RNNoise real-time noise suppression |
 | **Frontend** | Web UI with session management, live subtitles, WebRTC audio, transcript export |
-| **Testing** | 243 Rust tests (with WER threshold assertions) + 34 Playwright E2E tests |
+| **Testing** | 173 Rust tests, Voxtral benchmark (3.3% WER on German broadcast) |
 
 ## Tech Stack
 
@@ -28,8 +28,8 @@ Real-time speech recognition server and Rust library built on NVIDIA's Parakeet 
 |-------|------------|
 | **Runtime** | Rust, Tokio async runtime |
 | **Backend** | Axum (HTTP/WS), WebRTC (webrtc-rs), SRT (FFmpeg) |
-| **Inference** | ONNX Runtime (CPU/CUDA/TensorRT), ndarray |
-| **Models** | Parakeet TDT 0.6B, Canary 1B, Canary 180M Flash, Sortformer v2, Silero VAD |
+| **Inference** | ONNX Runtime (CPU/CUDA), whisper.cpp (GGML), vLLM (Voxtral GPU) |
+| **Models** | Parakeet TDT 0.6B, Canary 1B, Whisper (GGML), Voxtral Mini 4B, Sortformer v2, Silero VAD |
 | **Audio** | FFmpeg (decode), Opus (encode), RNNoise (denoise), rubato (resample) |
 | **Frontend** | Vanilla JS, WebRTC API, WebSocket API |
 | **Testing** | Rust test framework, Playwright (Bun), German TTS fixtures |
@@ -120,34 +120,39 @@ See [docs/deployment.md](docs/deployment.md) for full configuration reference.
 
 ## Transcription Models
 
-| Model | Type | Languages | Parameters | Use Case |
-|-------|------|-----------|------------|----------|
-| **Parakeet TDT 0.6B** | FastConformer-TDT | English | 600M | Fast, accurate English ASR with token timestamps |
-| **Canary 1B** | Encoder-Decoder + KV Cache | en, de, fr, es | 1B | Multilingual ASR with O(n) cached decoding |
-| **Canary 180M Flash** | Encoder-Decoder | en, de, fr, es | 180M | Faster multilingual variant, lower accuracy |
-| **Sortformer v2** | Streaming Diarization | Language-agnostic | - | Up to 4-speaker identification |
-| **Silero VAD** | Voice Activity Detection | Language-agnostic | - | Speech/silence boundary detection |
+| Model | Type | Languages | Parameters | Server | Use Case |
+|-------|------|-----------|------------|--------|----------|
+| **Parakeet TDT 0.6B** | FastConformer-TDT | English | 600M | Rust | Fast English ASR with token timestamps |
+| **Canary 1B** | Encoder-Decoder | en, de, fr, es | 1B | Rust | Multilingual ASR |
+| **Whisper** | Encoder-Decoder (GGML) | 99+ languages | 769M-1.55B | Rust | Broad language support via whisper.cpp |
+| **Voxtral Mini 4B** | Causal Streaming | 13 languages | 4.4B | Python | Natively streaming ASR (GPU only, ~480ms latency) |
+| **Sortformer v2** | Streaming Diarization | Language-agnostic | - | Rust | Up to 4-speaker identification |
 
 ## Transcription Modes
 
 | Mode | Latency | Description |
 |------|---------|-------------|
 | `speedy` | ~0.3-1.5s | Best balance of latency and quality with pause detection |
-| `pause_based` | ~0.5-2.0s | Better accuracy with pause detection |
-| `low_latency` | ~3.5s | Fixed latency without pause detection |
-| `ultra_low_latency` | ~2.5s | Faster response for interactive use |
-| `extreme_low_latency` | ~1.3s | Fastest possible, may sacrifice accuracy |
-| `lookahead` | ~1.0-3.0s | Best quality with future context |
-| `vad_speedy` | ~0.3s pause | VAD-triggered, transcribes complete utterances |
-| `vad_pause_based` | ~0.7s pause | VAD-triggered with longer pause detection |
-| `vad_sliding_window` | 5 seg / 10s | Sliding window VAD with context overlap |
-| `asr` | continuous | Pure streaming without VAD |
-| `parallel` | sliding window | Multi-threaded parallel inference (4-8 threads) |
-| `pause_parallel` | pause-triggered | Pause-triggered parallel inference with ordered output |
 | `growing_segments` | ~0.3-1.5s | Incrementally growing transcript with sentence-level deduplication |
-| `vod` | batch | Batch processing in 10-min chunks with deduplication, SRT subtitle export |
+| `pause_segmented` | ~0.5-2.0s | Segment audio by acoustic pauses, transcribe each chunk once |
 
-See [docs/transcription-modes.md](docs/transcription-modes.md) for detailed configuration.
+## Voxtral Server (Python)
+
+Standalone server for Mistral's Voxtral-Mini-4B-Realtime-2602, the first natively streaming ASR model. Runs as a separate process with its own vLLM GPU backend, sharing the same frontend and API contract as the Rust server.
+
+```bash
+cd voxtral-server
+./init.sh              # Setup: venv, PyTorch CUDA, vLLM, model download
+
+# Run (two terminals):
+./start-vllm.sh        # Terminal 1: vLLM on port 8001
+./start.sh             # Terminal 2: voxtral-server on port 8090
+
+# Benchmark:
+python3 scripts/benchmark_voxtral.py --duration 300
+```
+
+Requirements: NVIDIA GPU with >= 16GB VRAM, Python 3.10+, FFmpeg.
 
 ## Documentation
 
@@ -155,11 +160,7 @@ See [docs/transcription-modes.md](docs/transcription-modes.md) for detailed conf
 |----------|-------------|
 | [Architecture](docs/architecture.md) | System design, audio pipeline, session lifecycle, module structure |
 | [API Reference](docs/api.md) | REST endpoints, WebSocket protocol, response format |
-| [Transcription Modes](docs/transcription-modes.md) | All 14 modes with configuration parameters and selection guide |
-| [Frontend](docs/frontend.md) | Web UI, JavaScript modules, subtitle processing pipeline |
-| [FAB Teletext](docs/fab-teletext.md) | FAB forwarding system, teletext splitting, deduplication |
-| [Testing](docs/testing.md) | 243 Rust tests + 34 E2E tests, fixtures, WER thresholds |
-| [Deployment](docs/deployment.md) | Environment variables, CLI arguments, model setup, SRT channels |
+| [Deployment](docs/deployment.md) | Environment variables, CLI arguments, model setup |
 
 ## License
 

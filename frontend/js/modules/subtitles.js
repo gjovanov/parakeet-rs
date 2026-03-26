@@ -1,201 +1,16 @@
 /**
- * Subtitle renderer module
+ * Subtitle renderer module — displays backend output without preprocessing.
  */
 import { formatTime, escapeHtml, createEventEmitter } from './utils.js';
-
-/**
- * Detect if text contains excessive repetition (hallucination)
- * @param {string} text - Text to check
- * @param {number} threshold - Max allowed consecutive repetitions (default: 3)
- * @returns {boolean} True if text appears to be hallucinated
- */
-function isHallucinated(text, threshold = 3) {
-  if (!text || text.length < 10) return false;
-
-  // Split into words
-  const words = text.toLowerCase().trim().split(/\s+/);
-  if (words.length < threshold * 2) return false;
-
-  // Check for consecutive word repetitions
-  let consecutiveCount = 1;
-  for (let i = 1; i < words.length; i++) {
-    if (words[i] === words[i - 1] && words[i].length > 1) {
-      consecutiveCount++;
-      if (consecutiveCount >= threshold) {
-        console.warn('[Subtitles] Hallucination detected: repeated word "' + words[i] + '" ' + consecutiveCount + ' times');
-        return true;
-      }
-    } else {
-      consecutiveCount = 1;
-    }
-  }
-
-  // Check for repeated phrases (2-3 word patterns)
-  for (let patternLen = 2; patternLen <= 3; patternLen++) {
-    if (words.length < patternLen * threshold) continue;
-
-    for (let i = 0; i <= words.length - patternLen * threshold; i++) {
-      const pattern = words.slice(i, i + patternLen).join(' ');
-      let patternCount = 1;
-
-      for (let j = i + patternLen; j <= words.length - patternLen; j += patternLen) {
-        const candidate = words.slice(j, j + patternLen).join(' ');
-        if (candidate === pattern) {
-          patternCount++;
-          if (patternCount >= threshold) {
-            console.warn('[Subtitles] Hallucination detected: repeated phrase "' + pattern + '" ' + patternCount + ' times');
-            return true;
-          }
-        } else {
-          break;
-        }
-      }
-    }
-  }
-
-  return false;
-}
-
-/**
- * Teletext maximum characters per send (42 chars/line × 2 lines)
- */
-const MAX_TELETEXT_CHARS = 84;
-
-/**
- * Containment coefficient threshold: max(|A∩B|/|A|, |A∩B|/|B|).
- * More robust than Jaccard for sliding-window refinements.
- */
-const CONTAINMENT_THRESHOLD = 0.75;
-
-/**
- * Minimum shared words required for containment-based dedup
- */
-const MIN_SHARED_WORDS = 3;
-
-/**
- * How many recently confirmed texts to keep for deduplication
- */
-const CONFIRMED_HISTORY_SIZE = 15;
-
-/**
- * Check if a dot at the given index is inside a number (e.g. "3.5")
- * @param {string} text
- * @param {number} dotIndex
- * @returns {boolean}
- */
-function isDotInNumber(text, dotIndex) {
-  const before = dotIndex > 0 ? text[dotIndex - 1] : '';
-  const after = dotIndex < text.length - 1 ? text[dotIndex + 1] : '';
-  return /\d/.test(before) && /\d/.test(after);
-}
-
-/**
- * Split text into Teletext-compatible chunks (each ≤ maxChars characters).
- * Prefers splitting at sentence boundaries (. ! ?), then clause separators
- * (, ; : – —), then word boundaries (spaces).
- * @param {string} text - Text to split
- * @param {number} maxChars - Maximum characters per chunk (default: 84)
- * @returns {string[]} Array of text chunks
- */
-function splitForTeletext(text, maxChars = MAX_TELETEXT_CHARS) {
-  text = text.trim();
-  if (!text) return [];
-  if (text.length <= maxChars) return [text];
-
-  const result = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= maxChars) {
-      const trimmed = remaining.trim();
-      if (trimmed) result.push(trimmed);
-      break;
-    }
-
-    const searchRegion = remaining.slice(0, maxChars);
-
-    // Find last occurrence of each split-point type
-    let bestSentence = -1;
-    let bestClause = -1;
-    let bestWord = -1;
-
-    for (let i = 0; i < searchRegion.length; i++) {
-      const ch = searchRegion[i];
-      if (ch === '.' && !isDotInNumber(remaining, i)) {
-        bestSentence = i + 1;
-      } else if (ch === '!' || ch === '?') {
-        bestSentence = i + 1;
-      } else if (ch === ',' || ch === ';' || ch === ':' || ch === '–' || ch === '—') {
-        bestClause = i + 1;
-      } else if (ch === ' ') {
-        bestWord = i;
-      }
-    }
-
-    let splitPos;
-    if (bestSentence > 0) {
-      splitPos = bestSentence;
-    } else if (bestClause > 0) {
-      splitPos = bestClause;
-    } else if (bestWord > 0) {
-      splitPos = bestWord;
-    } else {
-      splitPos = maxChars;
-    }
-
-    const piece = remaining.slice(0, splitPos).trim();
-    if (piece) result.push(piece);
-    remaining = remaining.slice(splitPos).trimStart();
-  }
-
-  return result;
-}
-
-/**
- * Check if candidate text is a near-duplicate of any text in history.
- * Uses containment coefficient (max directional word overlap) instead of
- * Jaccard — more robust for sliding-window refinements where Jaccard is
- * diluted by extra words in the union.
- * @param {string} candidate - Text to check
- * @param {string[]} history - Recently confirmed texts
- * @returns {boolean} True if duplicate
- */
-function isDuplicateOfHistory(candidate, history) {
-  if (!candidate || !candidate.trim()) return true;
-  const candidateWords = new Set(candidate.toLowerCase().split(/\s+/).filter(Boolean));
-  if (candidateWords.size === 0) return true;
-
-  for (let i = history.length - 1; i >= 0; i--) {
-    const prev = history[i];
-    // Exact match
-    if (candidate === prev) return true;
-    // Candidate is a subset of something already confirmed
-    if (prev.includes(candidate)) return true;
-    // Containment coefficient: max(|A∩B|/|A|, |A∩B|/|B|)
-    const prevWords = new Set(prev.toLowerCase().split(/\s+/).filter(Boolean));
-    if (prevWords.size === 0) continue;
-    let intersection = 0;
-    for (const w of candidateWords) {
-      if (prevWords.has(w)) intersection++;
-    }
-    if (intersection >= MIN_SHARED_WORDS) {
-      const minSize = Math.min(candidateWords.size, prevWords.size);
-      if (minSize > 0 && intersection / minSize >= CONTAINMENT_THRESHOLD) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
 
 /**
  * Subtitle segment
  * @typedef {Object} Segment
  * @property {string} text - Segment text
- * @property {string|null} growingText - Full growing transcript (incrementally built text)
+ * @property {string|null} growingText - Full growing transcript
  * @property {string|null} delta - New text added since last update
- * @property {boolean|null} tailChanged - Whether the tail was modified (vs pure append)
- * @property {number|null} speaker - Speaker ID (null for unknown)
+ * @property {boolean|null} tailChanged - Whether the tail was modified
+ * @property {number|null} speaker - Speaker ID
  * @property {number} start - Start time in seconds
  * @property {number} end - End time in seconds
  * @property {boolean} isFinal - Whether segment is finalized
@@ -229,28 +44,12 @@ export class SubtitleRenderer {
     /** @type {Segment|null} */
     this.currentSegment = null;
 
-    // Current playback time
     this.currentTime = 0;
 
     // Stale subtitle timeout (clear display after 5 seconds of no updates)
     this.staleTimeoutMs = 5000;
     this.staleTimer = null;
-    this.lastSubtitleTime = 0;
-    this.isStale = false;  // Track if content is stale (should not display)
-
-    // Queue for segments that arrived ahead of playback time
-    /** @type {Segment[]} */
-    this.pendingSegments = [];
-
-    // Confirmed text history for deduplication (Teletext-style)
-    /** @type {string[]} */
-    this.confirmedHistory = [];
-
-    // Sync mode: if true, hold FINAL segments that are too far ahead of playback
-    // DISABLED: The sync logic causes issues when WebRTC reconnects and audio time resets
-    // Transcripts should display immediately as they arrive
-    this.syncWithPlayback = false;
-    this.maxAheadSecs = 30.0;  // Not used when syncWithPlayback is false
+    this.isStale = false;
 
     // Event emitter
     const emitter = createEventEmitter();
@@ -258,15 +57,10 @@ export class SubtitleRenderer {
     this.off = emitter.off.bind(emitter);
     this.emit = emitter.emit.bind(emitter);
 
-    // Initialize display
     this.initializeDisplay();
   }
 
-  /**
-   * Initialize the display elements
-   */
   initializeDisplay() {
-    // Ensure live element has proper structure
     if (this.liveElement) {
       this.liveElement.innerHTML = `
         <div class="speaker-label" data-speaker="?">Speaker ?</div>
@@ -278,159 +72,58 @@ export class SubtitleRenderer {
       this.liveInferenceTimeEl = this.liveElement.querySelector('.inference-time');
     }
 
-    // Clear transcript
     if (this.transcriptElement) {
       this.transcriptElement.innerHTML = '';
     }
   }
 
-  /**
-   * Get color for speaker
-   * @param {number|null} speaker - Speaker ID
-   * @returns {string} CSS color
-   */
   getSpeakerColor(speaker) {
-    if (speaker === null || speaker === undefined) {
-      return '#888888';
-    }
+    if (speaker === null || speaker === undefined) return '#888888';
     return this.options.speakerColors[speaker % this.options.speakerColors.length];
   }
 
-  /**
-   * Get speaker display name
-   * @param {number|null} speaker - Speaker ID
-   * @returns {string} Display name
-   */
   getSpeakerName(speaker) {
-    if (speaker === null || speaker === undefined) {
-      return 'Speaker ?';
-    }
+    if (speaker === null || speaker === undefined) return 'Speaker ?';
     return `Speaker ${speaker}`;
   }
 
   /**
-   * Add a new segment
-   * @param {Segment} segment - Segment to add
+   * Add a new segment — pass-through, no filtering or dedup.
+   * @param {Segment} segment
    */
   addSegment(segment) {
-    console.log('[Subtitles] addSegment called:', {
-      text: segment.text?.substring(0, 50),
-      isFinal: segment.isFinal,
-      start: segment.start,
-      end: segment.end
-    });
-
-    // Filter out hallucinated transcripts (excessive repetition)
-    if (isHallucinated(segment.text)) {
-      console.warn('[Subtitles] Filtering hallucinated segment:', segment.text?.substring(0, 100));
-      this.emit('hallucination', segment);
-      return;
-    }
-
-    // Reset stale timer on any new segment
     this.resetStaleTimer();
 
-    // If sync mode is enabled, check if FINAL segment should be queued
-    // Partial segments always display immediately (they're the live preview)
-    // Only queue FINAL segments that are WAY too far ahead of playback
-    if (this.syncWithPlayback && segment.isFinal && segment.start > this.currentTime + this.maxAheadSecs) {
-      // Add to pending queue (will be processed when playback catches up)
-      this.pendingSegments.push(segment);
-      // Sort by start time
-      this.pendingSegments.sort((a, b) => a.start - b.start);
-      return;
-    }
-
-    this._processSegment(segment);
-  }
-
-  /**
-   * Internal method to process a segment (display it)
-   * @param {Segment} segment - Segment to process
-   */
-  _processSegment(segment) {
     if (segment.isFinal) {
-      // Use segment.text for FINAL entries — it's the confirmed finalized sentence.
-      // Do NOT use growingText here: in growing_segments mode, growingText is the
-      // working buffer (next sentence being built), not the finalized sentence.
-      const displaySource = segment.text;
+      this.segments.push(segment);
 
-      // Split for Teletext (≤84 chars per line) and deduplicate
-      const lines = splitForTeletext(displaySource, MAX_TELETEXT_CHARS);
-      const confirmedLines = lines.filter(
-        line => line && !isDuplicateOfHistory(line, this.confirmedHistory)
-      );
-
-      // Add confirmed lines to transcript
-      for (const line of confirmedLines) {
-        const confirmedSegment = {
-          ...segment,
-          text: line,
-          growingText: line,
-        };
-
-        this.segments.push(confirmedSegment);
-
-        // Trim if over max
-        while (this.segments.length > this.options.maxSegments) {
-          this.segments.shift();
-        }
-
-        this.appendToTranscript(confirmedSegment);
-
-        // Add to confirmed history for future dedup
-        this.confirmedHistory.push(line);
-        while (this.confirmedHistory.length > CONFIRMED_HISTORY_SIZE) {
-          this.confirmedHistory.shift();
-        }
+      while (this.segments.length > this.options.maxSegments) {
+        this.segments.shift();
       }
 
-      // Clear current if it matches
-      if (this.currentSegment &&
-          this.currentSegment.start === segment.start) {
-        this.currentSegment = null;
-      }
-    } else {
-      // Update current (partial) segment
-      this.currentSegment = segment;
+      this.appendToTranscript(segment);
     }
 
-    // Update live display
+    // Always update live display with the latest segment (PARTIAL or FINAL)
+    this.currentSegment = segment;
     this.updateLiveDisplay();
-
-    // Emit event
     this.emit('segment', segment);
   }
 
-  /**
-   * Reset the stale subtitle timer
-   * Clears display if no new messages arrive within timeout
-   */
   resetStaleTimer() {
-    // Clear existing timer
-    if (this.staleTimer) {
-      clearTimeout(this.staleTimer);
-    }
+    if (this.staleTimer) clearTimeout(this.staleTimer);
+    this.isStale = false;
 
-    this.lastSubtitleTime = Date.now();
-    this.isStale = false;  // New content arrived, not stale
-
-    // Set new timer to mark content as stale and clear display
     this.staleTimer = setTimeout(() => {
-      console.log('[Subtitles] Marking content as stale after timeout');
       this.isStale = true;
       this.currentSegment = null;
       this.updateLiveDisplay();
     }, this.staleTimeoutMs);
   }
 
-  /**
-   * Clear the current (partial) subtitle
-   * Called on disconnect or stale timeout
-   */
   clearCurrent() {
     this.currentSegment = null;
-    this.isStale = true;  // Mark as stale to hide display
+    this.isStale = true;
     if (this.staleTimer) {
       clearTimeout(this.staleTimer);
       this.staleTimer = null;
@@ -438,10 +131,6 @@ export class SubtitleRenderer {
     this.updateLiveDisplay();
   }
 
-  /**
-   * Append segment to transcript view
-   * @param {Segment} segment - Segment to append
-   */
   appendToTranscript(segment) {
     if (!this.transcriptElement) return;
 
@@ -456,7 +145,6 @@ export class SubtitleRenderer {
 
     let html = '';
 
-    // Only show speaker label if available (TDT has diarization, Canary doesn't)
     if (speakerName) {
       html += `<span class="speaker-label" style="color: ${color}">[${speakerName}]</span>`;
     }
@@ -467,7 +155,6 @@ export class SubtitleRenderer {
 
     html += `<span class="segment-text">${escapeHtml(segment.text)}</span>`;
 
-    // Show inference time if available
     if (segment.inferenceTimeMs != null) {
       const inferenceTime = segment.inferenceTimeMs >= 1000
         ? `${(segment.inferenceTimeMs / 1000).toFixed(1)}s`
@@ -477,37 +164,23 @@ export class SubtitleRenderer {
 
     el.innerHTML = html;
 
-    // Add click handler to seek
     el.addEventListener('click', () => {
       this.emit('seek', segment.start);
     });
 
-    // Insert at top (newest first) instead of appending at bottom
     this.transcriptElement.insertBefore(el, this.transcriptElement.firstChild);
 
-    // Auto-scroll to top when new segments arrive
     if (this.options.autoScroll) {
       this.scrollToTop();
     }
   }
 
-  /**
-   * Update the live subtitle display
-   */
   updateLiveDisplay() {
-    if (!this.liveElement) {
-      console.warn('[Subtitles] liveElement is null, cannot update live display');
-      return;
-    }
+    if (!this.liveElement) return;
 
-    // Show current partial segment, or the most recent final segment
-    // But don't show anything if content is stale (no updates for a while)
     let segment = null;
-
     if (!this.isStale) {
       segment = this.currentSegment;
-
-      // If no partial segment, show the most recent final segment temporarily
       if (!segment && this.segments.length > 0) {
         segment = this.segments[this.segments.length - 1];
       }
@@ -517,7 +190,6 @@ export class SubtitleRenderer {
       const color = this.getSpeakerColor(segment.speaker);
       const speakerName = this.getSpeakerName(segment.speaker);
 
-      // Only show speaker label if available (TDT has diarization, Canary doesn't)
       if (speakerName) {
         this.liveSpeakerEl.textContent = speakerName;
         this.liveSpeakerEl.style.color = color;
@@ -527,35 +199,10 @@ export class SubtitleRenderer {
         this.liveSpeakerEl.style.display = 'none';
       }
       this.liveSpeakerEl.dataset.speaker = segment.speaker ?? '?';
-      // Use growingText if available (incrementally built transcript), otherwise fallback to text
+
       const displayText = segment.growingText || segment.text;
-      // Split text by sentence-ending punctuation into separate paragraphs
-      const sentences = displayText.split(/((?<!\d)\.(?!\d)|[!?])/);
-      let formattedHtml = '';
-      let currentSentence = '';
+      this.liveTextEl.innerHTML = `<p>${escapeHtml(displayText)}</p>`;
 
-      for (let i = 0; i < sentences.length; i++) {
-        currentSentence += sentences[i];
-        // If this is a sentence-ending punctuation mark, end the sentence
-        if (/^[.!?]$/.test(sentences[i])) {
-          const trimmed = currentSentence.trim();
-          // Skip empty paragraphs or dot-only paragraphs
-          if (trimmed && trimmed !== '.') {
-            formattedHtml += `<p>${escapeHtml(trimmed)}</p>`;
-          }
-          currentSentence = '';
-        }
-      }
-
-      // Add any remaining text that doesn't end with punctuation
-      const remaining = currentSentence.trim();
-      if (remaining && remaining !== '.') {
-        formattedHtml += `<p>${escapeHtml(remaining)}</p>`;
-      }
-
-      this.liveTextEl.innerHTML = formattedHtml || '';
-
-      // Show inference time if available
       if (this.liveInferenceTimeEl && segment.inferenceTimeMs != null) {
         const inferenceTime = segment.inferenceTimeMs >= 1000
           ? `${(segment.inferenceTimeMs / 1000).toFixed(1)}s`
@@ -568,7 +215,6 @@ export class SubtitleRenderer {
       }
 
       this.liveElement.classList.add('active');
-      console.log('[Subtitles] Live display updated, added .active class, text:', displayText?.substring(0, 50), 'tailChanged:', segment.tailChanged);
     } else {
       this.liveSpeakerEl.textContent = '';
       this.liveSpeakerEl.style.display = 'none';
@@ -581,62 +227,25 @@ export class SubtitleRenderer {
     }
   }
 
-  /**
-   * Update current playback time
-   * @param {number} time - Current time in seconds
-   */
   updateTime(time) {
     this.currentTime = time;
-
-    // Process any pending segments that playback has caught up to
-    this._processPendingSegments();
-
     this.updateLiveDisplay();
     this.highlightCurrentSegment(time);
   }
 
-  /**
-   * Process pending segments that are now ready (within maxAhead window)
-   * Only FINAL segments are queued, so we check their start time
-   */
-  _processPendingSegments() {
-    while (this.pendingSegments.length > 0) {
-      const segment = this.pendingSegments[0];
-
-      // Release segment if it's now within the allowed ahead window
-      if (segment.start <= this.currentTime + this.maxAheadSecs) {
-        // Remove from queue and process
-        this.pendingSegments.shift();
-        this._processSegment(segment);
-      } else {
-        // Remaining segments are too far in the future
-        break;
-      }
-    }
-  }
-
-  /**
-   * Highlight segment at current time in transcript
-   * @param {number} time - Current time in seconds
-   */
   highlightCurrentSegment(time) {
     if (!this.transcriptElement) return;
 
-    // Remove existing highlights
     this.transcriptElement.querySelectorAll('.current').forEach(el => {
       el.classList.remove('current');
     });
 
-    // Find and highlight current
     const segments = this.transcriptElement.querySelectorAll('.transcript-segment');
     for (const el of segments) {
       const start = parseFloat(el.dataset.start);
       const end = parseFloat(el.dataset.end);
-
       if (time >= start && time <= end) {
         el.classList.add('current');
-
-        // Scroll into view if auto-scroll enabled
         if (this.options.autoScroll) {
           el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
@@ -645,34 +254,19 @@ export class SubtitleRenderer {
     }
   }
 
-  /**
-   * Get segment at a specific time
-   * @param {number} time - Time in seconds
-   * @returns {Segment|null}
-   */
   getSegmentAtTime(time) {
-    // Check current segment first
     if (this.currentSegment &&
         time >= this.currentSegment.start &&
         time <= this.currentSegment.end) {
       return this.currentSegment;
     }
-
-    // Search finalized segments
     for (let i = this.segments.length - 1; i >= 0; i--) {
       const seg = this.segments[i];
-      if (time >= seg.start && time <= seg.end) {
-        return seg;
-      }
+      if (time >= seg.start && time <= seg.end) return seg;
     }
-
     return null;
   }
 
-  /**
-   * Get full transcript text
-   * @returns {string}
-   */
   getTranscript() {
     return this.segments.map(seg => {
       const speaker = this.getSpeakerName(seg.speaker);
@@ -680,10 +274,6 @@ export class SubtitleRenderer {
     }).join('\n');
   }
 
-  /**
-   * Get transcript with timestamps
-   * @returns {string}
-   */
   getTranscriptWithTimestamps() {
     return this.segments.map(seg => {
       const speaker = this.getSpeakerName(seg.speaker);
@@ -692,116 +282,48 @@ export class SubtitleRenderer {
     }).join('\n');
   }
 
-  /**
-   * Export segments as JSON
-   * @returns {string}
-   */
   exportJSON() {
     return JSON.stringify(this.segments, null, 2);
   }
 
-  /**
-   * Scroll transcript to top (for newest-first display)
-   */
   scrollToTop() {
-    if (this.transcriptElement) {
-      this.transcriptElement.scrollTop = 0;
-    }
+    if (this.transcriptElement) this.transcriptElement.scrollTop = 0;
   }
 
-  /**
-   * Scroll transcript to bottom
-   */
   scrollToBottom() {
-    if (this.transcriptElement) {
-      this.transcriptElement.scrollTop = this.transcriptElement.scrollHeight;
-    }
+    if (this.transcriptElement) this.transcriptElement.scrollTop = this.transcriptElement.scrollHeight;
   }
 
-  /**
-   * Clear all segments
-   */
   clear() {
     this.segments = [];
     this.currentSegment = null;
     this.currentTime = 0;
-    this.pendingSegments = [];
-    this.confirmedHistory = [];
-    this.isStale = false;  // Reset stale state
-
-    // Clear stale timer
+    this.isStale = false;
     if (this.staleTimer) {
       clearTimeout(this.staleTimer);
       this.staleTimer = null;
     }
-
-    if (this.transcriptElement) {
-      this.transcriptElement.innerHTML = '';
-    }
-
+    if (this.transcriptElement) this.transcriptElement.innerHTML = '';
     this.updateLiveDisplay();
     this.emit('clear');
   }
 
-  /**
-   * Enable/disable sync with playback
-   * @param {boolean} enabled - Whether to sync subtitles with playback time
-   */
-  setSyncWithPlayback(enabled) {
-    this.syncWithPlayback = enabled;
-    // If disabling sync, process all pending segments immediately
-    if (!enabled) {
-      while (this.pendingSegments.length > 0) {
-        this._processSegment(this.pendingSegments.shift());
-      }
-    }
-  }
-
-  /**
-   * Set the lookahead window for transcript display
-   * @param {number} seconds - How many seconds ahead to show transcripts
-   */
-  setLookahead(seconds) {
-    this.lookaheadSecs = seconds;
-    // Process any segments that are now within the new lookahead window
-    this._processPendingSegments();
-  }
-
-  /**
-   * Set speaker colors
-   * @param {string[]} colors - Array of CSS colors
-   */
   setSpeakerColors(colors) {
     this.options.speakerColors = colors;
   }
 
-  /**
-   * Toggle auto-scroll
-   * @param {boolean} enabled
-   */
   setAutoScroll(enabled) {
     this.options.autoScroll = enabled;
   }
 
-  /**
-   * Toggle timestamps
-   * @param {boolean} show
-   */
   setShowTimestamps(show) {
     this.options.showTimestamps = show;
-    // Re-render transcript
     this.rerender();
   }
 
-  /**
-   * Re-render transcript from segments
-   * Renders in reverse order (newest first)
-   */
   rerender() {
     if (!this.transcriptElement) return;
-
     this.transcriptElement.innerHTML = '';
-    // Render oldest first so newest ends up at top after insertBefore
     for (const segment of this.segments) {
       this.appendToTranscript(segment);
     }

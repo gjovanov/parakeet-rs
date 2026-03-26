@@ -29,6 +29,8 @@ whisper/
 *.bin
 voxtral-fp16/
 voxtral-q4/
+voxtral-server/.venv/
+.venv/
 __pycache__/
 **/__pycache__/
 *.pyc

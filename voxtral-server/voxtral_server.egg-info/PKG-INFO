@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: voxtral-server
+Version: 0.1.0
+Summary: Standalone Voxtral ASR server with vLLM backend
+Requires-Python: >=3.10
+Requires-Dist: fastapi>=0.115
+Requires-Dist: uvicorn[standard]>=0.34
+Requires-Dist: websockets>=14.0
+Requires-Dist: aiortc>=1.9
+Requires-Dist: pydantic>=2.0
+Requires-Dist: pydantic-settings>=2.0
+Requires-Dist: python-multipart>=0.0.18
+Requires-Dist: aiofiles>=24.0
