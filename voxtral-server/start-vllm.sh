@@ -29,5 +29,5 @@ vllm serve "$MODEL_ID" \
     --port "$PORT" \
     --dtype bfloat16 \
     --enforce-eager \
-    --max-model-len 8192 \
+    --max-model-len 16384 \
     --gpu-memory-utilization 0.95

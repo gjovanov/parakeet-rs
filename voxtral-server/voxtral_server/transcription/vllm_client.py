@@ -21,7 +21,14 @@ class VLLMClient:
 
     Uses a background reader task to continuously consume deltas from vLLM,
     avoiding the problem of missing tokens due to short polling timeouts.
+
+    For long-running streams (SRT), automatically rotates the vLLM session
+    before the context window fills up, preventing EngineCore crashes.
     """
+
+    # Each commit adds ~50-80 audio tokens. At 16384 max_model_len,
+    # rotate well before the limit. 0.5s batches × 200 commits ≈ 100s of audio.
+    MAX_COMMITS_BEFORE_ROTATE = 200
 
     def __init__(self, language: str = "de") -> None:
         self._url = settings.vllm_url
@@ -31,6 +38,7 @@ class VLLMClient:
         # Background reader pushes deltas here
         self._delta_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=4096)
         self._reader_task: asyncio.Task | None = None
+        self._commit_count = 0
 
     async def connect(self) -> None:
         """Connect to vLLM WebSocket and start background reader."""
@@ -43,17 +51,14 @@ class VLLMClient:
             self._connected = True
             print(f"[vLLM] Connected to {self._url}", file=sys.stderr)
 
-            # Send session.update to validate the model (required by OpenAI Realtime API)
+            # Send session.update to validate the model (required by vLLM Realtime API)
+            # vLLM expects "model" at the top level of the event
             session_update = json.dumps({
                 "type": "session.update",
-                "session": {
-                    "input_audio_format": "pcm16",
-                    "input_audio_transcription": {
-                        "model": "mistralai/Voxtral-Mini-4B-Realtime-2602",
-                        "language": self._language,
-                    },
-                    "turn_detection": None,
-                },
+                "model": "mistralai/Voxtral-Mini-4B-Realtime-2602",
+                "input_audio_format": "pcm16",
+                "language": self._language,
+                "turn_detection": None,
             })
             await self._ws.send(session_update)
             print(f"[vLLM] Session update sent (language={self._language})", file=sys.stderr)
@@ -176,9 +181,29 @@ class VLLMClient:
             return
         try:
             await self._ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            self._commit_count += 1
+
+            # Rotate context before hitting max_model_len
+            if self._commit_count >= self.MAX_COMMITS_BEFORE_ROTATE:
+                await self._rotate_session()
         except Exception as e:
             self._connected = False
             print(f"[vLLM] Commit error: {e}", file=sys.stderr)
+
+    async def _rotate_session(self) -> None:
+        """Disconnect and reconnect to reset the vLLM context window.
+
+        This prevents EngineCore crashes when accumulated audio tokens
+        exceed max_model_len on long-running streams.
+        """
+        print(f"[vLLM] Rotating session (after {self._commit_count} commits)", file=sys.stderr)
+        await self.disconnect()
+        self._commit_count = 0
+        try:
+            await self.connect()
+            print(f"[vLLM] Session rotated successfully", file=sys.stderr)
+        except Exception as e:
+            print(f"[vLLM] Rotation failed: {e}", file=sys.stderr)
 
     def drain_deltas(self) -> str:
         """

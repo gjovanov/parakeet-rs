@@ -33,4 +33,4 @@ echo "  Python:   $(python3 --version) ($(which python3))"
 echo ""
 
 cd "$SCRIPT_DIR"
-python3 -m uvicorn voxtral_server.main:app --host 0.0.0.0 --port "$VOXTRAL_PORT"
+python3 -m uvicorn voxtral_server.main:app --host 0.0.0.0 --port "$VOXTRAL_PORT" --log-level warning
