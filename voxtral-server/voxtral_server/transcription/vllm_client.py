@@ -15,6 +15,29 @@ from websockets.asyncio.client import ClientConnection
 from ..config import settings
 
 
+def _needs_space(left: str, right: str) -> bool:
+    """Check if a space is needed between two token strings.
+
+    Fixes missing word boundaries in vLLM transcription deltas.
+    Examples:
+        "erst" + "13"   → True  (letter-digit)
+        "13"  + "und"   → True  (digit-letter)
+        "hello" + "."   → False (no space before punctuation)
+        " the" + "cat"  → False (right already has leading space)
+        "ab"  + " cd"   → False (right already has leading space)
+    """
+    if right[0] in ' \t\n':
+        return False
+    lc = left[-1]
+    rc = right[0]
+    # Letter followed by digit or digit followed by letter
+    if lc.isalpha() and rc.isdigit():
+        return True
+    if lc.isdigit() and rc.isalpha():
+        return True
+    return False
+
+
 class VLLMClient:
     """
     WebSocket client for vLLM's /v1/realtime endpoint (OpenAI Realtime API format).
@@ -210,12 +233,15 @@ class VLLMClient:
         Drain all available deltas from the queue (non-blocking).
 
         Returns concatenated delta text. Called from the session runner
-        after each audio batch.
+        after each audio batch. Fixes word boundaries between tokens
+        (e.g. "erst" + "13" → "erst 13", not "erst13").
         """
         text = ""
         while True:
             try:
                 delta = self._delta_queue.get_nowait()
+                if text and delta and _needs_space(text, delta):
+                    text += " "
                 text += delta
             except asyncio.QueueEmpty:
                 break
