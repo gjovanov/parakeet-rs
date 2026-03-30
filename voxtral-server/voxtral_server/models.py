@@ -107,7 +107,7 @@ class CreateSessionRequest(BaseModel):
     without_transcription: bool = False
     pause_config: dict | None = None
     growing_segments_config: dict | None = None
-    fab_enabled: bool | None = None
+    fab_enabled: str | None = None
     fab_url: str | None = None
     fab_send_type: str | None = None
 

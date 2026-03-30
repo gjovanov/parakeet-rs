@@ -139,7 +139,11 @@ def is_duplicate_of_history(candidate: str, history: deque[str]) -> bool:
 
 
 def validate_fab_url(url: str) -> bool:
-    """Reject FAB URLs pointing to private/loopback addresses (SSRF protection)."""
+    """Reject FAB URLs pointing to dangerous addresses (SSRF protection).
+
+    Blocks loopback, link-local, and cloud metadata endpoints.
+    Allows RFC1918 private IPs since FAB endpoints are typically on internal networks.
+    """
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -147,9 +151,10 @@ def validate_fab_url(url: str) -> bool:
         host = parsed.hostname or ""
         try:
             addr = ipaddress.ip_address(host)
-            if addr.is_private or addr.is_loopback or addr.is_link_local:
+            if addr.is_loopback or addr.is_link_local:
                 return False
         except ValueError:
+            # Hostname — block known dangerous names
             if host in ("localhost", "metadata.google.internal"):
                 return False
         return True

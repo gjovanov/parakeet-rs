@@ -110,7 +110,10 @@ async def create_session(req: CreateSessionRequest):
         return ApiResponse.err("Either media_id or srt_channel_id is required")
 
     # Resolve FAB config: per-session override > server default
-    fab_enabled = req.fab_enabled if req.fab_enabled is not None else settings.fab_enabled
+    if req.fab_enabled is not None:
+        fab_enabled = req.fab_enabled.lower() in ("true", "1", "yes", "enabled")
+    else:
+        fab_enabled = settings.fab_enabled
     fab_url = req.fab_url or settings.fab_url
     fab_send_type = req.fab_send_type or settings.fab_send_type
 
