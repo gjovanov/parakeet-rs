@@ -1,0 +1,51 @@
+services:
+  voxtral:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voxtral-test
+    network_mode: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      # Model cache (avoid re-downloading ~9GB)
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      # Shared frontend and media
+      - ../frontend:/app/frontend:ro
+      - ../media:/app/media:ro
+    environment:
+      # vLLM config (internal to container)
+      - VOXTRAL_VLLM_PORT=8002
+      - VLLM_GPU_MEMORY_UTILIZATION=0.90
+      - VLLM_MAX_MODEL_LEN=16384
+      # voxtral-server config
+      - VOXTRAL_PORT=80
+      - VOXTRAL_FRONTEND_PATH=/app/frontend
+      - VOXTRAL_MEDIA_DIR=/app/media
+      - VOXTRAL_PUBLIC_IP=19.84.17.118
+      # TURN
+      - VOXTRAL_TURN_SERVER=turn:94.130.141.98:3478
+      - VOXTRAL_TURN_SHARED_SECRET=fbd2161186678046767cf2709c0a6ffe6dfca89b8983ef100e53cb89f8f9fa58
+      - VOXTRAL_FORCE_RELAY=true
+      # FAB disabled for test
+      - VOXTRAL_FAB_ENABLED=false
+      # SRT channels (shared with host)
+      - SRT_ENCODER_IP=10.84.17.100
+      - SRT_CHANNELS=[{"name":"ORF1","port":"24001"},{"name":"ORF2","port":"24002"},{"name":"KIDS","port":"24011"},{"name":"ORFS","port":"24004"},{"name":"ORF-B","port":"24013"},{"name":"ORF-K","port":"24019"},{"name":"ORF-NOE","port":"24012"},{"name":"ORF-OOE","port":"24014"},{"name":"ORF-S","port":"24015"},{"name":"ORF-ST","port":"24018"},{"name":"ORF-T","port":"24016"},{"name":"ORF-V","port":"24017"},{"name":"ORF-W","port":"24011"},{"name":"ORF-SI","port":"24016"}]
+      - SRT_LATENCY=200000
+      - SRT_RCVBUF=2097152
+      # GPU
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
