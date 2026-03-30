@@ -78,7 +78,7 @@ class SessionInfo(BaseModel):
     model_name: str = ""
     media_id: str = ""
     media_filename: str = ""
-    state: str = SessionState.CREATED
+    state: SessionState = SessionState.CREATED
     client_count: int = 0
     duration_secs: float = 0.0
     progress_secs: float = 0.0
@@ -90,6 +90,9 @@ class SessionInfo(BaseModel):
     source_type: str = "file"
     sentence_completion: str = "minimal"
     without_transcription: bool = False
+    fab_enabled: bool = False
+    fab_url: str = ""
+    fab_send_type: str = "growing"
 
 
 class CreateSessionRequest(BaseModel):
@@ -104,7 +107,7 @@ class CreateSessionRequest(BaseModel):
     without_transcription: bool = False
     pause_config: dict | None = None
     growing_segments_config: dict | None = None
-    fab_enabled: str | None = None
+    fab_enabled: bool | None = None
     fab_url: str | None = None
     fab_send_type: str | None = None
 

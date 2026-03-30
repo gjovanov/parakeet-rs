@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -18,13 +19,22 @@ from .api.session_routes import router as session_router
 from .config import settings
 from .ws.handler import router as ws_router
 
+# Configure logging with timestamps and levels
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Voxtral Server", version="0.1.0")
 
-# CORS
+# CORS — allow the frontend origin. In production, restrict to actual origins.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # wildcard + credentials is invalid per CORS spec
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -45,16 +55,16 @@ app.include_router(ws_router)
 frontend_path = Path(settings.frontend_path).resolve()
 if frontend_path.is_dir():
     app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="frontend")
-    print(f"[Server] Serving frontend from {frontend_path}", file=sys.stderr)
+    logger.info("Serving frontend from %s", frontend_path)
 else:
-    print(f"[Server] WARNING: Frontend path not found: {frontend_path}", file=sys.stderr)
+    logger.warning("Frontend path not found: %s", frontend_path)
 
 
 def run():
     """Entry point for `voxtral-server` command."""
-    print(f"[Server] Starting on port {settings.port}", file=sys.stderr)
-    print(f"[Server] vLLM URL: {settings.vllm_url}", file=sys.stderr)
-    print(f"[Server] Media dir: {Path(settings.media_dir).resolve()}", file=sys.stderr)
+    logger.info("Starting on port %d", settings.port)
+    logger.info("vLLM URL: %s", settings.vllm_url)
+    logger.info("Media dir: %s", Path(settings.media_dir).resolve())
     uvicorn.run(
         "voxtral_server.main:app",
         host="0.0.0.0",

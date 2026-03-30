@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # Force TURN relay mode
     force_relay: bool = False
 
+    # FAB (Forward Audio/text Broadcast) defaults
+    fab_url: str = ""
+    fab_enabled: bool = False
+    fab_send_type: str = "growing"
+
     model_config = {
         "env_prefix": "VOXTRAL_",
         "env_file": ".env",
@@ -53,6 +58,8 @@ def generate_turn_credentials(shared_secret: str, ttl: int) -> tuple[str, str]:
     """
     expiry = int(time.time()) + ttl
     username = f"{expiry}:parakeet"
+    # SHA1 is mandated by the COTURN shared-secret protocol (RFC 5389).
+    # Do not upgrade to SHA256 without updating the COTURN server config.
     mac = hmac.new(shared_secret.encode(), username.encode(), hashlib.sha1)
     credential = base64.b64encode(mac.digest()).decode()
     return username, credential

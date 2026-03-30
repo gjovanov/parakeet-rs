@@ -1,13 +1,11 @@
 """Model listing, modes, and stub endpoints."""
 
 import json
-import os
-from pathlib import Path
 
-from dotenv import dotenv_values
 from fastapi import APIRouter
 
 from ..models import ApiResponse, ModeInfo, ModelInfo
+from .session_routes import _get_srt_config
 
 router = APIRouter()
 
@@ -53,23 +51,11 @@ async def list_diarization():
     ])
 
 
-def _load_srt_env() -> dict[str, str | None]:
-    """Load SRT config from .env files (shared with parakeet-rs, no VOXTRAL_ prefix)."""
-    env: dict[str, str | None] = {}
-    # Check both voxtral-server/.env and root .env
-    for path in [Path(".env"), Path("../.env")]:
-        if path.is_file():
-            env.update(dotenv_values(path))
-    # os.environ overrides .env files
-    env.update(os.environ)
-    return env
-
-
 @router.get("/api/srt-streams")
 async def list_srt_streams():
-    env = _load_srt_env()
-    encoder_ip = env.get("SRT_ENCODER_IP", "") or ""
-    channels_json = env.get("SRT_CHANNELS", "") or ""
+    env = _get_srt_config()
+    encoder_ip = env.get("SRT_ENCODER_IP", "")
+    channels_json = env.get("SRT_CHANNELS", "")
 
     if not encoder_ip or not channels_json:
         return {"success": True, "streams": [], "configured": False}

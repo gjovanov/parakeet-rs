@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
 from ..config import settings
 from ..models import MediaFile
+
+logger = logging.getLogger(__name__)
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".wma"}
 
@@ -25,7 +28,8 @@ async def get_duration(filepath: Path) -> float:
         )
         stdout, _ = await proc.communicate()
         return float(stdout.decode().strip())
-    except Exception:
+    except Exception as e:
+        logger.warning("ffprobe failed for %s: %s", filepath.name, e)
         return 0.0
 
 
@@ -35,17 +39,18 @@ async def list_media() -> list[MediaFile]:
     if not media_dir.is_dir():
         return []
 
-    files = []
+    entries = []
     for entry in sorted(media_dir.iterdir()):
-        if not entry.is_file():
-            continue
-        if entry.suffix.lower() not in AUDIO_EXTENSIONS:
-            continue
+        if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
+            entries.append(entry)
 
-        media_id = entry.stem
-        duration = await get_duration(entry)
+    # Probe durations concurrently instead of sequentially
+    durations = await asyncio.gather(*[get_duration(e) for e in entries])
+
+    files = []
+    for entry, duration in zip(entries, durations):
         files.append(MediaFile(
-            id=media_id,
+            id=entry.stem,
             filename=entry.name,
             format=entry.suffix.lstrip("."),
             duration_secs=round(duration, 2),
@@ -60,13 +65,22 @@ async def save_upload(filename: str, data: bytes) -> MediaFile:
     media_dir = Path(settings.media_dir).resolve()
     media_dir.mkdir(parents=True, exist_ok=True)
 
-    filepath = media_dir / filename
+    # Sanitize filename: strip directory components to prevent path traversal
+    safe_name = Path(filename).name
+    if not safe_name:
+        raise ValueError("Invalid filename")
+
+    filepath = media_dir / safe_name
+    # Double-check resolved path is inside media_dir
+    if not filepath.resolve().is_relative_to(media_dir):
+        raise ValueError("Invalid filename")
+
     filepath.write_bytes(data)
 
     duration = await get_duration(filepath)
     return MediaFile(
         id=filepath.stem,
-        filename=filename,
+        filename=safe_name,
         format=filepath.suffix.lstrip("."),
         duration_secs=round(duration, 2),
         size_bytes=len(data),
@@ -76,6 +90,8 @@ async def save_upload(filename: str, data: bytes) -> MediaFile:
 def delete_media(media_id: str) -> bool:
     """Delete a media file by ID. Returns True if deleted."""
     media_dir = Path(settings.media_dir).resolve()
+    if not media_dir.is_dir():
+        return False
     for entry in media_dir.iterdir():
         if entry.stem == media_id and entry.is_file():
             entry.unlink()
@@ -86,6 +102,8 @@ def delete_media(media_id: str) -> bool:
 def get_media_path(media_id: str) -> Path | None:
     """Get the full path to a media file by ID."""
     media_dir = Path(settings.media_dir).resolve()
+    if not media_dir.is_dir():
+        return None
     for entry in media_dir.iterdir():
         if entry.stem == media_id and entry.is_file():
             if entry.suffix.lower() in AUDIO_EXTENSIONS:

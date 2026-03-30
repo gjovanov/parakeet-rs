@@ -7,14 +7,10 @@ from ..config import settings, generate_turn_credentials
 router = APIRouter()
 
 
-@router.get("/api/config")
-async def get_config():
-    host = settings.public_ip or "localhost"
-    port = settings.port
-
+def _build_ice_servers_json() -> list[dict]:
+    """Build ICE servers config as JSON-serializable dicts for the frontend."""
     ice_servers = [{"urls": "stun:stun.l.google.com:19302"}]
     if settings.turn_server:
-        # Generate ephemeral credentials if shared secret is configured
         if settings.turn_shared_secret:
             username, credential = generate_turn_credentials(
                 settings.turn_shared_secret, settings.turn_credential_ttl
@@ -32,10 +28,17 @@ async def get_config():
             "username": username,
             "credential": credential,
         })
+    return ice_servers
+
+
+@router.get("/api/config")
+async def get_config():
+    host = settings.public_ip or "localhost"
+    port = settings.port
 
     return {
         "wsUrl": f"ws://{host}:{port}/ws",
-        "iceServers": ice_servers,
+        "iceServers": _build_ice_servers_json(),
         "iceTransportPolicy": "relay" if settings.force_relay else "all",
         "audio": {"sampleRate": 16000, "channels": 1, "bufferSize": 4096},
         "subtitles": {"maxSegments": 1000, "autoScroll": True, "showTimestamps": True},
@@ -49,4 +52,7 @@ async def get_config():
             "maxDelay": 30000,
             "maxAttempts": 10,
         },
+        "fabEnabled": settings.fab_enabled,
+        "fabUrl": settings.fab_url,
+        "fabSendType": settings.fab_send_type,
     }

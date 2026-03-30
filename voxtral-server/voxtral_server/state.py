@@ -23,6 +23,9 @@ class SessionContext:
         self.audio_track: Any = None
         # Event signaling that a WebRTC client is ready
         self.client_ready = asyncio.Event()
+        # FAB forwarder queue and task (created by start_fab_forwarder)
+        self.fab_queue: asyncio.Queue | None = None
+        self.fab_task: asyncio.Task | None = None
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -49,6 +52,19 @@ class SessionContext:
                     q.put_nowait(msg)
                 except asyncio.QueueFull:
                     pass
+        # Also feed the FAB forwarder queue if attached
+        if self.fab_queue is not None:
+            try:
+                self.fab_queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                try:
+                    self.fab_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    self.fab_queue.put_nowait(msg)
+                except asyncio.QueueFull:
+                    pass
 
 
 class AppState:
@@ -67,9 +83,12 @@ class AppState:
 
     def remove_session(self, session_id: str) -> None:
         ctx = self.sessions.pop(session_id, None)
-        if ctx and ctx.task and not ctx.task.done():
+        if ctx:
             ctx.cancel_event.set()
-            ctx.task.cancel()
+            if ctx.task and not ctx.task.done():
+                ctx.task.cancel()
+            if ctx.fab_task and not ctx.fab_task.done():
+                ctx.fab_task.cancel()
 
     def list_sessions(self) -> list[SessionInfo]:
         return [ctx.info for ctx in self.sessions.values()]

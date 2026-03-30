@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import struct
-import sys
 from typing import AsyncIterator
 
+import numpy as np
 import websockets
 from websockets.asyncio.client import ClientConnection
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _needs_space(left: str, right: str) -> bool:
@@ -72,7 +75,7 @@ class VLLMClient:
                 max_size=10 * 1024 * 1024,  # 10MB
             )
             self._connected = True
-            print(f"[vLLM] Connected to {self._url}", file=sys.stderr)
+            logger.info("vLLM connected to %s", self._url)
 
             # Send session.update to validate the model (required by vLLM Realtime API)
             # vLLM expects "model" at the top level of the event
@@ -84,30 +87,31 @@ class VLLMClient:
                 "turn_detection": None,
             })
             await self._ws.send(session_update)
-            print(f"[vLLM] Session update sent (language={self._language})", file=sys.stderr)
+            logger.info("vLLM session update sent (language=%s)", self._language)
 
             # Wait for session.updated confirmation
             try:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
                 msg = json.loads(raw)
                 if msg.get("type") == "session.updated":
-                    print(f"[vLLM] Session validated", file=sys.stderr)
+                    logger.info("vLLM session validated")
                 else:
-                    print(f"[vLLM] Unexpected response: {msg.get('type', 'unknown')}", file=sys.stderr)
+                    logger.warning("vLLM unexpected response: %s", msg.get('type', 'unknown'))
             except asyncio.TimeoutError:
-                print(f"[vLLM] No session.updated response (continuing anyway)", file=sys.stderr)
+                logger.warning("vLLM no session.updated response, continuing")
 
             # Start background reader
             self._reader_task = asyncio.create_task(self._background_reader())
 
         except Exception as e:
             self._connected = False
-            print(f"[vLLM] Connection failed: {e}", file=sys.stderr)
+            logger.error("vLLM connection failed: %s", e)
             raise
 
     async def _background_reader(self) -> None:
         """Continuously read from vLLM WebSocket and enqueue deltas."""
-        assert self._ws is not None
+        if self._ws is None:
+            raise RuntimeError("WebSocket not connected")
         delta_count = 0
         other_count = 0
         try:
@@ -131,21 +135,21 @@ class VLLMClient:
                                 pass
                             self._delta_queue.put_nowait(delta)
                 elif msg_type == "error":
-                    print(f"[vLLM] Error: {msg.get('error', msg)}", file=sys.stderr)
+                    logger.error("vLLM error: %s", msg.get('error', msg))
                 else:
                     other_count += 1
                     if other_count <= 5:
-                        print(f"[vLLM] Reader got: {msg_type}", file=sys.stderr)
+                        logger.debug("vLLM reader got: %s", msg_type)
 
         except websockets.exceptions.ConnectionClosed as e:
-            print(f"[vLLM] Connection closed: {e} (received {delta_count} deltas)", file=sys.stderr)
+            logger.info("vLLM connection closed: %s (%d deltas)", e, delta_count)
         except asyncio.CancelledError:
-            print(f"[vLLM] Reader cancelled (received {delta_count} deltas)", file=sys.stderr)
+            logger.info("vLLM reader cancelled (%d deltas)", delta_count)
         except Exception as e:
-            print(f"[vLLM] Reader error: {e} (received {delta_count} deltas)", file=sys.stderr)
+            logger.error("vLLM reader error: %s (%d deltas)", e, delta_count)
         finally:
             self._connected = False
-            print(f"[vLLM] Reader stopped (total {delta_count} deltas, {other_count} other msgs)", file=sys.stderr)
+            logger.info("vLLM reader stopped (%d deltas, %d other)", delta_count, other_count)
 
     async def disconnect(self) -> None:
         """Close vLLM WebSocket and stop reader."""
@@ -177,12 +181,12 @@ class VLLMClient:
         input_audio_buffer.append message.
         """
         if not self.is_connected:
-            print(f"[vLLM] WARNING: send_audio skipped — not connected (queue={self._delta_queue.qsize()})", file=sys.stderr)
+            logger.warning("send_audio skipped — not connected (queue=%d)", self._delta_queue.qsize())
             return
 
-        # Convert f32 to s16le bytes
-        n = len(samples_f32)
-        raw = struct.pack(f"<{n}h", *[int(max(-32768, min(32767, s * 32768))) for s in samples_f32])
+        # Convert f32 to s16le bytes using numpy (fast)
+        arr = np.array(samples_f32, dtype=np.float32)
+        raw = np.clip(arr * 32768, -32768, 32767).astype(np.int16).tobytes()
 
         # Base64 encode
         audio_b64 = base64.b64encode(raw).decode("ascii")
@@ -196,7 +200,7 @@ class VLLMClient:
             await self._ws.send(msg)
         except Exception as e:
             self._connected = False
-            print(f"[vLLM] Send error: {e}", file=sys.stderr)
+            logger.error("vLLM send error: %s", e)
 
     async def commit(self) -> None:
         """Send commit message to trigger transcription."""
@@ -211,7 +215,7 @@ class VLLMClient:
                 await self._rotate_session()
         except Exception as e:
             self._connected = False
-            print(f"[vLLM] Commit error: {e}", file=sys.stderr)
+            logger.error("vLLM commit error: %s", e)
 
     async def _rotate_session(self) -> None:
         """Disconnect and reconnect to reset the vLLM context window.
@@ -219,14 +223,14 @@ class VLLMClient:
         This prevents EngineCore crashes when accumulated audio tokens
         exceed max_model_len on long-running streams.
         """
-        print(f"[vLLM] Rotating session (after {self._commit_count} commits)", file=sys.stderr)
+        logger.info("vLLM rotating session (%d commits)", self._commit_count)
         await self.disconnect()
         self._commit_count = 0
         try:
             await self.connect()
-            print(f"[vLLM] Session rotated successfully", file=sys.stderr)
+            logger.info("vLLM session rotated successfully")
         except Exception as e:
-            print(f"[vLLM] Rotation failed: {e}", file=sys.stderr)
+            logger.error("vLLM rotation failed: %s", e)
 
     def drain_deltas(self) -> str:
         """

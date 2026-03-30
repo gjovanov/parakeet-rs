@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
+import logging
 import uuid
 
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
@@ -13,7 +13,31 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..config import settings, generate_turn_credentials
 from ..state import app_state
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+def build_ice_servers() -> list[RTCIceServer]:
+    """Build ICE server list from settings (shared with config_routes)."""
+    ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302")]
+    if settings.turn_server:
+        if settings.turn_shared_secret:
+            username, credential = generate_turn_credentials(
+                settings.turn_shared_secret, settings.turn_credential_ttl
+            )
+        else:
+            username = settings.turn_username
+            credential = settings.turn_password
+        turn_urls = [settings.turn_server]
+        if "?transport=" not in settings.turn_server:
+            turn_urls.append(f"{settings.turn_server}?transport=tcp")
+        ice_servers.append(RTCIceServer(
+            urls=turn_urls,
+            username=username,
+            credential=credential,
+        ))
+    return ice_servers
 
 
 def _parse_ice_candidate(data: dict) -> RTCIceCandidate | None:
@@ -35,32 +59,36 @@ def _parse_ice_candidate(data: dict) -> RTCIceCandidate | None:
     if len(bits) < 8:
         return None
 
-    # Parse optional attributes
-    related_address = None
-    related_port = None
-    tcp_type = None
-    for i in range(8, len(bits) - 1, 2):
-        if bits[i] == "raddr":
-            related_address = bits[i + 1]
-        elif bits[i] == "rport":
-            related_port = int(bits[i + 1])
-        elif bits[i] == "tcptype":
-            tcp_type = bits[i + 1]
+    try:
+        # Parse optional attributes
+        related_address = None
+        related_port = None
+        tcp_type = None
+        for i in range(8, len(bits) - 1, 2):
+            if bits[i] == "raddr":
+                related_address = bits[i + 1]
+            elif bits[i] == "rport":
+                related_port = int(bits[i + 1])
+            elif bits[i] == "tcptype":
+                tcp_type = bits[i + 1]
 
-    return RTCIceCandidate(
-        foundation=bits[0],
-        component=int(bits[1]),
-        protocol=bits[2],
-        priority=int(bits[3]),
-        ip=bits[4],
-        port=int(bits[5]),
-        type=bits[7],
-        relatedAddress=related_address,
-        relatedPort=related_port,
-        tcpType=tcp_type,
-        sdpMid=data.get("sdpMid", "0"),
-        sdpMLineIndex=data.get("sdpMLineIndex", 0),
-    )
+        return RTCIceCandidate(
+            foundation=bits[0],
+            component=int(bits[1]),
+            protocol=bits[2],
+            priority=int(bits[3]),
+            ip=bits[4],
+            port=int(bits[5]),
+            type=bits[7],
+            relatedAddress=related_address,
+            relatedPort=related_port,
+            tcpType=tcp_type,
+            sdpMid=data.get("sdpMid", "0"),
+            sdpMLineIndex=data.get("sdpMLineIndex", 0),
+        )
+    except (ValueError, IndexError) as e:
+        logger.warning("Failed to parse ICE candidate: %s", e)
+        return None
 
 
 @router.websocket("/ws/{session_id}")
@@ -75,7 +103,7 @@ async def websocket_handler(ws: WebSocket, session_id: str):
         return
 
     ctx.info.client_count += 1
-    print(f"[WS {client_id}] Connected to session {session_id}", file=sys.stderr)
+    logger.info("[WS %s] Connected to session %s", client_id, session_id)
 
     # Send welcome
     await ws.send_json({
@@ -124,7 +152,7 @@ async def websocket_handler(ws: WebSocket, session_id: str):
                     sdp = msg.get("sdp", "")
                     desc = RTCSessionDescription(sdp=sdp, type="answer")
                     await pc.setRemoteDescription(desc)
-                    print(f"[WS {client_id}] SDP answer set", file=sys.stderr)
+                    logger.info("[WS %s] SDP answer set", client_id)
                     # Signal that a client is ready for audio
                     ctx.client_ready.set()
 
@@ -138,25 +166,7 @@ async def websocket_handler(ws: WebSocket, session_id: str):
         async def setup_webrtc():
             nonlocal pc
 
-            # Build ICE servers config and pass to RTCPeerConnection
-            ice_servers = [RTCIceServer(urls="stun:stun.l.google.com:19302")]
-            if settings.turn_server:
-                if settings.turn_shared_secret:
-                    username, credential = generate_turn_credentials(
-                        settings.turn_shared_secret, settings.turn_credential_ttl
-                    )
-                else:
-                    username = settings.turn_username
-                    credential = settings.turn_password
-                turn_urls = [settings.turn_server]
-                if "?transport=" not in settings.turn_server:
-                    turn_urls.append(f"{settings.turn_server}?transport=tcp")
-                ice_servers.append(RTCIceServer(
-                    urls=turn_urls,
-                    username=username,
-                    credential=credential,
-                ))
-            config = RTCConfiguration(iceServers=ice_servers)
+            config = RTCConfiguration(iceServers=build_ice_servers())
             pc = RTCPeerConnection(configuration=config)
 
             # Wait for audio track to be created by session runner
@@ -169,9 +179,9 @@ async def websocket_handler(ws: WebSocket, session_id: str):
             audio_track = getattr(ctx, "audio_track", None)
             if audio_track:
                 pc.addTrack(audio_track)
-                print(f"[WS {client_id}] Audio track added", file=sys.stderr)
+                logger.info("[WS %s] Audio track added", client_id)
             else:
-                print(f"[WS {client_id}] WARNING: No audio track available", file=sys.stderr)
+                logger.warning("[WS %s] No audio track available", client_id)
 
             # Handle ICE candidates
             @pc.on("icecandidate")
@@ -193,7 +203,7 @@ async def websocket_handler(ws: WebSocket, session_id: str):
                 "type": "offer",
                 "sdp": pc.localDescription.sdp,
             })
-            print(f"[WS {client_id}] SDP offer sent", file=sys.stderr)
+            logger.info("[WS %s] SDP offer sent", client_id)
 
         async def forward_subtitles():
             while True:
@@ -209,7 +219,7 @@ async def websocket_handler(ws: WebSocket, session_id: str):
                 except WebSocketDisconnect:
                     break
                 except Exception as e:
-                    print(f"[WS {client_id}] Forward error: {e}", file=sys.stderr)
+                    logger.warning("[WS %s] Forward error: %s", client_id, e)
                     break
 
         # Run both tasks concurrently
@@ -222,10 +232,10 @@ async def websocket_handler(ws: WebSocket, session_id: str):
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        print(f"[WS {client_id}] Error: {e}", file=sys.stderr)
+        logger.error("[WS %s] Error: %s", client_id, e)
     finally:
         ctx.info.client_count = max(0, ctx.info.client_count - 1)
         ctx.unsubscribe(sub_queue)
         if pc:
             await pc.close()
-        print(f"[WS {client_id}] Disconnected from session {session_id}", file=sys.stderr)
+        logger.info("[WS %s] Disconnected from session %s", client_id, session_id)

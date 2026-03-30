@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 
-from dotenv import dotenv_values
 from fastapi import APIRouter
 
 from ..config import settings
@@ -16,17 +16,33 @@ from ..media.manager import get_media_path
 from ..models import ApiResponse, CreateSessionRequest, SessionInfo, SessionState
 from ..state import app_state
 
+logger = logging.getLogger(__name__)
+
+# --- Shared SRT config (loaded once, not per-request) ---
+
+_srt_config: dict[str, str] | None = None
+
+
+def _get_srt_config() -> dict[str, str]:
+    """Load and cache SRT config from .env files + os.environ."""
+    global _srt_config
+    if _srt_config is None:
+        from dotenv import dotenv_values
+        env: dict[str, str | None] = {}
+        for path in [Path(".env"), Path("../.env")]:
+            if path.is_file():
+                env.update(dotenv_values(path))
+        env.update(os.environ)
+        _srt_config = {k: v for k, v in env.items() if v is not None}
+    return _srt_config
+
 
 def _resolve_srt_url(channel_id: int) -> str | None:
     """Build an SRT URL from channel ID using SRT_ENCODER_IP + SRT_CHANNELS."""
-    env: dict[str, str | None] = {}
-    for path in [Path(".env"), Path("../.env")]:
-        if path.is_file():
-            env.update(dotenv_values(path))
-    env.update(os.environ)
+    env = _get_srt_config()
 
-    encoder_ip = env.get("SRT_ENCODER_IP", "") or ""
-    channels_json = env.get("SRT_CHANNELS", "") or ""
+    encoder_ip = env.get("SRT_ENCODER_IP", "")
+    channels_json = env.get("SRT_CHANNELS", "")
     if not encoder_ip or not channels_json:
         return None
 
@@ -38,10 +54,26 @@ def _resolve_srt_url(channel_id: int) -> str | None:
     if channel_id < 0 or channel_id >= len(channels):
         return None
 
-    port = channels[channel_id].get("port", "")
-    latency = env.get("SRT_LATENCY", "200000") or "200000"
-    rcvbuf = env.get("SRT_RCVBUF", "2097152") or "2097152"
+    # Validate port is a valid integer
+    port_str = channels[channel_id].get("port", "")
+    try:
+        port = int(port_str)
+        if not (1 <= port <= 65535):
+            return None
+    except (ValueError, TypeError):
+        return None
+
+    latency = env.get("SRT_LATENCY", "200000")
+    rcvbuf = env.get("SRT_RCVBUF", "2097152")
+    # Validate latency/rcvbuf are positive integers
+    try:
+        int(latency)
+        int(rcvbuf)
+    except (ValueError, TypeError):
+        latency, rcvbuf = "200000", "2097152"
+
     return f"srt://{encoder_ip}:{port}?mode=caller&latency={latency}&rcvbuf={rcvbuf}"
+
 
 router = APIRouter()
 
@@ -77,6 +109,11 @@ async def create_session(req: CreateSessionRequest):
     else:
         return ApiResponse.err("Either media_id or srt_channel_id is required")
 
+    # Resolve FAB config: per-session override > server default
+    fab_enabled = req.fab_enabled if req.fab_enabled is not None else settings.fab_enabled
+    fab_url = req.fab_url or settings.fab_url
+    fab_send_type = req.fab_send_type or settings.fab_send_type
+
     info = SessionInfo(
         model_id=req.model_id or "voxtral-mini-4b",
         model_name="Voxtral Mini 4B Realtime",
@@ -90,10 +127,15 @@ async def create_session(req: CreateSessionRequest):
         sentence_completion=req.sentence_completion,
         without_transcription=req.without_transcription,
         source_type=source_type,
+        fab_enabled=fab_enabled,
+        fab_url=fab_url,
+        fab_send_type=fab_send_type,
     )
 
     app_state.add_session(info)
-    print(f"[Session {info.id}] Created (model={info.model_id}, source={source_type}, media={info.media_id}, lang={info.language})", file=sys.stderr)
+    fab_label = f", fab={fab_url}" if fab_enabled else ""
+    logger.info("Session %s created (model=%s, source=%s, media=%s, lang=%s%s)",
+                info.id, info.model_id, source_type, info.media_id, info.language, fab_label)
     return ApiResponse.ok(info.model_dump())
 
 
@@ -116,7 +158,7 @@ async def stop_session(session_id: str):
     if ctx.task and not ctx.task.done():
         ctx.task.cancel()
 
-    print(f"[Session {session_id}] Stopped", file=sys.stderr)
+    logger.info("Session %s stopped", session_id)
     app_state.remove_session(session_id)
     return ApiResponse.ok({"stopped": session_id})
 
@@ -132,9 +174,12 @@ async def start_session(session_id: str):
 
     ctx.info.state = SessionState.STARTING
 
+    # Spawn FAB forwarder before audio starts (so queue is attached before broadcasts)
+    from ..transcription.fab_forwarder import start_fab_forwarder
+    start_fab_forwarder(ctx)
+
     # Resolve audio source: SRT URL or media file path
     if ctx.info.source_type == "srt":
-        # media_id holds the SRT URL for SRT sessions
         audio_source: Path | str = ctx.info.media_id
     else:
         media_path = get_media_path(ctx.info.media_id)
@@ -143,7 +188,6 @@ async def start_session(session_id: str):
             return ApiResponse.err(f"Media '{ctx.info.media_id}' not found")
         audio_source = media_path
 
-    # Import here to avoid circular imports
     from ..transcription.session_runner import run_session
 
     ctx.task = asyncio.create_task(
@@ -151,6 +195,6 @@ async def start_session(session_id: str):
         name=f"session-{session_id}",
     )
 
-    ctx.info.state = SessionState.RUNNING
-    print(f"[Session {session_id}] Started (source={audio_source})", file=sys.stderr)
+    # Return STARTING, not RUNNING — let the task set RUNNING when ready
+    logger.info("Session %s starting (source=%s)", session_id, audio_source)
     return ApiResponse.ok(ctx.info.model_dump())
