@@ -12,6 +12,7 @@ import numpy as np
 
 from ..audio.ffmpeg_source import resample_16k_to_48k, stream_pcm, SAMPLE_RATE
 from ..audio.webrtc_track import PcmAudioTrack
+from .vllm_client import _needs_space
 from ..state import SessionContext
 from ..models import SessionState
 
@@ -160,6 +161,8 @@ async def _vllm_task(
         if not batch_delta:
             continue
 
+        if growing_text and batch_delta and _needs_space(growing_text, batch_delta):
+            growing_text += " "
         growing_text += batch_delta
         current_time = total_samples / SAMPLE_RATE
 
@@ -208,6 +211,8 @@ async def _vllm_task(
 
         final_delta = vllm.drain_deltas()
         if final_delta:
+            if growing_text and _needs_space(growing_text, final_delta):
+                growing_text += " "
             growing_text += final_delta
 
         if growing_text.strip():

@@ -26,7 +26,7 @@ VLLM_PID=$!
 
 # --- Wait for vLLM health ---
 echo "[entrypoint] Waiting for vLLM to become ready..."
-TIMEOUT=180
+TIMEOUT=600
 ELAPSED=0
 while [ $ELAPSED -lt $TIMEOUT ]; do
     if curl -sf "http://localhost:${VLLM_PORT}/health" > /dev/null 2>&1; then
